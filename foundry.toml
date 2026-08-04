@@ -1,0 +1,42 @@
+[profile.default]
+optimizer_runs = 200
+via_ir = true
+src = "src"
+out = "out"
+solc_version = "0.8.30"
+optimizer = true
+libs = ["lib"]
+remappings = [
+    "@openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/",
+    "@chainlink/contracts/=lib/chainlink-evm/contracts/",
+    "interfaces/=src/interfaces/",
+    "registry/=src/contracts/registry/",
+    "libraries/=src/libraries/",
+    "contracts/=src/contracts/",
+]
+
+[profile.ci]
+src = "src"
+out = "out"
+solc_version = "0.8.30"
+optimizer = true
+optimizer_runs = 200
+libs = ["lib"]
+remappings = [
+    "@openzeppelin-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/",
+    "@chainlink/contracts/=lib/chainlink-evm/contracts/",
+    "forge-std/=lib/forge-std/src/",
+    "interfaces/=src/interfaces/",
+    "registry/=src/contracts/registry/",
+    "libraries/=src/libraries/",
+    "contracts/=src/contracts/",
+]
+
+# See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+# Lazily resolved: only used when a test/script references the "mainnet" alias, so a
+# missing MAINNET_RPC_URL does not break offline `forge test` (fork tests skip themselves).
+[rpc_endpoints]
+mainnet = "${MAINNET_RPC_URL}"

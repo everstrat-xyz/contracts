@@ -1,0 +1,306 @@
+UniCLStrat::constructor(DeploymentConfig _params)
+├── Given registry in config is zero
+│   └── It should revert with RegistryClientZeroRegistry
+├── Given any required address in config is zero (weth, pool, swapRouter, quoter)
+│   └── It should revert with UniCLStratZeroAddress
+├── Given the configured pool does not contain WETH
+│   └── It should revert with UniCLStratInvalidPool
+├── Given positionWidth is zero
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given rebalanceTickThreshold is zero
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given maxTickDeviation is zero
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given twapInterval is less than MIN_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given maxSwapSlippageBps exceeds MAX_SLIPPAGE_BPS
+│   └── It should revert with UniCLStratInvalidConfig
+└── Given valid parameters
+    ├── It should chain RegistryClient(_params.addresses.registry) in the constructor modifier list
+    ├── It should store registry reference via RegistryClient (immutable after deploy)
+    ├── It should set immutable integration addresses (pool, router, quoter, WETH)
+    ├── It should identify the paired token
+    ├── It should set strategy configuration
+    ├── It should set swap paths and slippage
+    ├── It should set genesisTimestamp
+    └── It should approve token0 and token1 to the swap router
+
+UniCLStrat::registry()
+└── It should return the protocol Registry address (set in constructor)
+
+UniCLStrat::receive() external payable
+└── Given ETH is sent to the strategy
+    ├── It should accept ETH
+    └── It should include the ETH balance in navInETH
+
+UniCLStrat::metadata views
+├── Given name is queried
+│   └── It should return Uniswap Concentrated Liquidity Strategy
+├── Given genesisTimestamp is queried
+│   └── It should return deployment timestamp
+├── Given totalDeposited is queried
+│   └── It should return cumulative ETH deposits
+└── Given totalWithdrawn is queried
+    └── It should return cumulative ETH withdrawals
+
+UniCLStrat::navInETH()
+├── Given the strategy has native ETH balance
+│   └── It should include native ETH one-to-one
+├── Given the strategy has WETH balance
+│   └── It should include WETH one-to-one
+├── Given the strategy has paired token balance
+│   └── It should convert paired token value through the oracle
+├── Given the strategy has active pool positions
+│   └── It should include liquidity and tokens owed from the pool
+└── Given the strategy has no balances or positions
+    └── It should return zero
+
+UniCLStrat::maxDeposit()
+├── Given pool spot or short TWAP is outside maxTickDeviation
+│   └── It should return zero
+├── Given current NAV is greater than or equal to maxTotalNAV
+│   └── It should return zero
+└── Given strategy is calm and below capacity
+    └── It should return maxTotalNAV minus current NAV
+
+UniCLStrat::maxWithdrawal()
+├── Given strategy is paused
+│   └── It should return zero
+└── Given strategy has NAV and is not paused
+    └── It should return navInETH
+
+UniCLStrat::isHealthy()
+├── Given pool is not calm
+│   └── It should return false
+├── Given ticks have not been initialized
+│   └── It should return true
+├── Given current tick is outside the main position range
+│   └── It should return false
+├── Given current tick deviates from center by more than rebalanceTickThreshold
+│   └── It should return false
+└── Given current tick is calm and within threshold
+    └── It should return true
+
+UniCLStrat::deposit()
+├── Given caller is not the registered StrategyManager
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given msg.value is zero
+│   └── It should revert with StrategyZeroDeposit
+├── Given post-receipt NAV would exceed maxTotalNAV
+│   └── It should revert with StrategyMaxDepositExceeded
+├── Given msg.value equals remaining headroom to maxTotalNAV
+│   └── It should accept the deposit (msg.value already counted in navInETH)
+├── Given pool is not calm
+│   └── It should revert with UniCLStratNotCalm
+├── Given spot tick diverges from long TWAP within maxTickDeviation
+│   └── It should size mint liquidity at spot and complete deposit
+└── Given caller is the registered StrategyManager and amount is valid
+    ├── It should increase totalDeposited
+    ├── It should wrap received ETH into WETH
+    ├── It should poke then accrue pending LP fees before remove/collect
+    ├── It should remove and collect existing liquidity
+    ├── It should balance inventory through swaps when needed
+    ├── It should initialize ticks if needed
+    ├── It should add liquidity to valid positions
+    └── It should emit FundsDeposited
+
+UniCLStrat::investIdleETH()
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given strategy is paused
+│   └── It should revert with EnforcedPause
+├── Given strategy has no native ETH balance
+│   └── It should return zero
+├── Given pool is not calm
+│   └── It should revert with UniCLStratNotCalm
+└── Given caller has ADMIN_ROLE and idle native ETH is present
+    ├── When idle native ETH exceeds maxDeposit()
+    │   ├── It should deploy only maxDeposit() and leave the remainder as native ETH
+    │   └── It should emit FundsInvested with the capped amount
+    ├── It should wrap idle native ETH into WETH
+    ├── It should poke then accrue pending LP fees before remove/collect (same as deposit)
+    ├── It should deploy wrapped ETH into liquidity (same path as deposit)
+    ├── It should NOT emit HighWatermarkUpdated
+    └── It should emit FundsInvested with idle native ETH amount only (excludes collected fees re-deployed in the same call)
+
+UniCLStrat::withdraw(address _receiver, uint256 _amount)
+├── Given caller is not the registered StrategyManager
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given receiver is zero address
+│   └── It should revert with UniCLStratZeroAddress
+├── Given amount is zero
+│   └── It should revert with StrategyZeroWithdrawal
+├── Given amount exceeds current NAV
+│   └── It should revert with StrategyMaxWithdrawalExceeded
+├── Given caller is the registered StrategyManager and idle native ETH covers the requested amount
+│   ├── It should fulfil a withdrawal sourced entirely from idle native ETH
+│   ├── It should send the payout directly from the native balance without wrapping or unwrapping
+│   ├── It should not interact with the pool or the Converter
+│   ├── It should leave the LP position and WETH/paired inventory untouched
+│   ├── It should increase totalWithdrawn
+│   ├── It should emit FundsWithdrawn
+│   └── It should return the ETH amount actually sent to the receiver
+└── Given caller is the registered StrategyManager and idle native ETH falls short of the requested amount
+    ├── It should put all idle native ETH toward the payout
+    ├── It should poke then accrue pending LP fees into the performance-fee base before remove/collect
+    ├── It should remove and collect existing liquidity
+    ├── It should convert inventory to WETH only up to the remainder not covered by idle native ETH
+    ├── It should cap withdrawal at idle ETH plus available WETH when oracle/swap prices diverge
+    ├── It should increase totalWithdrawn
+    ├── It should unwrap only the WETH remainder to ETH
+    ├── It should send ETH to receiver in a single native transfer
+    ├── It should rebalance remaining inventory only if pool is calm
+    ├── It should re-add liquidity only if pool is calm
+    ├── It should emit FundsWithdrawn
+    └── It should return the ETH amount actually sent to the receiver
+
+UniCLStrat::rebalance()
+├── Given caller is not the registered StrategyManager
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is healthy
+│   └── It should revert with StrategyIsHealthy
+├── Given pool is not calm
+│   └── It should revert with UniCLStratNotCalm
+├── Given spot tick diverges from long TWAP within maxTickDeviation
+│   └── It should size mint liquidity at spot and complete rebalance
+└── Given caller is the registered StrategyManager and strategy is unhealthy but calm
+    ├── It should poke then accrue pending LP fees before remove/collect
+    ├── It should remove and collect existing liquidity
+    ├── It should set new main and alternate ticks around the current tick
+    ├── It should balance inventory
+    ├── It should add liquidity to valid positions
+    └── It should emit Rebalanced
+
+UniCLStrat::sync()
+├── Given caller is not the registered StrategyManager
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is paused
+│   └── It should revert with EnforcedPause
+└── Given caller is the registered StrategyManager and strategy is not paused
+    ├── It should poke main and alternate positions with burn(..., 0) when liquidity is deployed
+    ├── It should materialize accrued fees into tokensOwed without calling collect
+    ├── It should NOT flush LP-fee counters (pending reads the live tokensOwed - snapshot delta)
+    ├── It should not rebalance inventory or re-add liquidity
+    └── It should emit Synced
+
+UniCLStrat::pause()
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given caller has ADMIN_ROLE or SECURITY_ROLE and the pool is healthy
+│   ├── It should pause the strategy
+│   ├── It should remove and collect existing liquidity
+│   └── It should revoke Converter token allowances
+├── Given the pool is degraded (positions, burn, or collect reverts)
+│   ├── It should still pause the strategy
+│   ├── It should still revoke Converter token allowances
+│   └── It should emit LiquidityUnwindSkipped
+└── Given the pause-time liquidity unwind was skipped and the pool has recovered
+    └── It should remove and collect the remaining pool liquidity on unpause() followed by pause()
+
+UniCLStrat::selfRemoveLiquidityAndCollect()
+├── Given caller is not the strategy itself
+│   └── It should revert with UniCLStratCallerNotSelf
+└── Given caller is the strategy itself
+    ├── It should poke then accrue pending LP fees before remove/collect
+    └── It should remove and collect existing liquidity
+
+UniCLStrat::pendingPerformanceFeeInETH(uint256 _performanceFeeBps)
+├── Given strategy is paused
+│   └── It should return zero (fee counters preserved)
+├── Given strategy is not paused and has uncharged LP fees already materialized
+│   └── It should return uncharged LP fees in ETH * feeBps / BASIS_POINTS
+├── Given fee growth exists only as unpoked pending (not yet in tokensOwed)
+│   └── It should return zero until sync or a remove/collect path pokes
+└── Given performanceFeeBps is zero or nothing is pending
+    └── It should return zero
+
+UniCLStrat::settlePerformanceFee(uint256 _performanceFeeBps)
+├── Given caller is not the registered StrategyManager
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is paused
+│   └── It should return zero without charging counters
+├── Given strategy is not paused and has uncharged LP fees
+│   ├── It should accrue already-materialized tokensOwed into the fee base (no poke)
+│   ├── When feeETH rounds to zero (feeBaseETH * bps / BASIS_POINTS == 0)
+│   │   ├── It should return zero
+│   │   ├── It should NOT advance charged counters
+│   │   └── It should leave the dust feeable once the base grows large enough
+│   ├── When feeETH is non-zero
+│   │   ├── It should mark uncharged LP fees as charged
+│   │   ├── It should emit PerformanceFeeSettled
+│   │   └── It should return the ETH-denominated fee amount
+├── Given fee growth exists only as unpoked pending
+│   └── It should return zero (matches pendingPerformanceFeeInETH)
+└── Given performanceFeeBps is zero or nothing is pending
+    └── It should return zero
+
+UniCLStrat::emergencyExit()
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given strategy is not paused
+│   └── It should revert with UniCLStratNotPaused
+├── Given the pool is still degraded
+│   ├── It should still sweep on-contract native ETH, WETH, and paired token balances
+│   └── It should accrue with snapshot fallback (no-op) then set charged = earned
+├── Given the pause-time liquidity unwind was skipped
+│   ├── It should not touch the pool
+│   ├── It should leave the LP position in the pool, still attributed to the strategy via navInETH()
+│   └── It should accrue then set charged = earned so resume does not re-charge already-charged fees
+├── Given paired-token transfer reverts (blacklist / pause)
+│   ├── It should still unwrap WETH and send native ETH to strategyManager
+│   ├── It should emit PairedTokenTransferSkipped
+│   ├── It should leave paired-token balance on the strategy
+│   ├── It should still write off pending LP fees and emit EmergencyExited
+│   └── It should transfer paired tokens on a later emergencyExit once the token is transferable
+├── Given paired-token transfer succeeds with no return data (USDT-style)
+│   ├── It should still unwrap WETH and send native ETH to strategyManager
+│   ├── It should transfer paired tokens to strategyManager (trySafeTransfer treats empty returndata as success)
+│   └── It should emit EmergencyExited without PairedTokenTransferSkipped
+├── Given paired-token transfer returns false
+│   ├── It should still unwrap WETH and send native ETH to strategyManager
+│   ├── It should emit PairedTokenTransferSkipped
+│   └── It should leave paired-token balance on the strategy
+└── Given caller has ADMIN_ROLE on Registry and strategy is paused
+    ├── It should unwrap all WETH to native ETH
+    ├── It should combine unwrapped WETH with any pre-existing native ETH balance
+    ├── It should send combined native ETH to strategyManager first
+    ├── It should best-effort transfer all paired tokens to strategyManager as ERC-20
+    ├── It should write off pending LP fees (try-accrue then charged = earned) so only post-reset fee growth is feeable
+    ├── It should emit EmergencyExited with native ETH amount only
+    └── It should leave zero native ETH and WETH balances on the strategy
+
+UniCLStrat::uniswapV3MintCallback(uint256 _amount0, uint256 _amount1, bytes _data)
+├── Given caller is not the pool
+│   └── It should revert with UniCLStratCallerNotPool
+├── Given caller is pool but strategy is not minting
+│   └── It should revert with UniCLStratInvalidMintCallback
+└── Given deposit mints a pool position
+    └── It should complete the callback path without reverting
+
+UniCLStrat::StrategyManager integration
+├── Given strategy is registered in StrategyManager
+│   └── It should be included in strategy count and NAV views
+├── Given StrategyManager deposits to all strategies via depositToStrategies
+│   ├── It should deposit into UniCLStrat
+│   ├── It should update totalDeposited
+│   └── It should expose strategy NAV through StrategyManager
+├── Given StrategyManager deposits directly into UniCLStrat
+│   ├── It should deposit the sent ETH amount
+│   └── It should keep strategy healthy
+├── Given StrategyManager withdraws from UniCLStrat
+│   ├── It should send ETH to controller
+│   ├── It should update totalWithdrawn
+│   └── It should reduce strategy NAV
+├── Given StrategyManager checks an unhealthy UniCLStrat
+│   └── It should call rebalance and restore health
+└── Given UniCLStrat is not healthy or cannot accept deposits
+    └── It should be skipped by StrategyManager depositToStrategies
+
+UniCLStrat::fuzz invariants
+├── Given a bounded valid deposit amount
+│   ├── It should track totalDeposited exactly
+│   └── It should keep NAV approximately equal to deposited value
+└── Given bounded valid deposit and withdrawal amounts
+    ├── It should transfer requested ETH to receiver
+    ├── It should track totalWithdrawn exactly
+    └── It should reduce NAV by the withdrawn amount

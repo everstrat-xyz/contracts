@@ -1,0 +1,310 @@
+Converter::initialize(address _registry, address _wethAddress)
+├── Given _registry is zero address
+│   └── It should revert with RegistryClientZeroRegistry (from __RegistryClient_init)
+├── Given _wethAddress is zero
+│   └── It should revert with ConverterZeroAddress
+├── Given valid parameters
+│   ├── It should initialize UUPS / RegistryClient / Pausable / ReentrancyGuard
+│   ├── It should set the WETH contract
+│   ├── It should set the Registry
+│   └── It should emit ConverterInitialized event
+└── Given already initialized
+    └── It should revert with InvalidInitialization
+
+Converter::receive() external payable
+├── Given ETH is sent to contract
+│   ├── It should accept ETH
+│   └── It should update contract balance (increase)
+└── Given contract is paused
+    └── It should still accept ETH (receive function has no restrictions)
+
+Converter::wrapETH() payable
+├── Given caller does not have caller permission (onlyCaller modifier)
+│   └── It should revert with RegistryClientMissingRole(CONVERTER_CALLER_ROLE)
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given amount is zero (msg.value == 0)
+│   └── It should return early without wrapping (no-op)
+└── Given amount is valid
+    ├── It should call weth.deposit() with msg.value
+    ├── It should safeTransfer WETH to caller
+    └── It should emit ETHWrapped event
+
+Converter::unwrapWETH(uint256 _amount, address _receiver)
+├── Given caller does not have caller permission (onlyCaller modifier)
+│   └── It should revert with RegistryClientMissingRole(CONVERTER_CALLER_ROLE)
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given amount is zero
+│   └── It should return early without unwrapping (no-op)
+├── Given receiver is zero address
+│   └── It should revert with ConverterZeroAddress
+├── Given caller has insufficient WETH balance
+│   └── It should revert with ERC20InsufficientBalance (from safeTransferFrom)
+├── Given caller has insufficient WETH allowance for Converter
+│   └── It should revert with ERC20InsufficientAllowance (from safeTransferFrom)
+└── Given amount is valid and caller has sufficient WETH
+    ├── It should transfer WETH from caller to Converter
+    ├── It should call weth.withdraw() to unwrap
+    ├── It should send native ETH to receiver
+    └── It should emit WETHUnwrapped event
+
+Converter::grantCallerRole(address _account)
+├── Given caller is not the registered StrategyManager contract (onlyAuthContract)
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given account is zero address
+│   └── It should revert with ConverterZeroAddress
+└── Given a StrategyManager caller and a valid account
+    ├── It should delegate to Registry.grantRole(CONVERTER_CALLER_ROLE, account)
+    ├── It should emit CallerRoleGranted event
+    └── It should let the granted account call wrapETH / unwrapWETH / executeSwapExactAmountIn
+
+Converter::revokeCallerRole(address _account)
+├── Given caller is not the registered StrategyManager contract (onlyAuthContract)
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given account is zero address
+│   └── It should revert with ConverterZeroAddress
+└── Given a StrategyManager caller and a valid account
+    ├── It should delegate to Registry.revokeRole(CONVERTER_CALLER_ROLE, account)
+    ├── It should emit CallerRoleRevoked event
+    └── It should block the revoked account from wrapETH / unwrapWETH / executeSwapExactAmountIn
+
+Converter::executeSwapExactAmountIn(address _adapter, bytes _path, uint256 _amountIn, uint256 _minAmountOut, uint256 _deadline)
+├── Given caller does not have caller permission (onlyCaller modifier)
+│   └── It should revert with RegistryClientMissingRole(CONVERTER_CALLER_ROLE)
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given amountIn is zero
+│   └── It should return zero (no-op)
+├── Given deadline has expired
+│   └── It should revert with ConverterDeadlineExpired
+├── Given the supplied adapter is not whitelisted
+│   └── It should revert with ConverterAdapterNotAllowed
+├── Given the adapter routeTokens view reverts (malformed path)
+│   └── It should revert with ConverterAdapterCallFailed
+├── Given caller has insufficient tokenIn balance/allowance
+│   └── It should revert with ERC20InsufficientBalance / ERC20InsufficientAllowance
+├── Given the adapter swap dispatch reverts
+│   └── It should revert with ConverterSwapFailed
+├── Given the swap output is below _minAmountOut
+│   └── It should revert with ConverterInsufficientOutput
+└── Given a valid swap
+    ├── It should pull tokenIn from the caller
+    ├── It should dispatch swap to the caller-supplied adapter via delegatecall (tokens stay on the Converter, single router approval)
+    ├── It should transfer the output token to the caller
+    ├── It should emit SwapExecuted event
+    └── It should return the output amount
+
+Converter::quoteSwapExactAmountIn(address _adapter, bytes _path, uint256 _amountIn)
+├── Given the adapter is not whitelisted
+│   └── It should revert with ConverterAdapterNotAllowed
+├── Given the adapter quote dispatch reverts
+│   └── It should revert with ConverterAdapterCallFailed
+└── Given the adapter returns a valid quote
+    └── It should return the quoted amount
+
+Converter::executeSwapExactAmountOut(address _adapter, bytes _path, uint256 _amountOut, uint256 _amountInMaximum, uint256 _deadline)
+├── Given caller does not have caller permission (onlyCaller modifier)
+│   └── It should revert with RegistryClientMissingRole(CONVERTER_CALLER_ROLE)
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given amountOut is zero
+│   └── It should return zero (no-op)
+├── Given deadline has expired
+│   └── It should revert with ConverterDeadlineExpired
+├── Given the supplied adapter is not whitelisted
+│   └── It should revert with ConverterAdapterNotAllowed
+├── Given the adapter routeTokens view reverts (malformed path)
+│   └── It should revert with ConverterAdapterCallFailed
+├── Given caller has insufficient tokenIn balance/allowance
+│   └── It should revert with ERC20InsufficientBalance / ERC20InsufficientAllowance
+├── Given the adapter swap dispatch reverts
+│   └── It should revert with ConverterSwapFailed
+├── Given the actual input exceeds _amountInMaximum
+│   └── It should revert with ConverterExcessiveInput
+└── Given a valid exact-output swap
+    ├── It should pull up to _amountInMaximum from the caller
+    ├── It should dispatch swapExactAmountOut to the adapter via delegatecall (tokens stay on the Converter, single router approval)
+    ├── It should refund unused input to the caller
+    ├── It should transfer the exact output amount to the caller
+    ├── It should emit SwapExecuted event
+    └── It should return the actual input spent
+
+Converter::quoteSwapExactAmountOut(address _adapter, bytes _path, uint256 _amountOut)
+├── Given the adapter is not whitelisted
+│   └── It should revert with ConverterAdapterNotAllowed
+├── Given the adapter quoteExactAmountOut dispatch reverts
+│   └── It should revert with ConverterAdapterCallFailed
+└── Given the adapter returns a valid exact-output quote
+    └── It should return the quoted input amount
+
+Converter::setAllowedAdapter(address _adapter, bool _allowed)
+├── Given caller does not have ADMIN_ROLE on Registry (onlyAuthRole)
+│   └── It should revert with RegistryClientMissingRole
+├── Given adapter is zero address
+│   └── It should revert with ConverterZeroAddress
+├── Given approving a code-less address
+│   └── It should revert with ConverterNoCode
+├── Given approving a valid adapter
+│   ├── It should add the adapter to the allowlist
+│   └── It should emit AdapterUpdated(adapter, true)
+└── Given removing an adapter
+    ├── It should remove the adapter from the allowlist (no code check)
+    └── It should emit AdapterUpdated(adapter, false)
+
+Converter::weth()
+└── It should return WETH contract address
+
+Converter::isAdapterAllowed(address _adapter)
+├── Given adapter is whitelisted
+│   └── It should return true
+└── Given adapter is not whitelisted
+    └── It should return false
+
+Converter::getAllowedAdapters()
+└── It should return all whitelisted adapter addresses
+
+Converter::routeTokens(address _adapter, bytes _path)
+├── Given the adapter is not whitelisted
+│   └── It should revert with ConverterAdapterNotAllowed
+├── Given the adapter cannot decode the path
+│   └── It should revert with ConverterAdapterCallFailed
+└── Given a whitelisted adapter and a valid path
+    ├── It should ask the adapter to resolve the route's tokens
+    ├── It should return the first token address (input token)
+    └── It should return the last token address (output token)
+
+Converter::validateRoute(address _adapter, bytes _route)
+├── Given the adapter is not whitelisted
+│   └── It should revert with ConverterAdapterNotAllowed
+├── Given the adapter validateRoute call reverts
+│   └── It should return false (view helper swallows reverts)
+├── Given a whitelisted adapter and a valid route
+│   └── It should return true
+└── Given a whitelisted adapter and an invalid route
+    └── It should return false
+
+Converter::isCaller(address _account)
+├── Given account has been granted CONVERTER_CALLER_ROLE on the Registry
+│   └── It should return true
+└── Given account has not been granted CONVERTER_CALLER_ROLE on the Registry
+    └── It should return false
+
+Converter::pause()
+├── Given caller does not have ADMIN_ROLE on Registry (onlyAuthRole)
+│   └── It should revert with RegistryClientMissingRole
+├── Given contract is not paused
+│   └── It should pause the contract
+└── Given contract is already paused
+    └── It should revert with EnforcedPause
+
+Converter::unpause()
+├── Given caller does not have ADMIN_ROLE on Registry (onlyAuthRole)
+│   └── It should revert with RegistryClientMissingRole
+├── Given contract is paused
+│   └── It should unpause the contract
+└── Given contract is not paused
+    └── It should revert with ExpectedPause
+
+Converter::_authorizeUpgrade(address _newImplementation)
+├── Given caller does not have ADMIN_ROLE on Registry (onlyAuthRole)
+│   └── It should revert with RegistryClientMissingRole
+└── Given caller has ADMIN_ROLE
+    └── It should allow the upgrade
+
+Converter::Access Control Testing
+├── Caller permission (onlyCaller)
+│   ├── wrapETH / unwrapWETH / executeSwapExactAmountIn / executeSwapExactAmountOut require caller permission (RegistryClientMissingRole)
+│   ├── quoteSwapExactAmountIn / quoteSwapExactAmountOut are permissionless (no onlyCaller check)
+│   └── grantCallerRole / revokeCallerRole do not require caller permission
+├── Registry role gates (onlyAuthRole)
+│   ├── setAllowedAdapter requires ADMIN_ROLE on Registry
+│   ├── pause / unpause require ADMIN_ROLE on Registry
+│   ├── _authorizeUpgrade requires ADMIN_ROLE on Registry
+│   └── Non-admin cannot call these functions
+├── Registry contract gates (onlyAuthContract)
+│   ├── grantCallerRole requires registered StrategyManager contract
+│   └── revokeCallerRole requires registered StrategyManager contract
+└── Registration
+    ├── Converter is registered on the Registry under Auth.CONVERTER key
+    └── StrategyManager is registered on the Registry under Auth.STRATEGY_MANAGER key
+
+Converter::Pause Testing
+├── Given contract is paused
+│   ├── wrapETH / unwrapWETH / executeSwapExactAmountIn / executeSwapExactAmountOut should revert with EnforcedPause
+│   ├── setAllowedAdapter should still succeed (no whenNotPaused)
+│   ├── quoteSwapExactAmountIn / quoteSwapExactAmountOut should still succeed (no whenNotPaused)
+│   ├── view functions should still succeed
+│   └── unpause should still succeed
+└── Given operations resume after unpause
+    └── wrapETH / unwrapWETH / executeSwapExactAmountIn should work again
+
+Converter::Upgrade Testing
+├── Given upgrade authorization (caller has ADMIN_ROLE on Registry)
+│   ├── It should allow contract upgrades
+│   ├── It should maintain state after upgrade (adapters, caller allowlist, weth)
+│   └── New functions should work after upgrade
+├── Given unauthorized upgrade attempt
+│   └── It should revert with RegistryClientMissingRole
+└── Given state persistence after upgrade
+    ├── Adapter allowlist should remain intact
+    ├── Caller permissions should remain intact
+    └── WETH should remain set
+
+Converter::Fuzz Testing
+├── wrapETH() with random valid amounts
+├── unwrapWETH() with random amounts (valid + insufficient balance)
+├── executeSwapExactAmountIn() with random valid amounts
+├── initialize() with random valid weth address
+└── wrapETH() zero amount always no-op
+
+Converter::Registry Integration Testing
+├── Generator registered under Auth.CONVERTER key
+├── StrategyManager registered under Auth.STRATEGY_MANAGER key
+├── Admin has ADMIN_ROLE on Registry
+├── Non-admin cannot call setAllowedAdapter
+└── Non-StrategyManager cannot call grantCallerRole
+
+UniswapV3ConverterAdapter
+├── constructor
+│   ├── Given router is zero address
+│   │   └── It should revert with UniswapV3ConverterAdapterZeroAddress
+│   └── Given quoter is zero address
+│       └── It should revert with UniswapV3ConverterAdapterZeroAddress
+├── name()
+│   └── It should return "UniswapV3ConverterAdapter"
+├── validateRoute(bytes)
+│   ├── Given a valid single-hop path
+│   │   └── It should return true
+│   ├── Given a valid multi-hop path
+│   │   └── It should return false (single-hop only in initial release)
+│   ├── Given a too-short path (< 43 bytes)
+│   │   └── It should return false
+│   └── Given a misaligned path ((len - 20) % 23 != 0)
+│       └── It should return false
+├── routeTokens(bytes)
+│   ├── Given a valid path
+│   │   ├── It should return the first token (input)
+│   │   └── It should return the last token (output)
+│   └── Given an invalid path
+│       └── It should revert with UniswapV3ConverterAdapterInvalidRoute
+├── quoteExactAmountIn(bytes, uint256)
+│   └── It should return the TWAP-implied output net of the pool fee, Chainlink cross-checked
+├── quoteExactAmountOut(bytes, uint256)
+│   └── It should return the TWAP-implied input grossed up by the pool fee, Chainlink cross-checked
+├── immutables (router / quoter)
+│   ├── It should expose the router address set in the constructor
+│   └── It should expose the quoter address set in the constructor
+└── swapExactAmountIn(bytes, uint256, uint256, address, uint256) [exercised via Converter::executeSwapExactAmountIn]
+    └── Given a valid path
+        ├── It should pull tokenIn from msg.sender (the Converter)
+        ├── It should approve the router and reset the approval after
+        ├── It should call router.exactInput with amountOutMinimum == _minAmountOut
+        └── It should deliver output to the recipient and return amountOut
+├── swapExactAmountOut(bytes, uint256, uint256, address, uint256) [exercised via Converter::executeSwapExactAmountOut]
+│   └── Given a valid path
+│       ├── It should pull tokenIn from msg.sender (the Converter)
+│       ├── It should approve the router with _amountInMaximum and reset the approval after
+│       ├── It should reverse the forward-encoded path and call router.exactOutput with amountOut and amountInMaximum
+│       ├── It should refund surplus input to msg.sender
+│       └── It should deliver output to the recipient and return actual amountIn

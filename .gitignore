@@ -1,0 +1,21 @@
+# Compiler files
+cache/
+out/
+
+# Ignores development broadcast logs
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
+
+# Docs (generated forge doc output; hand-written runbooks are tracked)
+# Note: "docs/*" (not "docs/") so the negation below can re-include files —
+# git cannot re-include a file whose parent directory is excluded.
+docs/*
+!docs/FREEZE_RUNBOOK.md
+!docs/STRATEGY_GUARDRAILS.md
+!docs/WHITELIST.md
+
+# Dotenv file
+.env
+
+/node_modules

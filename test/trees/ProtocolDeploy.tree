@@ -1,0 +1,74 @@
+ProtocolDeploy::Deployment Flow
+├── Env configuration (ProtocolDeployBase)
+│   ├── Given DAO_ADDRESS, SECURITY_ADDRESS, or DAO_TREASURY_ADDRESS is unset
+│   │   └── It should revert (required env — critical addresses never default to the deployer)
+│   ├── Given EXIT_LIQUIDITY_TARGET_ETH or CONTROLLER_RESERVE_ETH is unset
+│   │   └── It should revert (required env — StrategyKeeperExecutor policy knobs; 0 is a valid explicit choice)
+│   ├── Given TIMELOCK_ADMIN_DELAY is unset
+│   │   └── It should default to the production 48h delay (numeric operational default)
+│   └── Given PERFORMANCE_FEE_BPS is unset
+│       └── It should default to 0 (fees disabled; numeric operational default)
+├── DeployRegistry
+│   ├── It should deploy the 48h admin TimelockController (DAO proposer/canceller, security canceller, open executor)
+│   ├── It should deploy the Registry with the admin timelock as its designated ADMIN_ROLE holder (never DAO_ADDRESS directly)
+│   ├── It should grant SECURITY_ROLE to the security multisig (SECURITY_ADDRESS) — mirrors DeployAll
+│   ├── It should leave the deployer a temporary bootstrap ADMIN_ROLE for the remaining modular steps
+│   └── It should NOT finalize deployer admin (deployer needs ADMIN for later scripts)
+├── Partial deploy scripts (EVE, ExitQueue, Controller, Oracle, AMM, Converter)
+│   ├── Each script should register its contract on Registry via _registerAndVerify
+│   ├── Deployer should hold Registry ADMIN until finalize (bootstrap wiring of ADMIN-gated calls)
+│   └── DeployOracle should verify the admin timelock (TIMELOCK_ADDRESS) holds ADMIN_ROLE before configuring the feed
+├── Oracle feed registration guard (_assertUsdQuotedFeed — DeployOracle, DeployAll; issue #194)
+│   ├── Given feed description() ends with " / USD" (Chainlink convention, incl. "Calculated <BASE> / USD")
+│   │   └── It should pass and allow updateUsdFeedInfo
+│   └── Given feed description() does not end with " / USD" (non-USD quote, USD as base, missing separator, arbitrary string, shorter than suffix)
+│       └── It should revert the deployment with the offending description (USD-quote invariant)
+├── DeployAMM
+│   ├── It should register STRATEGY_MANAGER and AMM keys
+│   ├── It should initialize StrategyManager with FeeConfig (required DAO_TREASURY_ADDRESS, optional PERFORMANCE_FEE_BPS)
+│   └── It should grant MINTER_ROLE to BOTH the AMM and the StrategyManager on Registry
+├── DeployConverter
+│   ├── It should register the CONVERTER key
+│   ├── It should grant CONVERTER_CALLER_MANAGER_ROLE to the Converter (required for StrategyManager.addStrategy)
+│   └── When SWAP_ADAPTER_ADDRESS is set
+│       └── It should whitelist the adapter via setAllowedAdapter (DeployUniCLStrat route-validation prerequisite)
+├── DeployAll
+│   ├── It should deploy the admin timelock first and construct the Registry with it as designated admin
+│   ├── It should register all Auth keys (core + QUEUE/STRATEGY_KEEPER_EXECUTOR)
+│   ├── It should initialize StrategyManager with FeeConfig (non-zero treasury, optional fee bps)
+│   ├── It should grant SECURITY, MINTER (AMM + StrategyManager), CONVERTER_CALLER_MANAGER on Registry
+│   ├── It should deploy both keeper executors and grant them KEEPER_ROLE
+│   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH / CONTROLLER_RESERVE_ETH to StrategyKeeperExecutor
+│   ├── It should verify timelock wiring (ADMIN exclusivity + timelock governance roles) separately from SECURITY_ROLE
+│   ├── It should verify SECURITY / MINTER / CONVERTER_CALLER_MANAGER grants inline (Finalize uses _verifyCriticalRoleGrants)
+│   └── It should renounce the deployer's bootstrap ADMIN_ROLE after setup (ADMIN_ROLE ends held only by the timelock)
+├── DeployKeeperExecutors
+│   ├── It should deploy QueueKeeperExecutor and StrategyKeeperExecutor
+│   ├── It should register QUEUE_KEEPER_EXECUTOR and STRATEGY_KEEPER_EXECUTOR
+│   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH and CONTROLLER_RESERVE_ETH (required wei env) to StrategyKeeperExecutor
+│   └── When GRANT_KEEPER_ROLE is true
+│       └── It should grant KEEPER_ROLE to both executors
+└── FinalizeProtocolDeploy
+    ├── It should renounce the deployer's bootstrap ADMIN_ROLE (always — PL-003)
+    ├── It should verify the admin timelock (TIMELOCK_ADDRESS) holds ADMIN_ROLE
+    ├── It should verify every critical grant (SECURITY_ROLE → security, MINTER_ROLE → AMM + StrategyManager,
+    │   CONVERTER_CALLER_MANAGER_ROLE → Converter, KEEPER_ROLE → both executors) and fail loudly on any gap
+    ├── It should revert when a modular step was skipped (unregistered Registry key)
+    └── Deployer should not be able to register contracts afterward
+
+ProtocolDeploy::DeployScripts (integration tests)
+├── test_DeployAll_RegistryAdminIsTimelockWithDaoProposer
+└── test_ModularFlow_EndToEndGrantsAndFinalizeGuards
+    ├── Happy path: full modular flow ends with every critical grant verified
+    ├── Finalize reverts when the DeployConverter step was skipped (unregistered CONVERTER key)
+    ├── Finalize reverts when the DeployKeeperExecutors step was skipped (unregistered executor key)
+    └── Finalize reverts when a registered module misses a grant (StrategyManager MINTER_ROLE)
+
+ProtocolDeploy::DeployerAdminAccess (integration tests)
+├── test_FinalizeDeployerTieredAccess_RenouncesDeployerAdmin
+├── test_FinalizeDeployerTieredAccess_WorksWhenRegistryPaused
+├── test_FinalizeDeployerTieredAccess_IsIdempotentWhenAlreadyRenounced
+├── test_FinalizeDeployerTieredAccess_DeployerCanRegisterBeforeFinalize
+├── test_FinalizeDeployerTieredAccess_DeployerCannotRegisterAfterFinalize
+├── test_FinalizeDeployerTieredAccess_AdminCanRegisterAfterFinalize
+└── test_FullDeploymentFlow_WithSeparateDaoAndDeployer

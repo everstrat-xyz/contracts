@@ -1,0 +1,227 @@
+ExitQueue::initialize(address _admin)
+├── Given _admin is zero address
+│   └── It should revert with ExitQueueZeroAddress
+├── Given valid parameters
+│   ├── It should set currentBatchId to 1
+│   ├── It should grant ADMIN_ROLE to _admin
+│   └── It should report version "1.0.0"
+└── Given already initialized
+    └── It should revert (InvalidInitialization)
+
+ExitQueue::DEPLOYER_ROLE lifecycle (test_DeployerRole_CannotBeGranted_RenounceFreezesRoleGrants)
+├── Given DEPLOYER_ROLE has not been renounced
+│   ├── It should revert with AccessControlUnauthorizedAccount(admin, DEFAULT_ADMIN_ROLE) when granting DEPLOYER_ROLE
+│   └── It should allow the deployer to grant AMM_ROLE
+└── Given the deployer renounced DEPLOYER_ROLE
+    ├── It should remove DEPLOYER_ROLE from the deployer
+    ├── It should revert with AccessControlUnauthorizedAccount(admin, DEPLOYER_ROLE) when granting AMM_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount(admin, DEPLOYER_ROLE) when granting CONTROLLER_ROLE
+
+ExitQueue::Access Control
+├── Given caller has AMM_ROLE
+│   ├── It should allow pushRequest (returns currentBatchId)
+│   ├── It should allow pullRequest (after pricing)
+│   └── It should allow closeRequest
+├── Given caller has CONTROLLER_ROLE
+│   └── It should allow priceBatch (when not paused)
+└── Given caller is unauthorized
+    ├── It should revert on pushRequest
+    ├── It should revert on pullRequest
+    ├── It should revert on priceBatch
+    └── It should revert on closeRequest
+
+ExitQueue::batchInfo(uint256 _batchId)
+├── Given batch exists but not priced
+│   ├── It should return canBeProcessed=false
+│   ├── It should return finalEvePrice=0
+│   ├── It should return totalTokensToBurn (sum of all requests)
+│   ├── It should return createdAt (timestamp when batch was created)
+│   └── It should return pricedAt=0
+└── Given batch exists and is priced
+    ├── It should return canBeProcessed=true
+    ├── It should return finalEvePrice (set by priceBatch)
+    ├── It should return totalTokensToBurn
+    ├── It should return createdAt (timestamp when batch was created, not when priced)
+    └── It should return pricedAt (timestamp when priceBatch was called)
+
+ExitQueue::requestInfo(uint256 _batchId, address _user)
+├── Given request does not exist
+│   └── It should return default values (processed=false, closedDueToSlippage=false, all other fields=0)
+└── Given request exists and not processed
+    ├── It should return processed=false
+    ├── It should return closedDueToSlippage=false
+    ├── It should return evePriceAtRequestTime (from pushRequest)
+    ├── It should return tokensToBurn (from pushRequest)
+    └── It should return priceTolerance (from pushRequest)
+
+ExitQueue::requestCanBeClosed(uint256 _batchId, address _user)
+├── Given batch does not exist
+│   └── It should return false
+├── Given user is not in batch
+│   └── It should return false
+├── Given request is already processed
+│   └── It should return false
+├── Given request exists, batch not priced
+│   └── It should return true (user can cancel before pricing)
+├── Given request exists, batch priced, within MAX_BATCH_PROCESSING_TIME
+│   └── It should return false (must be pulled, cannot close)
+├── Given request exists, batch priced, at exactly MAX_BATCH_PROCESSING_TIME
+│   └── It should return false (upper bound exclusive)
+└── Given request exists, batch priced, MAX_BATCH_PROCESSING_TIME exceeded
+    └── It should return true (escape hatch available)
+
+ExitQueue::unprocessedUsersCount(uint256 _batchId)
+└── Given batch exists with requests
+    ├── It should return count of unprocessed users
+    └── It should return 0 once all requests are pulled or closed
+
+ExitQueue::unprocessedUsers(uint256 _batchId)
+└── Given batch exists with requests
+    └── It should return array of all unprocessed user addresses
+
+ExitQueue::unprocessedUsers(uint256 _batchId, uint256 _startIndex, uint256 _endIndex)
+├── Given range is invalid (startIndex >= endIndex or endIndex > length)
+│   └── It should revert with ExitQueueInvalidRange
+└── Given range is valid
+    └── It should return array of users in the specified range
+
+ExitQueue::pushRequest(address _user, uint256 _evePriceAtRequestTime, uint256 _tokensToBurn, uint256 _priceTolerance)
+├── Given caller does not have AMM_ROLE
+│   └── It should revert (AccessControlUnauthorizedAccount)
+└── Given caller has AMM_ROLE
+    ├── When user already has request in current batch
+    │   └── It should revert with ExitQueueRequestAlreadyInBatch
+    ├── When contract is paused
+    │   └── It should revert with EnforcedPause
+    ├── When valid parameters
+    │   ├── It should store request info (price, tokens, tolerance)
+    │   ├── It should add user to unprocessedUsers set
+    │   ├── It should update batch.totalTokensToBurn
+    │   ├── It should emit RequestPushed event
+    │   └── It should return currentBatchId
+    ├── When multiple distinct users push
+    │   └── It should track each user independently (unprocessedUsers count grows)
+    └── When tokensToBurn is zero
+        └── It should still succeed (batch totalTokensToBurn stays 0)
+
+ExitQueue::priceBatch(uint256 _evePrice)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given caller is the registered Controller
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   ├── When _evePrice is zero
+│   │   └── It should revert with ExitQueueZeroPrice
+│   ├── When current batch is empty (no requests)
+│   │   └── It should revert with ExitQueueBatchIsEmpty
+│   └── When current batch has requests
+│       ├── It should set batch.finalEvePrice to _evePrice
+│       ├── It should set batch.canBeProcessed to true
+│       ├── It should set batch.pricedAt to block.timestamp
+│       ├── It should increment currentBatchId
+│       └── It should emit BatchPriced event
+└── Given reentrancy attempt
+    └── It should revert (if reentrancy guard is added)
+
+ExitQueue::pullRequest(uint256 _batchId, address _user)
+├── Given caller does not have AMM_ROLE
+│   └── It should revert (AccessControlUnauthorizedAccount)
+└── Given caller has AMM_ROLE
+    ├── When batch is not priced (canBeProcessed=false)
+    │   └── It should revert with ExitQueueBatchCannotBeProcessed
+    ├── When request is already processed
+    │   └── It should revert with ExitQueueRequestAlreadyProcessed
+    ├── When user is not in batch
+    │   └── It should revert with ExitQueueRequestNotInBatch
+    ├── When contract is paused
+    │   └── It should revert with EnforcedPause
+    ├── When price slippage exceeds tolerance
+    │   ├── It should set request.closedDueToSlippage=true
+    │   ├── It should set request.processed=true
+    │   ├── It should remove user from unprocessedUsers
+    │   ├── It should update batch.totalTokensToBurn (subtract tokens)
+    │   └── It should emit RequestPulled event (isWithinTolerance=false)
+    ├── When price is within tolerance
+    │   ├── It should set request.processed=true
+    │   ├── It should set request.closedDueToSlippage=false
+    │   ├── It should remove user from unprocessedUsers
+    │   ├── It should update batch.totalTokensToBurn (subtract tokens)
+    │   └── It should emit RequestPulled event (isWithinTolerance=true)
+    └── When price is exactly at tolerance boundary
+        ├── It should NOT set closedDueToSlippage (price is not LESS than threshold)
+        └── It should process normally
+
+ExitQueue::closeRequest(uint256 _batchId, address _user) returns (bool _viaEscapeHatch)
+├── Given caller does not have AMM_ROLE
+│   └── It should revert (AccessControlUnauthorizedAccount)
+└── Given caller has AMM_ROLE
+    ├── When request is already processed
+    │   └── It should revert with ExitQueueRequestAlreadyProcessed
+    ├── When user is not in batch
+    │   └── It should revert with ExitQueueRequestNotInBatch
+    ├── When batch is priced and within MAX_BATCH_PROCESSING_TIME
+    │   ├── It should revert with ExitQueueRequestCannotBeClosed
+    │   └── It should revert for every user in the batch
+    ├── When batch is priced at exactly MAX_BATCH_PROCESSING_TIME
+    │   └── It should revert with ExitQueueRequestCannotBeClosed (upper bound exclusive)
+    ├── When batch is priced but MAX_BATCH_PROCESSING_TIME exceeded
+    │   ├── It should allow close (escape hatch for unprocessed requests)
+    │   ├── It should emit RequestClosed event with viaEscapeHatch=true
+    │   ├── It should completely remove request from batch (request resets to defaults)
+    │   ├── It should remove user from unprocessedUsers
+    │   └── It should allow all users in batch to close
+    ├── When valid parameters (batch not priced)
+    │   ├── It should completely remove request from batch (delete)
+    │   ├── It should remove user from unprocessedUsers
+    │   ├── It should update batch.totalTokensToBurn (subtract tokens)
+    │   ├── It should emit RequestClosed event with viaEscapeHatch=false
+    │   └── It should allow user to re-request in same batch
+    └── When contract is paused
+        └── It should still succeed (works when paused for emergency withdrawal)
+
+ExitQueue::pause()
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should pause the contract immediately (no timelock)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When contract is not paused
+│   │   ├── It should pause the contract
+│   │   └── It should emit Paused event
+│   └── When contract is already paused
+│       └── It should revert with EnforcedPause
+
+ExitQueue::unpause()
+├── Given caller has ADMIN_ROLE
+│   └── It should unpause the contract (paused() == false)
+└── Given caller is unauthorized
+    └── It should revert (AccessControlUnauthorizedAccount)
+
+ExitQueue::Scenarios
+├── Multiple batches (test_MultipleBatches)
+│   ├── It should assign batchId 1 to the first batch and batchId 2 to the next
+│   ├── It should increment currentBatchId after pricing
+│   └── It should keep batches independent (first priced/processable, second unpriced)
+├── Process multiple requests in a batch (test_ProcessMultipleRequestsInBatch)
+│   ├── It should pull every request after pricing
+│   ├── It should drive unprocessedUsersCount to 0
+│   └── It should mark every request processed
+├── Mix of close and pull (test_MixOfCloseAndPull)
+│   ├── It should close some requests before pricing
+│   ├── It should pull the remaining request after pricing
+│   └── It should drive unprocessedUsersCount to 0
+├── Zero tokensToBurn (test_ZeroTokensToBurn)
+│   └── It should keep batch.totalTokensToBurn at 0
+└── Zero price tolerance (test_ZeroPriceTolerance)
+    └── It should mark any price drop as closedDueToSlippage=true (processed=true)
+
+ExitQueue::pause behavior
+├── Given contract is paused
+│   ├── pushRequest should revert with EnforcedPause
+│   ├── pullRequest should revert with EnforcedPause
+│   ├── priceBatch should revert with EnforcedPause
+│   └── closeRequest should still succeed (emergency withdrawal)
+└── Given contract is unpaused again
+    ├── pushRequest should work
+    ├── pullRequest should work (after pricing)
+    └── priceBatch should work

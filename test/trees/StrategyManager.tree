@@ -1,0 +1,782 @@
+StrategyManager::initialize(address _registry, FeeConfig _feeConfig)
+├── Given _registry is zero address
+│   └── It should revert with RegistryClientZeroRegistry
+├── Given performanceFeeBps exceeds MAX_PERFORMANCE_FEE_BPS
+│   └── It should revert with StrategyManagerInvalidPerformanceFeeBps
+├── Given daoTreasury is zero address
+│   └── It should revert with StrategyManagerZeroDaoTreasury
+├── Given valid parameters
+│   ├── It should store registry reference in ERC-7201 namespaced storage (RegistryClientUpgradeable)
+│   ├── It should store daoTreasury and performanceFeeBps from FeeConfig
+│   ├── It should initialize UUPS upgradeable
+│   ├── It should initialize RegistryClient
+│   ├── It should initialize pausable
+│   ├── It should initialize reentrancy guard
+│   ├── It should emit Initialized event (with registry address)
+│   ├── It should emit DaoTreasuryChanged (initial is zero address)
+│   ├── It should emit PerformanceFeeBpsChanged (initial is zero)
+│   └── It should NOT grant roles locally (ADMIN/CONTROLLER live on Registry)
+└── Given already initialized
+    └── It should revert with InvalidInitialization
+
+StrategyManager::addStrategy(address _strategy, uint8 _depositWeight, uint8 _withdrawalWeight)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given strategy address is zero
+│   └── It should revert with StrategyManagerZeroAddress
+├── Given strategy has no contract code
+│   └── It should revert with StrategyManagerNoCode
+├── Given strategy is already registered
+│   └── It should revert with StrategyManagerStrategyAlreadyRegistered
+├── Given depositWeight exceeds MAX_DEPOSIT_WEIGHT
+│   └── It should revert with StrategyManagerInvalidDepositWeight
+├── Given withdrawalWeight exceeds MAX_WITHDRAWAL_WEIGHT
+│   └── It should revert with StrategyManagerInvalidWithdrawalWeight
+├── Given zero depositWeight and/or withdrawalWeight
+│   ├── It should add the strategy successfully (zero is allowed)
+│   └── It should store the zero weight(s)
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given valid parameters
+│   ├── It should add strategy to EnumerableSet (via add)
+│   ├── It should store depositWeight and withdrawalWeight
+│   ├── It should emit StrategyAdded event (with strategy address)
+│   ├── It should emit DepositWeightUpdated and WithdrawalWeightUpdated
+│   └── It should NOT set initial NAV (strategies report their own NAV via navInETH())
+├── Given removeStrategy then re-add with performance fees enabled
+│   ├── It should not mint phantom fees immediately after registration
+│   ├── It should block phantom fee minting on repeated remove-re-add harvest loops
+│   └── It should still fee real LP gains after re-registration
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::setDepositWeight(address _strategy, uint8 _depositWeight)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given depositWeight exceeds MAX_DEPOSIT_WEIGHT
+│   └── It should revert with StrategyManagerInvalidDepositWeight
+└── Given valid parameters
+    ├── It should update depositWeight
+    └── It should emit DepositWeightUpdated
+
+StrategyManager::setWithdrawalWeight(address _strategy, uint8 _withdrawalWeight)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given withdrawalWeight exceeds MAX_WITHDRAWAL_WEIGHT
+│   └── It should revert with StrategyManagerInvalidWithdrawalWeight
+└── Given valid parameters
+    ├── It should update withdrawalWeight
+    └── It should emit WithdrawalWeightUpdated
+
+StrategyManager::setStrategyWeights(address[] _strategies, uint8[] _depositWeights, uint8[] _withdrawalWeights)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given array lengths mismatch
+│   └── It should revert with StrategyManagerInvalidLength
+├── Given a strategy in the list is not registered
+│   ├── It should revert with StrategyManagerStrategyNotRegistered
+│   └── It should leave earlier strategies' weights unchanged (no partial update)
+├── Given a weight in the list exceeds MAX_DEPOSIT_WEIGHT or MAX_WITHDRAWAL_WEIGHT
+│   ├── It should revert with StrategyManagerInvalidDepositWeight / StrategyManagerInvalidWithdrawalWeight
+│   └── It should leave earlier strategies' weights unchanged (no partial update)
+└── Given valid parameters
+    ├── It should atomically update depositWeight and withdrawalWeight for each strategy
+    └── It should emit DepositWeightUpdated and WithdrawalWeightUpdated per strategy
+
+StrategyManager::removeStrategy(address _strategy)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given strategy NAV in ETH exceeds MAX_NAV_RESIDUE
+│   └── It should revert with StrategyManagerStrategyNAVResidueTooHigh
+├── Given strategy navInETH reverts
+│   └── It should revert (bubbles the strategy revert; use forceRemoveStrategy)
+├── Given strategy NAV in ETH is at most MAX_NAV_RESIDUE
+│   ├── It should remove the strategy successfully
+│   ├── It should clear depositWeight and withdrawalWeight to 0
+│   └── It should emit StrategyRemoved
+├── Given contract is paused
+│   ├── It should remove the strategy successfully (escape hatch; unlike addStrategy)
+│   └── It should emit StrategyRemoved
+├── Given valid parameters
+│   ├── It should remove strategy from EnumerableSet (via remove)
+│   ├── It should clear depositWeight and withdrawalWeight to 0
+│   ├── It should preserve lastStrategyWithdrawal (cooldown survives remove → re-add)
+│   ├── It should best-effort revoke CONVERTER_CALLER_ROLE via the Converter
+│   ├── It should emit StrategyRemoved
+│   └── It should NOT subtract NAV (NAV is read from strategy, not stored)
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::forceRemoveStrategy(address _strategy)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given strategy NAV in ETH exceeds MAX_NAV_RESIDUE (over-reporting strategy)
+│   ├── It should NOT revert (unlike removeStrategy)
+│   ├── It should remove the strategy successfully
+│   ├── It should clear depositWeight and withdrawalWeight to 0
+│   ├── It should emit StrategyForceRemoved with the reported NAV and navReverted false
+│   └── It should unfreeze totalNAVInETH (over-reported NAV no longer summed)
+├── Given strategy navInETH reverts
+│   ├── It should remove the strategy successfully
+│   ├── It should clear depositWeight and withdrawalWeight to 0
+│   └── It should emit StrategyForceRemoved with reportedNAV zero and navReverted true
+├── Given contract is paused
+│   ├── It should remove the strategy successfully (escape hatch; unlike addStrategy)
+│   └── It should emit StrategyForceRemoved
+├── Given valid parameters
+│   ├── It should remove strategy from EnumerableSet (via remove)
+│   ├── It should clear depositWeight and withdrawalWeight to 0
+│   ├── It should best-effort revoke CONVERTER_CALLER_ROLE (like removeStrategy)
+│   ├── It should preserve lastStrategyWithdrawal (shared _deregisterStrategy)
+│   └── It should NOT require the strategy to be paused (broken strategies may misreport paused())
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::orphaned strategy recovery (IStrategy.emergencyExit)
+├── Given strategy was force-removed while navInETH reverted and strategy still holds ETH
+│   ├── It should exclude orphaned ETH from totalNAVInETH
+│   ├── It should send orphaned ETH to StrategyManager on emergencyExit()
+│   ├── It should emit EmergencyExited on the strategy
+│   └── It should include recovered ETH in totalNAVInETH
+├── Given strategy is still registered and calls emergencyExit
+│   └── It should write off pending LP fees (charged = earned; pending fees zero after emergencyExit)
+
+StrategyManager::depositToStrategies(uint256 _amount)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given no strategies are registered
+│   └── It should revert with StrategyManagerNoStrategiesRegistered
+├── Given all strategies are unhealthy (maxDeposit > 0)
+│   ├── It should return zero
+│   ├── It should NOT deposit to any strategy
+│   └── It should return all ETH to controller
+├── Given all strategies are unhealthy or have zero maxDeposit
+│   ├── It should return zero
+│   ├── It should NOT deposit to any strategy
+│   └── It should return all ETH to controller
+├── Given all strategies are cooling down after a withdrawal (strategyDepositCooldown > 0)
+│   ├── It should return zero
+│   ├── It should NOT deposit to any strategy
+│   └── It should return all ETH to controller
+├── Given valid parameters
+│   ├── It should calculate deposit amounts based on depositWeight (proportional weighting)
+│   ├── It should skip strategies with zero depositWeight (no share of allocation; no revert)
+│   ├── It should respect maxDeposit limits for each strategy
+│   ├── It should skip unhealthy strategies
+│   ├── It should skip strategies cooling down after a withdrawal (strategyDepositCooldown > 0)
+│   ├── It should deposit funds to healthy strategies (via strategy.deposit())
+│   ├── It should emit FundsDepositedToStrategy event for each strategy
+│   ├── It should emit StrategyDepositFailed(strategy, reason) and continue when one strategy.deposit() reverts
+│   ├── It should return remaining funds to controller if any
+│   └── It should handle proportional deposit correctly
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::depositToStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given no strategies are registered
+│   └── It should revert with StrategyManagerNoStrategiesRegistered
+├── Given invalid range (endIndex > strategies.length or startIndex >= endIndex)
+│   └── It should revert with StrategyManagerInvalidRange
+├── Given no strategies in range are healthy or have zero maxDeposit
+│   ├── It should return zero
+│   ├── It should NOT deposit to any strategy in range
+│   └── It should return all ETH to controller
+├── Given valid parameters
+│   ├── It should calculate deposit amounts based on depositWeight only for strategies in range
+│   ├── It should skip strategies in range with zero depositWeight (no share of allocation; no revert)
+│   ├── It should respect maxDeposit limits for each strategy in range
+│   ├── It should skip unhealthy strategies in range
+│   ├── It should skip strategies in range cooling down after a withdrawal (strategyDepositCooldown > 0)
+│   ├── It should deposit funds only to healthy strategies in the specified range
+│   ├── It should emit FundsDepositedToStrategy event for each strategy in range
+│   ├── It should emit StrategyDepositFailed(strategy, reason) and continue when one strategy.deposit() reverts
+│   ├── It should return remaining funds to controller if any
+│   └── It should handle proportional deposit correctly within the range
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::depositToStrategy(address _strategy, uint256 _amount)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given strategy has zero maxDeposit
+│   ├── It should return zero
+│   └── It should return all ETH to controller
+├── Given strategy is cooling down after a withdrawal (strategyDepositCooldown > 0)
+│   └── It should revert with StrategyManagerStrategyInDepositCooldown
+├── Given strategyDepositCooldown > 0 but strategy has never been withdrawn from
+│   └── It should deposit normally (lastStrategyWithdrawal == 0 never triggers the cooldown)
+├── Given strategyDepositCooldown is zero (default)
+│   └── It should deposit normally even immediately after a withdrawal
+├── Given valid parameters
+│   ├── It should deposit funds to strategy (via strategy.deposit())
+│   ├── It should respect maxDeposit limit
+│   ├── It should emit FundsDepositedToStrategy event
+│   └── It should return remaining funds to controller if amount exceeds maxDeposit
+├── Given strategy.deposit() reverts
+│   └── It should revert (strict single-strategy path)
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::withdrawFromStrategies(uint256 _amount)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given no strategies are registered
+│   └── It should revert with StrategyManagerNoStrategiesRegistered
+├── Given no strategies have available liquidity (maxWithdrawal == 0)
+│   ├── It should return zero
+│   └── It should NOT call strategy.withdraw on any strategy
+├── Given valid parameters
+│   ├── It should harvest accrued performance fees in one EVE mint before any withdrawal
+│   ├── It should emit StrategyHarvestFailed(strategy, reason) and continue when one settlePerformanceFee() reverts during pre-withdraw harvest
+│   ├── It should calculate withdrawal based on withdrawalWeight (proportional weighting)
+│   ├── It should skip strategies with zero withdrawalWeight (no share of allocation; no revert)
+│   ├── It should respect maxWithdrawal limits for each strategy
+│   ├── It should withdraw funds from strategies (via strategy.withdraw(controller, amount))
+│   ├── It should record lastStrategyWithdrawal for each strategy withdrawn from (starts the deposit cooldown)
+│   ├── It should NOT be blocked by an active cooldown (withdrawals are exempt so exit liquidity is never blocked)
+│   ├── It should emit FundsWithdrawnFromStrategy with net ETH received by controller (balance delta across withdraw())
+│   ├── It should emit StrategyWithdrawFailed(strategy, reason) and continue when one strategy.withdraw() reverts
+│   └── It should handle proportional withdrawal correctly
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given invalid range (endIndex > strategies.length or startIndex >= endIndex)
+│   └── It should revert with StrategyManagerInvalidRange
+├── Given no strategies in range have available liquidity (maxWithdrawal == 0)
+│   ├── It should return zero
+│   └── It should NOT call strategy.withdraw on any strategy in range
+├── Given valid parameters
+│   ├── It should harvest accrued performance fees in one EVE mint before any withdrawal
+│   ├── It should emit StrategyHarvestFailed(strategy, reason) and continue when one settlePerformanceFee() reverts during pre-withdraw harvest
+│   ├── It should calculate withdrawal based on withdrawalWeight only for strategies in range
+│   ├── It should skip strategies in range with zero withdrawalWeight (no share of allocation; no revert)
+│   ├── It should respect maxWithdrawal limits for each strategy in range
+│   ├── It should withdraw funds only from strategies in the specified range
+│   ├── It should record lastStrategyWithdrawal for each strategy withdrawn from (starts the deposit cooldown)
+│   ├── It should NOT be blocked by an active cooldown (withdrawals are exempt so exit liquidity is never blocked)
+│   ├── It should emit FundsWithdrawnFromStrategy with net ETH received by controller (balance delta across withdraw())
+│   ├── It should emit StrategyWithdrawFailed(strategy, reason) and continue when one strategy.withdraw() reverts
+│   └── It should handle proportional withdrawal correctly within the range
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::withdrawFromStrategy(address _strategy, uint256 _amount)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given strategy has zero maxWithdrawal
+│   └── It should handle gracefully (strategy.withdraw() will handle validation)
+├── Given valid parameters
+│   ├── It should withdraw funds from strategy (via strategy.withdraw(controller, amount))
+│   ├── It should respect maxWithdrawal limit
+│   ├── It should record lastStrategyWithdrawal for the strategy (starts the deposit cooldown)
+│   ├── It should NOT be blocked by an active cooldown (withdrawals are exempt so exit liquidity is never blocked)
+│   ├── It should emit FundsWithdrawnFromStrategy with net ETH received by controller
+│   └── It should send funds to controller (via strategy.withdraw(controller, ...))
+├── Given strategy.withdraw() reverts
+│   └── It should revert (strict single-strategy path)
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::checkAndRebalanceStrategies()
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given valid parameters
+│   ├── It should iterate through all strategies
+│   ├── It should check if each strategy is healthy (via strategy.isHealthy())
+│   ├── It should call strategy.rebalance() for unhealthy strategies
+│   ├── It should emit StrategyRebalanced event for each rebalanced strategy
+│   ├── It should emit StrategyRebalanceFailed(strategy, reason) and continue when one strategy.rebalance() reverts
+│   ├── It should skip paused strategies
+│   └── It should skip healthy strategies
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::checkAndRebalanceStrategies(uint256 _startIndex, uint256 _endIndex)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given invalid range (endIndex > strategies.length or startIndex >= endIndex)
+│   └── It should revert with StrategyManagerInvalidRange
+├── Given valid parameters
+│   ├── It should iterate only through strategies in the specified range
+│   ├── It should check if each strategy in range is healthy (via strategy.isHealthy())
+│   ├── It should call strategy.rebalance() for unhealthy strategies in range
+│   ├── It should emit StrategyRebalanced event for each rebalanced strategy in range
+│   ├── It should emit StrategyRebalanceFailed(strategy, reason) and continue when one strategy.rebalance() reverts
+│   ├── It should skip paused strategies in range
+│   ├── It should skip healthy strategies in range
+│   └── It should NOT process strategies outside the range
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::checkAndRebalanceStrategy(address _strategy)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given strategy is healthy
+│   ├── It should NOT call strategy.rebalance()
+│   └── It should NOT emit StrategyRebalanced event
+├── Given strategy is paused
+│   ├── It should NOT call strategy.rebalance()
+│   └── It should NOT emit StrategyRebalanced event
+├── Given strategy is unhealthy
+│   ├── It should call strategy.rebalance()
+│   └── It should emit StrategyRebalanced event
+├── Given strategy.rebalance() reverts
+│   └── It should revert (strict single-strategy path)
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::syncStrategies()
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given valid parameters
+│   ├── It should iterate through all strategies
+│   ├── It should call strategy.sync() for each registered strategy that is not paused
+│   ├── It should skip strategies where paused() is true
+│   ├── It should emit StrategySynced event for each synced strategy
+│   └── It should emit StrategySyncFailed(strategy, reason) and continue when one strategy.sync() reverts
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::syncStrategies(uint256 _startIndex, uint256 _endIndex)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given invalid range (endIndex > strategies.length or startIndex >= endIndex)
+│   └── It should revert with StrategyManagerInvalidRange
+├── Given valid parameters
+│   ├── It should iterate only through strategies in the specified range
+│   ├── It should call strategy.sync() for each strategy in range that is not paused
+│   ├── It should skip paused strategies in range
+│   ├── It should emit StrategySynced event for each synced strategy in range
+│   ├── It should emit StrategySyncFailed(strategy, reason) and continue when one strategy.sync() reverts
+│   └── It should NOT process strategies outside the range
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::syncStrategy(address _strategy)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given strategy is registered
+│   ├── When strategy is not paused
+│   │   ├── It should call strategy.sync()
+│   │   └── It should emit StrategySynced event
+│   └── When strategy is paused
+│       ├── It should NOT call strategy.sync()
+│       └── It should NOT emit StrategySynced event
+├── Given strategy.sync() reverts
+│   └── It should revert (strict single-strategy path)
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::pause()
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should pause the contract immediately (no timelock)
+├── Given contract is not paused
+│   ├── It should pause the contract
+│   └── It should emit Paused event
+└── Given contract is already paused
+    └── It should revert with EnforcedPause
+
+StrategyManager::unpause()
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given contract is paused
+│   ├── It should unpause the contract
+│   └── It should emit Unpaused event
+└── Given contract is not paused
+    └── It should revert with ExpectedPause
+
+StrategyManager::emergencyWithdrawToController()
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should sweep idle ETH to the Controller
+├── Given StrategyManager holds no idle ETH
+│   └── It should revert with StrategyManagerNoBalanceToRecover
+└── Given StrategyManager holds idle ETH
+    ├── It should transfer the full balance to the Controller
+    ├── It should NOT be blocked by an active strategy deposit cooldown
+    └── It should emit EmergencyWithdrawnToController
+
+StrategyManager::addSupportedERC20(address _token)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given token is the zero address
+│   └── It should revert with StrategyManagerZeroAddress
+├── Given token has no contract code
+│   └── It should revert with StrategyManagerNoCode
+├── Given the Oracle has no feed for the token
+│   └── It should revert with StrategyManagerERC20NotPriceable
+├── Given token is already whitelisted
+│   └── It should revert with StrategyManagerERC20AlreadySupported
+├── Given contract is paused
+│   └── It should whitelist the token (whitelisting works while paused)
+└── Given valid parameters
+    ├── It should add the token to the supported-ERC-20 whitelist
+    ├── It should include the token's balance value in totalNAVInETH()
+    └── It should emit SupportedERC20Added
+
+StrategyManager::removeSupportedERC20(address _token)
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should remove the token (instant escape hatch for stale-feed / dust freezes)
+├── Given token is not whitelisted
+│   └── It should revert with StrategyManagerERC20NotSupported
+├── Given contract is paused
+│   └── It should remove the token (removal works while paused)
+├── Given the StrategyManager still holds a balance of the token
+│   ├── It should remove the token (escape hatch for a dead feed)
+│   └── It should drop the balance's value out of totalNAVInETH() immediately
+└── Given valid parameters
+    ├── It should remove the token from the supported-ERC-20 whitelist
+    ├── It should make no external calls (a bricked token cannot block its removal)
+    └── It should emit SupportedERC20Removed
+
+StrategyManager::supportedERC20()
+├── Given no tokens whitelisted
+│   └── It should return empty array
+└── Given tokens are whitelisted
+    └── It should return array of whitelisted token addresses (from EnumerableSet.values())
+
+StrategyManager::isSupportedERC20(address _token)
+├── Given token is whitelisted
+│   └── It should return true
+└── Given token is not whitelisted
+    └── It should return false
+
+StrategyManager::strategy`NAVIn`ETH(address _strategy)
+├── Given strategy is registered
+│   ├── It should call strategy.navInETH()
+│   └── It should return strategy NAV in ETH (18 decimals)
+└── Given strategy is not registered
+    └── It should revert with StrategyManagerStrategyNotRegistered
+
+StrategyManager::totalNAVInETH()
+├── Given AMM key is not registered in Registry
+│   └── It should revert with RegistryContractNotRegistered
+├── Given strategies are registered
+│   ├── It should sum all strategy NAVs (via strategy.navInETH())
+│   ├── It should resolve Controller and AMM through registry() and Auth at call time
+│   ├── It should include StrategyManager balance in ETH
+│   ├── It should include Controller balance in ETH
+│   ├── It should include AMM free balance in ETH (excludes lockedForClaims)
+│   ├── Given AMM holds locked claim ETH
+│   │   └── It should exclude lockedForClaims from NAV (count only freeBalance)
+│   └── It should return total NAV in ETH (18 decimals)
+├── Given whitelisted supported ERC-20s
+│   ├── Given a supported ERC-20 has a non-zero balance
+│   │   └── It should add the balance's ETH value via Oracle.convert (decimals normalized via IERC20Metadata.decimals())
+│   ├── Given a supported ERC-20 has a zero balance
+│   │   └── It should skip the Oracle entirely (zero balances cost ~nothing and cannot freeze NAV)
+│   ├── Given a supported ERC-20 with a non-zero balance has a stale or invalid feed
+│   │   └── It should revert (fail-closed; recover via removeSupportedERC20 — ADMIN or SECURITY)
+│   └── Given a stranded token is NOT whitelisted
+│       └── It should exclude the balance from NAV
+├── Given a registered strategy's navInETH reverts
+│   └── It should revert (protocol frozen until strategy is fixed or force-removed via forceRemoveStrategy)
+├── Given no strategies registered
+│   └── It should return StrategyManager + Controller + AMM free balances in ETH (or zero if none have balance)
+└── Given strategies with zero NAV
+    └── It should return correct total (including StrategyManager + Controller + AMM free balances)
+
+StrategyManager::strategyNAVInUSD(address _strategy)
+├── Given strategy is registered
+│   ├── It should call strategy.navInETH()
+│   ├── It should convert ETH NAV to USD via oracle
+│   └── It should return strategy NAV in USD (18 decimals)
+└── Given strategy is not registered
+    └── It should revert with StrategyManagerStrategyNotRegistered
+
+StrategyManager::totalNAVInUSD()
+├── Given strategies are registered
+│   ├── It should call totalNAVInETH() to get ETH NAV
+│   ├── It should convert ETH NAV to USD via oracle
+│   └── It should return total NAV in USD (18 decimals)
+├── Given a registered strategy's navInETH reverts
+│   └── It should revert (via totalNAVInETH())
+├── Given no strategies registered
+│   └── It should return StrategyManager + Controller + AMM free balances converted to USD (or zero if none have balance)
+└── Given strategies with zero NAV
+    └── It should return correct total (including StrategyManager + Controller + AMM free balances converted to USD)
+
+StrategyManager::isStrategyRegistered(address _strategy)
+├── Given strategy is registered
+│   └── It should return true
+├── Given strategy is not registered
+│   └── It should return false
+└── Given strategy address is zero
+    └── It should return false
+
+StrategyManager::strategies()
+├── Given no strategies registered
+│   └── It should return empty array
+├── Given strategies are registered
+│   └── It should return array of strategy addresses (from EnumerableSet.values())
+└── Given large number of strategies
+    └── It should return all strategies efficiently (may have gas implications)
+
+StrategyManager::strategyCount()
+├── Given no strategies registered
+│   └── It should return zero
+├── Given strategies are registered
+│   └── It should return count of strategies (from EnumerableSet.length())
+└── Given strategies are added and removed
+    └── It should return correct count
+
+StrategyManager::registry()
+└── It should return the protocol Registry address (set during initialization)
+
+StrategyManager::Fuzz Testing
+├── addStrategy() with random strategy addresses
+│   ├── It should handle valid strategy addresses
+│   └── It should revert on invalid strategy addresses
+├── depositToStrategies() with random amounts
+│   ├── It should handle valid amounts
+│   └── It should respect maxDeposit limits
+├── withdrawFromStrategies() with random amounts
+│   ├── It should handle valid amounts
+│   └── It should respect maxWithdrawal limits
+└── totalNAVInUSD() with random strategy NAVs
+    ├── It should calculate correctly
+    └── It should include Controller balance
+
+StrategyManager::Edge Cases
+├── Adding strategy with zero NAV
+│   └── It should succeed (strategy reports its own NAV)
+├── Strategies reporting different NAV values
+│   ├── It should read NAV correctly from each strategy
+│   └── It should calculate total NAV correctly
+├── Removing all strategies
+│   ├── It should clear all mappings
+│   ├── It should clear strategy set
+│   └── It should return Controller balance in totalNAVInUSD()
+├── Multiple rapid operations
+│   ├── It should handle sequential operations
+│   └── It should maintain consistency
+├── Deposit with no healthy strategies
+│   ├── It should return zero
+│   └── It should return all ETH to controller
+├── Withdrawal with no available liquidity
+│   └── It should return zero
+├── Deposit with empty registry
+│   └── It should revert with StrategyManagerNoStrategiesRegistered
+├── Withdrawal with empty registry
+│   └── It should revert with StrategyManagerNoStrategiesRegistered
+├── Invalid depositWeight (> MAX_DEPOSIT_WEIGHT)
+│   └── It should revert with StrategyManagerInvalidDepositWeight
+├── Invalid withdrawalWeight (> MAX_WITHDRAWAL_WEIGHT)
+│   └── It should revert with StrategyManagerInvalidWithdrawalWeight
+├── Pagination with invalid range
+│   ├── It should revert when endIndex > strategies.length
+│   └── It should revert when startIndex >= endIndex
+└── Pagination with valid range
+    ├── It should process only strategies in the specified range
+    └── It should skip strategies outside the range
+
+StrategyManager::Integration Scenarios
+├── Complete strategy lifecycle
+│   ├── Add strategy (strategy reports its own NAV)
+│   ├── Deposit funds to strategy
+│   ├── Withdraw funds from strategy
+│   ├── Verify NAV is read from strategy
+│   └── Remove strategy
+├── Multiple strategies management
+│   ├── Add multiple strategies
+│   ├── Deposit funds proportionally
+│   ├── Withdraw funds proportionally
+│   ├── Verify individual and total NAVs (read from strategies)
+│   └── Remove strategies selectively
+├── Keeper workflow integration
+│   ├── Controller receives ETH from AMM
+│   ├── Controller deposits to strategies via StrategyManager
+│   ├── Controller withdraws from strategies via StrategyManager
+│   └── Controller rebalances strategies via StrategyManager
+├── Role management integration
+│   ├── ADMIN_ROLE on Registry gates addStrategy/removeStrategy/forceRemoveStrategy/pause/unpause/upgrade
+│   ├── CONTROLLER identity verified via onlyValidContract(Auth.CONTROLLER)
+│   └── Operational roles are not stored locally on StrategyManager
+└── Upgrade scenarios
+    ├── Contract upgrade with state preservation
+    ├── Registry reference preserved in namespaced storage after upgrade
+    └── Strategy data integrity after upgrade
+
+StrategyManager::Upgrade Testing
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── It should allow contract upgrades
+│   └── It should maintain state after upgrade
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with UUPSUnauthorizedCallContext
+└── Given upgrade with invalid implementation
+    └── It should revert with UUPSUnsupportedProxiableUUID
+
+StrategyManager::Reentrancy Testing
+├── Given reentrancy in addStrategy
+│   └── It should revert with ReentrancyGuardReentrantCall
+├── Given reentrancy in removeStrategy
+│   └── It should revert with ReentrancyGuardReentrantCall
+├── Given reentrancy in depositToStrategies
+│   └── It should revert with ReentrancyGuardReentrantCall
+├── Given reentrancy in withdrawFromStrategies
+│   └── It should revert with ReentrancyGuardReentrantCall
+└── Given reentrancy in checkAndRebalanceStrategies
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::harvestPerformanceFeeFromStrategy(address _strategy)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given performanceFeeBps is zero
+│   └── It should return (0, 0) without minting
+├── Given strategy is paused
+│   └── It should return (0, 0) without minting
+├── Given no uncharged LP fees on the strategy
+│   └── It should return (0, 0) without minting
+├── Given uncharged LP fees round feeETH to zero
+│   ├── It should return (0, 0) without minting
+│   └── It should leave strategy charged counters unchanged (dust stays feeable)
+├── Given valid accrued fee and MINTER_ROLE granted
+│   ├── It should call strategy.settlePerformanceFee()
+│   ├── It should mint EVE to daoTreasury
+│   ├── It should return (eveAmount, feeETHEquivalent)
+│   └── It should emit PerformanceFeePaid
+├── Given strategy.settlePerformanceFee() reverts
+│   └── It should revert (strict single-strategy path)
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::harvestPerformanceFeeFromStrategies()
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given multiple strategies with accrued fees
+│   ├── It should settle each strategy via settlePerformanceFee()
+│   ├── It should mint EVE once for the summed feeETH at the pre-batch supply/NAV
+│   ├── It should return total (eveAmount, feeETHEquivalent)
+│   ├── It should emit per-strategy PerformanceFeePaid with pro-rata EVE
+│   └── It should emit StrategyHarvestFailed(strategy, reason) and continue when one settlePerformanceFee() reverts
+└── Given contract is paused
+    └── It should revert with EnforcedPause
+
+StrategyManager::harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex)
+├── Given caller is not the registered Controller
+│   └── It should revert with RegistryClientInvalidCaller
+├── Given contract is paused
+│   └── It should revert with EnforcedPause
+├── Given invalid range
+│   └── It should revert with StrategyManagerInvalidRange
+├── Given multiple strategies with accrued fees in range
+│   ├── It should settle each strategy in range via settlePerformanceFee()
+│   ├── It should mint EVE once for the summed feeETH at the pre-batch supply/NAV
+│   ├── It should return total (eveAmount, feeETHEquivalent)
+│   ├── It should emit per-strategy PerformanceFeePaid with pro-rata EVE
+│   ├── It should emit StrategyHarvestFailed(strategy, reason) and continue when one settlePerformanceFee() reverts
+│   └── It should leave pending fees on strategies outside the range
+└── Given reentrancy attack
+    └── It should revert with ReentrancyGuardReentrantCall
+
+StrategyManager::setPerformanceFeeBps(uint256 _feeBps)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given _feeBps exceeds MAX_PERFORMANCE_FEE_BPS
+│   └── It should revert with StrategyManagerInvalidPerformanceFeeBps
+└── Given valid _feeBps
+    ├── It should update performanceFeeBps (zero disables harvesting)
+    └── It should emit PerformanceFeeBpsChanged (initial is the prior stored value)
+
+StrategyManager::setDaoTreasury(address _treasury)
+├── Given _treasury is zero address
+│   └── It should revert with StrategyManagerZeroDaoTreasury
+└── Given valid non-zero treasury
+    ├── It should update daoTreasury
+    └── It should emit DaoTreasuryChanged (initial is the prior stored value)
+
+StrategyManager::setStrategyDepositCooldown(uint256 _cooldown)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given _cooldown exceeds MAX_STRATEGY_DEPOSIT_COOLDOWN
+│   └── It should revert with StrategyManagerInvalidStrategyDepositCooldown
+├── Given _cooldown equals MAX_STRATEGY_DEPOSIT_COOLDOWN
+│   └── It should update strategyDepositCooldown
+└── Given valid _cooldown
+    ├── It should update strategyDepositCooldown (zero disables the cooldown, default)
+    └── It should emit StrategyDepositCooldownUpdated with old and new values
+
+StrategyManager::isStrategyInDepositCooldown(address _strategy)
+├── Given strategyDepositCooldown is zero (default)
+│   └── It should return false
+├── Given strategy has never been withdrawn from (lastStrategyWithdrawal == 0)
+│   └── It should return false
+├── Given less than strategyDepositCooldown seconds elapsed since lastStrategyWithdrawal
+│   └── It should return true
+└── Given at least strategyDepositCooldown seconds elapsed since lastStrategyWithdrawal
+    └── It should return false
+
+StrategyManager::pendingPerformanceFeeInETH(address _strategy)
+├── Given strategy is not registered
+│   └── It should revert with StrategyManagerStrategyNotRegistered
+├── Given strategy is paused
+│   └── It should return zero
+├── Given strategy has uncharged LP fees and performanceFeeBps > 0
+│   └── It should delegate to strategy.pendingPerformanceFeeInETH(performanceFeeBps)
+└── Given no uncharged LP fees or performanceFeeBps is zero
+    └── It should return zero
+
+StrategyManager::Gas Optimization Testing
+├── Given large number of strategies
+│   ├── It should handle efficiently
+│   └── It should not exceed gas limits
+├── Given frequent deposit operations
+│   ├── It should optimize gas usage
+│   └── It should maintain performance
+└── Given strategy set operations
+    ├── It should handle set growth efficiently
+    └── It should optimize removal operations

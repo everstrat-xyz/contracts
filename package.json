@@ -1,0 +1,17 @@
+{
+  "name": "guide-dao-smart-contracts",
+  "version": "1.0.0",
+  "description": "Smart contracts for Guide DAO",
+  "private": true,
+  "scripts": {
+    "lint": "solhint 'src/**/*.sol' 'test/**/*.sol'",
+    "lint:fix": "solhint 'src/**/*.sol' 'test/**/*.sol' --fix"
+  },
+  "devDependencies": {
+    "solhint": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
+

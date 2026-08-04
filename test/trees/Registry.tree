@@ -1,0 +1,221 @@
+Registry::constructor(address _admin)
+├── Given _admin is zero address
+│   └── It should revert with RegistryZeroAddress
+├── Given _admin equals msg.sender (the deployer)
+│   └── It should revert with RegistryAdminIsDeployer (the deployer only ever holds a temporary bootstrap grant)
+├── Given valid parameters
+│   ├── It should grant ADMIN_ROLE to _admin (the designated admin — the admin timelock in production)
+│   ├── It should grant ADMIN_ROLE to msg.sender (deployer, temporary bootstrap grant)
+│   ├── It should set role admin for ADMIN_ROLE to ADMIN_ROLE
+│   └── It should NOT register any contracts initially
+│
+Registry::getContractByKey(bytes32 _key)
+├── Given key is registered
+│   └── It should return the registered contract address
+└── Given key is not registered
+    └── It should revert with RegistryContractNotRegistered
+
+Registry::getContractsByKeys(bytes32[] _keys)
+├── Given all keys are registered
+│   └── It should return addresses in the same order as keys
+└── Given any key is not registered
+    └── It should revert with RegistryContractNotRegistered
+
+Registry::getContractsAndKeys()
+├── Given no contracts registered
+│   └── It should return empty keys and addresses arrays
+└── Given contracts are registered
+    ├── It should return all registered keys
+    └── It should return matching addresses for each key
+
+Registry::getRoles()
+├── Given only ADMIN_ROLE members exist after init
+│   └── It should include ADMIN_ROLE in the returned set
+├── Given a role is granted for the first time
+│   ├── It should include that role after grant
+│   └── It should emit RoleRegistered on first grant
+├── Given a role still has members after partial revoke
+│   └── It should remain in the returned set (no RoleUnregistered)
+└── Given the last member of a role is revoked or renounces
+    ├── It should remove that role from the returned set
+    └── It should emit RoleUnregistered
+
+Registry::registerContract(bytes32 _key, address _address)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When _address is zero
+│   │   └── It should revert with RegistryZeroAddress
+│   ├── When _address has no contract code
+│   │   └── It should revert with RegistryContractNoCode
+│   ├── When key is not yet registered
+│   │   ├── It should register the contract
+│   │   ├── It should emit ContractRegistered with oldAddress=0
+│   │   └── It should make getContractByKey(_key) return _address
+│   ├── When key is already registered
+│   │   ├── It should update the registered address
+│   │   ├── It should emit ContractRegistered with old and new addresses
+│   │   └── It should overwrite the previous mapping entry
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::registerContracts(bytes32[] _keys, address[] _addresses)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When array lengths mismatch
+│   │   └── It should revert with RegistryInvalidLength
+│   ├── When all entries are valid
+│   │   ├── It should register each key-address pair
+│   │   └── It should emit ContractRegistered for each entry
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::deregisterContract(bytes32 _key)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When key is not registered
+│   │   └── It should revert with RegistryContractNotRegistered
+│   ├── When key is registered
+│   │   ├── It should remove the key from registered addresses
+│   │   ├── It should emit ContractUnregistered with the old address
+│   │   └── It should make getContractByKey(_key) revert with RegistryContractNotRegistered
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::deregisterContracts(bytes32[] _keys)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When any key is not registered
+│   │   └── It should revert with RegistryContractNotRegistered
+│   ├── When all keys are registered
+│   │   ├── It should unregister each key
+│   │   └── It should emit ContractUnregistered for each entry
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::grantRole(bytes32 _role, address _account)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When _account is zero address
+│   │   └── It should revert with RegistryZeroAddress
+│   ├── When grant succeeds
+│   │   ├── It should grant the role to _account
+│   │   ├── It should emit RoleRegistered on first use of _role
+│   │   └── It should emit RoleGranted (AccessControl)
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::grantRoles(bytes32[] _roles, address[] _accounts)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When array lengths mismatch
+│   │   └── It should revert with RegistryInvalidLength
+│   ├── When any account is zero address
+│   │   └── It should revert with RegistryZeroAddress
+│   ├── When all entries are valid
+│   │   └── It should grant each role-account pair
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::revokeRole(bytes32 _role, address _account)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When account is zero address
+│   │   └── It should revert with RegistryZeroAddress
+│   ├── When revoke succeeds and role still has members
+│   │   └── It should revoke the role without RoleUnregistered
+│   ├── When revoke removes the last member of a role
+│   │   ├── It should revoke the role
+│   │   └── It should emit RoleUnregistered
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::revokeRoles(bytes32[] _roles, address[] _accounts)
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When array lengths mismatch
+│   │   └── It should revert with RegistryInvalidLength
+│   ├── When any account is zero address
+│   │   └── It should revert with RegistryZeroAddress
+│   ├── When all entries are valid
+│   │   └── It should revoke each role-account pair
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::renounceRole(bytes32 _role, address _callerConfirmation)
+├── Given caller confirms their own address
+│   ├── When renounce removes the last member of a role
+│   │   ├── It should renounce the role
+│   │   └── It should emit RoleUnregistered
+│   └── When contract is paused
+│       ├── It should renounce the role (not gated by whenNotPaused)
+│       └── It should emit RoleUnregistered when last member
+└── Given caller confirmation does not match msg.sender
+    └── It should revert with AccessControlBadConfirmation
+
+Registry::pause()
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When contract is not paused
+│   │   ├── It should pause the contract
+│   │   └── It should emit Paused event
+│   └── When contract is already paused
+│       └── It should revert with EnforcedPause
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should pause the contract immediately (no timelock; also freezes role grants)
+└── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::unpause()
+├── Given caller has ADMIN_ROLE on Registry
+│   ├── When contract is paused
+│   │   ├── It should unpause the contract
+│   │   └── It should emit Unpaused event
+│   └── When contract is not paused
+│       └── It should revert with ExpectedPause
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Registry::ADMIN_ROLE()
+└── It should return Auth.ADMIN_ROLE (keccak256("ADMIN_ROLE"))
+
+Registry::Integration Scenarios
+├── Protocol deployment wiring
+│   ├── Deploy Registry and grant ADMIN to DAO and deployer
+│   ├── Deploy core contracts with registry address (RegistryClient / RegistryClientUpgradeable)
+│   ├── registerContracts for all six Auth keys (CONTROLLER, AMM, STRATEGY_MANAGER, EXIT_QUEUE, ORACLE, EVE)
+│   └── grantRoles on Registry for KEEPER, ORACLE_MANAGER, MINTER (typically AMM)
+├── Contract repointing
+│   ├── registerContract updates AMM address
+│   └── Consumers resolve new address via getContractByKey at call time
+├── Contract removal
+│   ├── deregisterContract removes AMM key from getContractsAndKeys
+│   ├── getContractByKey reverts with RegistryContractNotRegistered
+│   └── StrategyManager.totalNAVInETH reverts until AMM is re-registered
+├── Role lifecycle
+│   ├── grantRole adds keeper and tracks role in getRoles
+│   ├── revokeRole removes keeper when last member
+│   └── renounceRole cleans up empty role tracking
+└── Deployer admin finalization
+    ├── Given deployer equals DAO admin
+    │   └── finalize is no-op; deployer retains ADMIN_ROLE
+    ├── Given deployer differs from DAO admin
+    │   ├── Before finalize: deployer can registerContract
+    │   ├── After finalize: deployer renounces ADMIN_ROLE
+    │   ├── After finalize: deployer cannot registerContract
+    │   └── After finalize: DAO retains ADMIN and can register
+    └── Full modular flow: deployer registers, DAO grants roles, finalize, DAO can pause Controller
+
+Registry::Fuzz Testing
+├── registerContract with valid code-bearing addresses
+│   └── It should accept registration and resolve correctly
+├── grantRole/revokeRole with random accounts
+│   └── It should maintain AccessControl invariants
+└── register/unregister cycles
+    └── It should allow re-registration after unregister

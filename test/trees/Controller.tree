@@ -1,0 +1,487 @@
+Controller::initialize()
+├── Given _initialAdmin is zero address
+│   └── It should revert with ControllerZeroAddress
+├── Given token is zero address
+│   └── It should revert with ControllerZeroAddress
+├── Given valid parameters
+│   ├── It should set token address (eve)
+│   ├── It should grant ADMIN_ROLE to _initialAdmin
+│   ├── It should grant KEEPER_ROLE to _initialAdmin
+│   ├── It should grant DEPLOYER_ROLE to _initialAdmin
+│   ├── It should NOT grant DEFAULT_ADMIN_ROLE (inert in Controller)
+│   ├── It should set role admin for ADMIN_ROLE to ADMIN_ROLE
+│   ├── It should set role admin for KEEPER_ROLE to ADMIN_ROLE
+│   ├── It should leave role admin for DEPLOYER_ROLE as DEFAULT_ADMIN_ROLE (never granted, so role can never be granted)
+│   ├── It should initialize UUPS upgradeable
+│   ├── It should initialize AccessControl
+│   ├── It should initialize Pausable
+│   ├── It should initialize ReentrancyGuard
+│   ├── It should emit ControllerInitialized event
+│   └── It should NOT set strategy manager (must be set separately via setStrategyManager())
+└── Given already initialized
+    └── It should revert with InvalidInitialization
+
+Controller::receive() external payable
+├── Given ETH is sent to contract
+│   ├── It should accept ETH
+│   ├── It should update contract balance (increase)
+│   └── It should NOT revert (receive function has no restrictions)
+└── Given contract is paused
+    └── It should still accept ETH (receive function doesn't check pause)
+
+Controller::provideExitLiquidity(uint256 _amount)
+├── Given caller has KEEPER_ROLE
+│   ├── When AMM is not set
+│   │   └── It should revert with ControllerZeroAddress
+│   ├── When amount is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When amount is valid
+│   │   ├── It should transfer ETH from controller to AMM (via sendValue)
+│   │   ├── It should update controller balance (decrease)
+│   │   ├── It should update AMM balance (increase)
+│   │   └── It should emit ExitLiquidityProvided event
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When contract has insufficient ETH balance
+│       └── It should revert with ControllerInsufficientBalance
+├── Given caller does not have KEEPER_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+└── Given a reentrancy attempt from the AMM receiver (MockReentrantAMM)
+    ├── It should reject the reentrant call with ReentrancyGuardReentrantCall
+    └── It should still complete the outer call (AMM receives the full amount)
+
+Controller::emergencyExitToAMM()
+├── Given caller has ADMIN_ROLE
+│   ├── When AMM is not set
+│   │   └── It should revert with ControllerZeroAddress
+│   ├── When controller balance is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When controller has ETH balance
+│   │   ├── It should transfer full controller balance to AMM (via sendValue)
+│   │   ├── It should update controller balance to zero
+│   │   ├── It should update AMM balance (increase by full amount)
+│   │   └── It should emit EmergencyExitedToAMM event
+│   └── When contract is paused
+│       └── It should still succeed (function doesn't check pause)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+└── Given a reentrancy attempt from the AMM receiver (MockReentrantAMM)
+    ├── It should reject the reentrant call with ReentrancyGuardReentrantCall
+    └── It should still complete the outer call (AMM receives the full amount)
+
+Controller::depositToStrategies(uint256 _amount)
+├── Given caller has KEEPER_ROLE
+│   ├── When amount is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When controller balance is less than the deficit (targetAmount - SM.balance)
+│   │   └── It should revert with ControllerInsufficientBalance
+│   ├── When amount is valid and StrategyManager balance is zero
+│   │   ├── It should transfer full _amount to StrategyManager
+│   │   ├── It should update controller balance (decrease)
+│   │   ├── It should emit DepositToStrategiesCompleted event (with requested amount)
+│   │   ├── It should call strategyManager.depositToStrategies(_amount)
+│   │   └── It should deposit funds proportionally to healthy strategies based on safety levels
+│   ├── When StrategyManager already holds ETH (top-up path)
+│   │   ├── It should validate only against the deficit (controller.balance >= targetAmount - SM.balance)
+│   │   ├── It should send only the deficit to StrategyManager
+│   │   ├── It should leave StrategyManager with exactly _amount before the deposit call
+│   │   ├── It should absorb the pre-existing SM balance into the deposit
+│   │   └── It should leave StrategyManager balance at zero after the deposit call
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::depositToStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
+├── Given caller has KEEPER_ROLE
+│   ├── When amount is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When controller balance is less than the deficit (targetAmount - SM.balance)
+│   │   └── It should revert with ControllerInsufficientBalance
+│   ├── When range is invalid (endIndex > strategies.length or startIndex >= endIndex)
+│   │   └── It should revert with StrategyManagerInvalidRange
+│   ├── When amount and range are valid
+│   │   ├── It should transfer ETH to StrategyManager (via deposit with indices)
+│   │   ├── It should update controller balance (decrease)
+│   │   ├── It should emit DepositToStrategiesCompleted event (with requested amount)
+│   │   ├── It should call strategyManager.depositToStrategies(_startIndex, _endIndex, _amount)
+│   │   ├── It should deposit funds only to strategies in the specified range
+│   │   └── It should deposit funds proportionally based on safety levels within the range
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::depositToStrategy(address _strategy, uint256 _amount)
+├── Given caller has KEEPER_ROLE
+│   ├── When amount is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When controller balance is less than the deficit (targetAmount - SM.balance)
+│   │   └── It should revert with ControllerInsufficientBalance
+│   ├── When amount is valid and StrategyManager balance is zero
+│   │   ├── It should transfer full _amount to StrategyManager
+│   │   ├── It should update controller balance (decrease)
+│   │   ├── It should emit DirectDepositCompleted event (with strategy and requested amount)
+│   │   ├── It should call strategyManager.depositToStrategy(_strategy, _amount)
+│   │   └── It should deposit funds to the specified strategy
+│   ├── When StrategyManager already holds ETH (top-up path)
+│   │   ├── It should validate only against the deficit (controller.balance >= targetAmount - SM.balance)
+│   │   ├── It should send only the deficit to StrategyManager
+│   │   ├── It should leave StrategyManager with exactly _amount before the deposit call
+│   │   └── It should leave StrategyManager balance at zero after the deposit call
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::withdrawFromStrategies(uint256 _amount)
+├── Given caller has KEEPER_ROLE
+│   ├── When amount is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When amount is valid
+│   │   ├── It should call strategyManager.withdrawFromStrategies(_amount)
+│   │   ├── It should receive ETH from strategies (via controller receive function)
+│   │   ├── It should update controller balance (increase)
+│   │   ├── It should emit WithdrawalCompleted event (with requested amount)
+│   │   └── It should withdraw funds proportionally from strategies based on withdrawal priorities
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
+├── Given caller has KEEPER_ROLE
+│   ├── When amount is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When range is invalid (endIndex > strategies.length or startIndex >= endIndex)
+│   │   └── It should revert with StrategyManagerInvalidRange
+│   ├── When amount and range are valid
+│   │   ├── It should call strategyManager.withdrawFromStrategies(_startIndex, _endIndex, _amount)
+│   │   ├── It should receive ETH from strategies in the specified range (via controller receive function)
+│   │   ├── It should update controller balance (increase)
+│   │   ├── It should emit WithdrawalCompleted event (with requested amount)
+│   │   ├── It should withdraw funds only from strategies in the specified range
+│   │   └── It should withdraw funds proportionally based on withdrawal priorities within the range
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::withdrawFromStrategy(address _strategy, uint256 _amount)
+├── Given caller has KEEPER_ROLE
+│   ├── When amount is zero
+│   │   └── It should revert with ControllerZeroAmountRequested
+│   ├── When amount is valid
+│   │   ├── It should call strategyManager.withdrawFromStrategy(_strategy, _amount)
+│   │   ├── It should receive ETH from strategy (via controller receive function)
+│   │   ├── It should update controller balance (increase)
+│   │   ├── It should emit DirectWithdrawalCompleted event (with strategy and requested amount)
+│   │   └── It should withdraw funds from the specified strategy
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::checkAndRebalanceStrategies()
+├── Given caller has KEEPER_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should call strategyManager.checkAndRebalanceStrategies()
+│   │   └── It should rebalance all unhealthy strategies
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::checkAndRebalanceStrategies(uint256 _startIndex, uint256 _endIndex)
+├── Given caller has KEEPER_ROLE
+│   ├── When range is invalid (endIndex > strategies.length or startIndex >= endIndex)
+│   │   └── It should revert with StrategyManagerInvalidRange
+│   ├── When contract is not paused and range is valid
+│   │   ├── It should call strategyManager.checkAndRebalanceStrategies(_startIndex, _endIndex)
+│   │   ├── It should rebalance only unhealthy strategies in the specified range
+│   │   └── It should skip strategies outside the range
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::checkAndRebalanceStrategy(address _strategy)
+├── Given caller has KEEPER_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should call strategyManager.checkAndRebalanceStrategy(_strategy)
+│   │   └── It should rebalance the specific strategy if unhealthy
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::syncStrategies()
+├── Given caller has KEEPER_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should call strategyManager.syncStrategies()
+│   │   └── It should sync all registered strategies
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::syncStrategies(uint256 _startIndex, uint256 _endIndex)
+├── Given caller has KEEPER_ROLE
+│   ├── When range is invalid (endIndex > strategies.length or startIndex >= endIndex)
+│   │   └── It should revert with StrategyManagerInvalidRange
+│   ├── When contract is not paused and range is valid
+│   │   ├── It should call strategyManager.syncStrategies(_startIndex, _endIndex)
+│   │   └── It should sync only strategies in the specified range
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::syncStrategy(address _strategy)
+├── Given caller has KEEPER_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should call strategyManager.syncStrategy(_strategy)
+│   │   └── It should sync the specific strategy
+│   ├── When strategy is not registered
+│   │   └── It should revert with StrategyManagerStrategyNotRegistered
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When strategy manager is not set
+│       └── It should revert (external call to address(0) will fail)
+└── Given caller does not have KEEPER_ROLE
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::harvestPerformanceFeeFromStrategy(address _strategy)
+├── Given caller has ADMIN_ROLE or KEEPER_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should call strategyManager.harvestPerformanceFeeFromStrategy(_strategy)
+│   │   └── It should emit DirectPerformanceFeeHarvestCompleted
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller has neither ADMIN_ROLE nor KEEPER_ROLE
+    └── It should revert with RegistryClientCallerHasNoneOfRoles
+
+Controller::harvestPerformanceFeeFromStrategies()
+├── Given caller has ADMIN_ROLE or KEEPER_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should call strategyManager.harvestPerformanceFeeFromStrategies()
+│   │   └── It should emit PerformanceFeeHarvestCompleted
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller has neither ADMIN_ROLE nor KEEPER_ROLE
+    └── It should revert with RegistryClientCallerHasNoneOfRoles
+
+Controller::harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex)
+├── Given caller has ADMIN_ROLE or KEEPER_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should call strategyManager.harvestPerformanceFeeFromStrategies(_startIndex, _endIndex)
+│   │   └── It should emit PerformanceFeeHarvestCompleted
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+└── Given caller has neither ADMIN_ROLE nor KEEPER_ROLE
+    └── It should revert with RegistryClientCallerHasNoneOfRoles
+
+Controller::setStrategyManager(address _newStrategyManager)
+├── Given caller has DEPLOYER_ROLE
+│   ├── When new strategy manager is zero address
+│   │   └── It should revert with ControllerZeroAddress
+│   ├── When new strategy manager address has no contract code (EOA or empty)
+│   │   └── It should revert with ControllerNoCode
+│   ├── When new strategy manager is valid
+│   │   ├── It should update strategy manager address
+│   │   ├── It should emit StrategyManagerSet event with (strategyManager)
+│   │   └── It should NOT check pause status (function doesn't have whenNotPaused modifier)
+│   └── When contract is paused
+│       └── It should still succeed (function doesn't check pause)
+├── Given caller does not have DEPLOYER_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+└── Given deployer has revoked DEPLOYER_ROLE from themselves
+    └── It should revert with AccessControlUnauthorizedAccount (wiring is now permanently immutable)
+
+Controller::pause()
+├── Given caller has ADMIN_ROLE
+│   ├── When contract is not paused
+│   │   ├── It should pause the contract
+│   │   ├── It should emit Paused event (with msg.sender)
+│   │   └── It should NOT check pause status (function doesn't have whenNotPaused modifier)
+│   └── When contract is already paused
+│       └── It should revert with EnforcedPause
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should pause the contract immediately (no timelock)
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+
+Controller::unpause()
+├── Given caller has ADMIN_ROLE
+│   ├── When contract is paused
+│   │   ├── It should unpause the contract
+│   │   └── It should emit Unpaused event (with msg.sender)
+│   └── When contract is not paused
+│       └── It should revert with ExpectedPause
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+└── Given caller is not authorized
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::version()
+└── It should return "1.0.0"
+
+Controller::eve()
+└── It should return EVE token address
+
+Controller::strategyManager (public variable)
+└── It should return strategy manager address (automatically via public getter)
+
+Controller::ADMIN_ROLE (public constant)
+└── It should return admin role identifier (keccak256("ADMIN_ROLE"))
+
+Controller::KEEPER_ROLE (public constant)
+└── It should return keeper role identifier (keccak256("KEEPER_ROLE"))
+
+Controller::Access Control Testing
+├── Role management
+│   ├── Admin can grant and revoke roles
+│   └── Non-admin cannot grant or revoke roles
+└── Initialization
+    ├── Initial admin has all required roles
+    └── Implementation contract is disabled
+
+Controller::Fuzz Testing
+├── provideExitLiquidity() within the valid range (0 < _amount <= balance)
+│   ├── It should succeed and forward exactly _amount to the AMM
+│   └── It should decrease the controller balance by exactly _amount
+├── provideExitLiquidity() with _amount greater than the controller balance
+│   └── It should revert with ControllerInsufficientBalance
+├── initialize() with any non-zero admin address
+│   ├── It should grant ADMIN_ROLE to the fuzzed admin
+│   └── It should NOT grant DEFAULT_ADMIN_ROLE (inert in Controller)
+└── upgradeToAndCall() with any non-admin caller
+    └── It should revert with AccessControlUnauthorizedAccount (ADMIN_ROLE gate)
+
+Controller::Upgrade Testing
+├── Given upgrade authorization (ADMIN_ROLE)
+│   ├── It should allow contract upgrades
+│   └── It should maintain state after upgrade
+└── Given unauthorized upgrade attempt (non-admin caller)
+    └── It should revert with AccessControlUnauthorizedAccount
+
+Controller::Proxy Testing
+└── It should correctly point to implementation address
+
+Controller::priceBatch()
+├── Given caller has KEEPER_ROLE
+│   ├── When AMM key is not registered in Registry
+│   │   └── It should revert with RegistryContractNotRegistered
+│   ├── When contract is not paused
+│   │   ├── It should get the base EVE price from AMM (NAV / supply via amm.eveBasePriceInETH())
+│   │   ├── It should call exitQueue.priceBatch() with the price
+│   │   └── It should price the current batch
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When current batch is empty
+│       └── It should revert (ExitQueue will revert with ExitQueueBatchIsEmpty)
+├── Given caller does not have KEEPER_ROLE
+│   └── It should revert with RegistryClientMissingRole
+└── Given reentrancy attempt
+    └── It should revert with ReentrancyGuardReentrantCall
+
+Controller::processRequest(uint256 _batchId, address _user)
+├── Given caller has KEEPER_ROLE
+│   ├── When batch ID does not exist or user not in batch
+│   │   └── It should revert (ExitQueue will revert with ExitQueueRequestNotInBatch)
+│   ├── When request is already processed
+│   │   └── It should revert (ExitQueue will revert with ExitQueueRequestAlreadyProcessed)
+│   ├── When batch is not priced yet
+│   │   └── It should revert (ExitQueue will revert with ExitQueueBatchCannotBeProcessed)
+│   ├── When contract has insufficient ETH balance (for ethToRedeem)
+│   │   └── It should revert with ControllerInsufficientBalance
+│   ├── When price slippage exceeds tolerance (finalPrice < requestPrice * (1 - tolerance))
+│   │   ├── It should calculate ethToRedeem as 0
+│   │   ├── It should call amm.processRedemption{value: 0}()
+│   │   ├── It should NOT transfer ETH from Controller
+│   │   └── It should mark request as closedDueToSlippage
+│   ├── When price is within tolerance
+│   │   ├── It should calculate ethToRedeem using finalEvePrice
+│   │   ├── It should transfer ETH to AMM (via processRedemption{value: ethToRedeem})
+│   │   ├── It should update controller balance (decrease)
+│   │   └── It should process the redemption
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When AMM key is not registered in Registry
+│       └── It should revert with RegistryContractNotRegistered
+├── Given caller does not have KEEPER_ROLE
+│   └── It should revert with RegistryClientMissingRole
+└── Given reentrancy attempt
+    └── It should revert with ReentrancyGuardReentrantCall
+
+Controller::processRequests(uint256 _batchId)
+├── Given caller has KEEPER_ROLE
+│   ├── When batch ID does not exist
+│   │   └── It should revert (ExitQueue will revert)
+│   ├── When batch is not priced yet
+│   │   └── It should revert (ExitQueue will revert with ExitQueueBatchCannotBeProcessed)
+│   ├── When batch is empty (no unprocessed users)
+│   │   └── It should succeed without processing any requests
+│   ├── When batch has unprocessed users
+│   │   ├── It should process all unprocessed users in the batch
+│   │   ├── It should call _processRequest for each user
+│   │   └── It should handle slippage checks for each request
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When contract has insufficient ETH balance
+│       └── It should revert with ControllerInsufficientBalance (for first request that needs ETH)
+├── Given caller does not have KEEPER_ROLE
+│   └── It should revert with RegistryClientMissingRole
+└── Given reentrancy attempt
+    └── It should revert with ReentrancyGuardReentrantCall
+
+Controller::processRequests(uint256 _batchId, uint256 _startIndex, uint256 _endIndex)
+├── Given caller has KEEPER_ROLE
+│   ├── When range is invalid (endIndex > unprocessedUsersCount or startIndex >= endIndex)
+│   │   └── It should revert (ExitQueue will revert with ExitQueueInvalidRange)
+│   ├── When batch is not priced yet
+│   │   └── It should revert (ExitQueue will revert with ExitQueueBatchCannotBeProcessed)
+│   ├── When range and batch are valid
+│   │   ├── It should process only users in the specified range
+│   │   ├── It should call _processRequest for each user in range
+│   │   └── It should skip users outside the range
+│   ├── When contract is paused
+│   │   └── It should revert with EnforcedPause
+│   └── When contract has insufficient ETH balance
+│       └── It should revert with ControllerInsufficientBalance
+├── Given caller does not have KEEPER_ROLE
+│   └── It should revert with RegistryClientMissingRole
+└── Given reentrancy attempt
+    └── It should revert with ReentrancyGuardReentrantCall
+
+Controller::Edge Cases
+├── ETH flow from AMM
+│   ├── It should receive ETH from AMM
+│   ├── It should accumulate ETH balance
+│   └── It should allow distribution to strategies
+└── Strategy manager configuration
+    ├── It should allow setting new strategy manager
+    ├── It should verify CONTROLLER_ROLE is granted
+    └── It should fail if strategy manager doesn't grant CONTROLLER_ROLE

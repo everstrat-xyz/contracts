@@ -1,0 +1,313 @@
+Oracle::initialize(address _admin)
+└── Given valid admin
+    ├── It should grant ADMIN_ROLE to admin
+    └── It should grant ORACLE_MANAGER_ROLE to admin
+
+Oracle::updateUsdFeedInfo(address _token, address _priceFeed, uint256 _stalenessInterval)
+├── Given caller has ADMIN_ROLE
+│   ├── When price feed is zero address
+│   │   └── It should revert with OracleZeroAddress
+│   ├── When staleness interval is zero
+│   │   └── It should revert with OracleZeroStalenessInterval
+│   ├── When token is not yet supported (first USD-feed registration)
+│   │   ├── When price feed decimals > 18
+│   │   │   ├── It should revert with OracleInvalidFeedDecimals
+│   │   │   └── It should NOT add token to supported tokens set
+│   │   ├── When price feed decimals <= 18
+│   │   │   ├── It should add token to supported tokens set (token registration)
+│   │   │   ├── It should set USD price feed and staleness interval
+│   │   │   ├── It should increment supported token count
+│   │   │   └── It should emit UsdFeedAdded event
+│   │   ├── When price feed has exactly 18 decimals
+│   │   │   ├── It should register the token
+│   │   │   └── It should return the already-normalized price (2000e18)
+│   │   └── When token is address(0) (native ETH)
+│   │       ├── It should register native ETH as supported
+│   │       └── It should set USD price feed and staleness interval
+│   └── When token is already supported (updating existing USD feed)
+│       ├── When price feed and staleness interval are unchanged
+│       │   └── It should revert with OracleNothingToUpdate
+│       ├── When only the price feed is changed
+│       │   ├── When new price feed decimals > 18
+│       │   │   ├── It should revert with OracleInvalidFeedDecimals
+│       │   │   └── It should leave original price feed unchanged
+│       │   └── When new price feed decimals <= 18
+│       │       ├── It should update price feed
+│       │       └── It should emit UsdFeedUpdated event
+│       ├── When only the staleness interval is changed
+│       │   ├── It should update staleness interval
+│       │   └── It should emit UsdStalenessIntervalUpdated event
+│       └── When both price feed and staleness interval are changed
+│           ├── It should update price feed
+│           ├── It should update staleness interval
+│           ├── It should emit UsdFeedUpdated event
+│           └── It should emit UsdStalenessIntervalUpdated event
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert (AccessControlUnauthorizedAccount)
+
+Oracle::removeToken(address _token)
+├── Given caller has ADMIN_ROLE
+│   ├── When token is supported
+│   │   ├── It should clear outbound pair feeds and emit PairFeedRemoved for each
+│   │   ├── It should clear inbound pair feeds that quote this token
+│   │   ├── It should remove token from supported tokens set
+│   │   ├── It should emit TokenRemoved event
+│   │   └── It should decrease supported token count
+│   ├── When token is not supported
+│   │   └── It should revert with OracleTokenNotSupported
+│   └── When token is address(0) (native ETH)
+│       ├── It should remove native ETH from supported tokens
+│       └── It should emit TokenRemoved event
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert (AccessControlUnauthorizedAccount)
+
+Oracle::getUsdPrice(address _token)
+├── Given token is supported
+│   ├── When price feed returns a valid, non-stale price
+│   │   ├── It should return normalized price (18 decimals)
+│   │   └── It should return updatedAt as the timestamp
+│   ├── When price is stale (exceeds token staleness interval)
+│   │   └── It should revert with OracleStalePrice
+│   ├── When answer <= 0 (negative price)
+│   │   └── It should revert with OracleInvalidPrice
+│   ├── When updatedAt == 0 (no round data)
+│   │   └── It should revert with OracleNoRoundData
+│   ├── When updatedAt > block.timestamp (future timestamp)
+│   │   └── It should revert with OracleInvalidTimestamp
+│   ├── When updatedAt == block.timestamp
+│   │   └── It should return price and timestamp successfully
+│   └── When the price feed uses 18 decimals
+│       └── It should return the price already normalized to 18 decimals
+└── Given token is not supported
+    └── It should revert with OracleTokenNotSupported
+
+Oracle::getUsdPriceWithStalenessCheck(address _token, uint256 _maxStaleness)
+├── Given token is supported
+│   ├── When price is within _maxStaleness
+│   │   └── It should return normalized price (18 decimals)
+│   ├── When _maxStaleness is larger than the token's staleness interval
+│   │   └── It should return the price using _maxStaleness
+│   ├── When _maxStaleness is stricter than the token's staleness interval
+│   │   └── It should return the price using _maxStaleness
+│   ├── When price is stale (exceeds _maxStaleness)
+│   │   └── It should revert with OracleStalePrice
+│   ├── When updatedAt == 0
+│   │   └── It should revert with OracleNoRoundData
+│   └── When updatedAt > block.timestamp
+│       └── It should revert with OracleInvalidTimestamp
+└── Given token is not supported
+    └── It should revert with OracleTokenNotSupported
+
+Oracle::convertTokenToUSD(address _token, uint256 _amount, uint8 _inputDecimals)
+├── Given token is supported
+│   ├── When inputs are valid and price is fresh
+│   │   ├── It should normalize input amount to 18 decimals
+│   │   ├── It should multiply normalized amount by normalized price
+│   │   └── It should return USD amount in 18 decimals
+│   ├── When _inputDecimals differ from 18 (e.g. 8)
+│   │   └── It should normalize the amount before converting
+│   ├── When the price feed uses 18 decimals
+│   │   └── It should convert correctly
+│   ├── When price is stale
+│   │   └── It should revert with OracleStalePrice
+│   ├── When answer <= 0 (invalid price)
+│   │   └── It should revert with OracleInvalidPrice
+│   ├── When updatedAt == 0
+│   │   └── It should revert with OracleNoRoundData
+│   └── When updatedAt > block.timestamp
+│       └── It should revert with OracleInvalidTimestamp
+└── Given token is not supported
+    └── It should revert with OracleTokenNotSupported
+
+Oracle::convertUsdToToken(address _token, uint256 _amount, uint8 _outputDecimals)
+├── Given token is supported
+│   ├── When inputs are valid and price is fresh
+│   │   ├── It should divide USD amount by normalized price
+│   │   ├── It should unnormalize result to _outputDecimals
+│   │   └── It should return token amount with _outputDecimals
+│   ├── When _outputDecimals differ from 18 (e.g. 8)
+│   │   └── It should unnormalize the result to _outputDecimals
+│   ├── When price is stale
+│   │   └── It should revert with OracleStalePrice
+│   ├── When answer <= 0 (invalid price)
+│   │   └── It should revert with OracleInvalidPrice
+│   ├── When updatedAt == 0
+│   │   └── It should revert with OracleNoRoundData
+│   └── When updatedAt > block.timestamp
+│       └── It should revert with OracleInvalidTimestamp
+└── Given token is not supported
+    └── It should revert with OracleTokenNotSupported
+
+Oracle::convert(address _tokenIn, address _tokenOut, uint256 _amountIn, uint8 _inputDecimals, uint8 _outputDecimals)
+├── Given both tokens are supported
+│   ├── When a direct pair feed (_tokenIn / _tokenOut) is registered
+│   │   ├── When the pair feed is fresh
+│   │   │   ├── It should convert using the pair price (amountIn * pairPrice)
+│   │   │   ├── It should prefer the pair feed over the USD cross-rate
+│   │   │   ├── It should normalize _amountIn from _inputDecimals before converting
+│   │   │   └── It should unnormalize the result to _outputDecimals
+│   │   └── When the pair feed is stale
+│   │       └── It should revert with OracleStalePrice (no silent USD fallback)
+│   ├── When only an inverted pair feed (_tokenOut / _tokenIn) is registered
+│   │   └── It should convert using the inverse of the inverted pair price
+│   ├── When no pair feed is registered
+│   │   ├── When prices are fresh
+│   │   │   ├── It should return amountIn * priceIn / priceOut as a single USD cross-rate
+│   │   │   ├── It should normalize _amountIn from _inputDecimals before converting
+│   │   │   ├── It should unnormalize the result to _outputDecimals
+│   │   │   └── It should agree with chained convertTokenToUSD -> convertUsdToToken for round prices
+│   │   ├── When the input feed is stale
+│   │   │   └── It should revert with OracleStalePrice
+│   │   └── When the output feed is stale
+│   │       └── It should revert with OracleStalePrice
+│   ├── When a pair feed is removed after registration
+│   │   └── It should fall back to the USD cross-rate
+│   └── When _tokenIn equals _tokenOut
+│       └── It should only convert decimals (no feed reads beyond support checks)
+├── Given _tokenIn is not supported
+│   └── It should revert with OracleTokenNotSupported
+└── Given _tokenOut is not supported
+    └── It should revert with OracleTokenNotSupported
+
+Oracle::updatePairFeedInfo(address _tokenA, address _tokenB, address _priceFeed, uint256 _stalenessInterval)
+├── Given caller has ADMIN_ROLE
+│   ├── When _tokenA equals _tokenB
+│   │   └── It should revert with OracleIdenticalTokens
+│   ├── When either token is not USD-supported
+│   │   └── It should revert with OracleTokenNotSupported
+│   ├── When price feed is zero address
+│   │   └── It should revert with OracleZeroAddress
+│   ├── When staleness interval is zero
+│   │   └── It should revert with OracleZeroStalenessInterval
+│   ├── When pair is not registered (new pair)
+│   │   ├── When price feed decimals > 18
+│   │   │   ├── It should revert with OracleInvalidFeedDecimals
+│   │   │   └── It should NOT register the pair
+│   │   └── When price feed decimals <= 18
+│   │       ├── It should store the pair feed and staleness interval
+│   │       ├── It should report isPairSupported as true
+│   │       └── It should emit PairFeedAdded event
+│   └── When pair is already registered (updating)
+│       ├── When price feed and staleness interval are unchanged
+│       │   └── It should revert with OracleNothingToUpdate
+│       └── When feed and/or staleness change
+│           ├── It should update the stored values
+│           ├── It should emit PairFeedUpdated when the feed changes
+│           └── It should emit PairStalenessIntervalUpdated when staleness changes
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert (AccessControlUnauthorizedAccount)
+
+Oracle::removePairFeedInfo(address _tokenA, address _tokenB)
+├── Given caller has ADMIN_ROLE
+│   ├── When pair is registered
+│   │   ├── It should clear the pair feed
+│   │   ├── It should report isPairSupported as false
+│   │   └── It should emit PairFeedRemoved event
+│   └── When pair is not registered
+│       └── It should revert with OraclePairNotRegistered
+└── Given caller does not have ADMIN_ROLE
+    └── It should revert (AccessControlUnauthorizedAccount)
+
+Oracle::isPairSupported(address _tokenA, address _tokenB)
+├── Given pair is registered
+│   └── It should return true
+└── Given pair is not registered
+    └── It should return false
+
+Oracle::getSupportedPairs(address _tokenA)
+├── Given token is supported
+│   ├── When no pair feeds are registered
+│   │   └── It should return an empty array
+│   └── When pair feeds are registered
+│       └── It should return the quote token addresses
+└── Given token is not supported
+    └── It should revert with OracleTokenNotSupported
+
+Oracle::getPairFeedInfo(address _tokenA, address _tokenB)
+├── Given pair is registered
+│   ├── It should return the price feed address
+│   └── It should return the staleness interval
+└── Given pair is not registered
+    └── It should revert with OraclePairNotRegistered
+
+Oracle::getPairPrice(address _tokenA, address _tokenB)
+├── Given pair is registered
+│   ├── When the pair feed is fresh
+│   │   ├── It should return the normalized pair price (18 decimals)
+│   │   └── It should return updatedAt as the timestamp
+│   └── When the pair feed is stale
+│       └── It should revert with OracleStalePrice
+└── Given pair is not registered
+    └── It should revert with OraclePairNotRegistered
+
+Oracle::getPairPriceWithStalenessCheck(address _tokenA, address _tokenB, uint256 _maxStaleness)
+├── Given pair is registered
+│   ├── When price is within _maxStaleness
+│   │   └── It should return the normalized pair price
+│   └── When price exceeds _maxStaleness
+│       └── It should revert with OracleStalePrice
+└── Given pair is not registered
+    └── It should revert with OraclePairNotRegistered
+
+Oracle::isTokenSupported(address _token)
+├── Given token is supported
+│   └── It should return true
+├── Given token is not supported
+│   └── It should return false
+└── Given token is address(0) (native ETH) and added
+    └── It should return true
+
+Oracle::getSupportedTokens()
+├── Given no tokens are supported
+│   └── It should return an empty array
+└── Given multiple tokens are supported
+    └── It should return an array containing all supported token addresses
+
+Oracle::getSupportedTokenCount()
+├── Given no tokens are supported
+│   └── It should return zero
+└── Given multiple tokens are supported
+    └── It should return the count of supported tokens
+
+Oracle::getUsdFeedInfo(address _token)
+├── Given token is supported
+│   ├── It should return the price feed address
+│   └── It should return the staleness interval
+└── Given token is not supported
+    └── It should revert with OracleTokenNotSupported
+
+Oracle::Integration
+└── Complete token lifecycle (test_CompleteWorkflow)
+    ├── Add token with price feed
+    ├── Get price (normalized to 18 decimals)
+    ├── Update price feed and staleness interval
+    ├── Get updated price reflecting the new feed
+    ├── Verify the updated staleness interval via getUsdFeedInfo
+    └── Remove token (isTokenSupported becomes false)
+
+Oracle::Fuzz Testing
+├── testFuzz_GetUsdPriceWithStalenessCheck(maxStaleness)
+│   ├── When maxStaleness >= elapsed time since updatedAt
+│   │   └── It should return the normalized price
+│   └── When maxStaleness < elapsed time
+│       └── It should revert with OracleStalePrice
+├── testFuzz_AddMultipleTokens(tokenCount in 1..10)
+│   ├── It should report the correct supported token count
+│   └── It should return all tokens from getSupportedTokens
+├── testFuzz_UpdateUsdFeedInfo_RevertInvalidFeedDecimals(decimals > 18)
+│   └── It should revert with OracleInvalidFeedDecimals
+├── testFuzz_PriceBoundaries(price in 1e8..1e15)
+│   └── It should return a normalized price greater than zero
+├── testFuzz_TimestampBoundaries(timeOffset in 0..730 days)
+│   ├── When pastTimestamp == 0
+│   │   └── It should revert with OracleNoRoundData
+│   ├── When elapsed time exceeds the staleness interval
+│   │   └── It should revert with OracleStalePrice
+│   └── Otherwise
+│       └── It should return a valid price
+├── testFuzz_StalenessInterval(interval in 60..86400)
+│   └── It should return a valid price after re-adding the token with the interval
+├── testFuzz_MultiplePriceUpdates(numUpdates in 1..100)
+│   └── It should return a valid price after each update
+└── testFuzz_PriceFeedDecimals(decimals in 0..18)
+    └── It should return a normalized price greater than zero

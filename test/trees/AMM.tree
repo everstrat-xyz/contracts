@@ -1,0 +1,287 @@
+AMM::constructor(address _admin, address _controller, address _strategyManager, address _oracle, uint256 _cw, address _eve, address _exitQueue)
+├── Given any constructor argument is zero address
+│   └── It should revert with AMMZeroAddress
+├── Given valid parameters
+│   ├── It should set connectorWeight via _setConnectorWeight and emit ConnectorWeightChanged(0, _cw)
+│   ├── It should set minBatchExitETH via _setMinBatchExitETH and emit MinBatchExitETHChanged(0, DEFAULT_MIN_BATCH_EXIT_ETH)
+│   ├── It should grant ADMIN_ROLE to _admin
+│   └── It should grant CONTROLLER_ROLE to _controller
+
+AMM::enter(uint256 _minTokensToMint) payable
+├── Given the caller is not whitelisted (Whitelist.isWhitelisted(msg.sender) == false)
+│   └── It should revert with AMMNotWhitelisted (checked before any other enter() logic, including bootstrap)
+├── Given the caller is whitelisted (directly by admin, via a previously redeemed invite, or the Whitelist gate is disabled)
+│   └── It should proceed exactly as before this check existed
+├── When _minTokensToMint is zero
+│   └── It should revert with AMMInvalidTokensToMintAmount
+├── Given contract is not bootstrapped
+│   ├── When ETH deposit is below MIN_INITIAL_DEPOSIT_USD (in USD value)
+│   │   └── It should revert with AMMLessThanMinInitialDeposit
+│   ├── When deposit covers the minimum but userTokens (depositUSD - _DEAD_SUPPLY) < _minTokensToMint
+│   │   └── It should revert with AMMInsufficientDeposit
+│   ├── When ETH deposit is sufficient
+│   │   ├── It should call oracle to convert ETH to USD for validation
+│   │   ├── It should set bootstrapped = true
+│   │   ├── It should mint _DEAD_SUPPLY (1e18) to address(0xdead)
+│   │   ├── It should mint userTokens (= depositUSD - _DEAD_SUPPLY) to user
+│   │   ├── It should set total supply to depositUSD
+│   │   ├── It should transfer ETH to controller (via sendValue)
+│   │   └── It should emit Bootstrapped event
+│   ├── When oracle price is stale (during bootstrap validation)
+│   │   └── It should revert with OracleStalePrice
+│   └── When oracle price is invalid / zero (during bootstrap validation)
+│       └── It should revert (oracle reverts with OracleInvalidPrice)
+├── Given contract is bootstrapped
+│   ├── When tokensToMint (priced via _evePremiumPriceInETH) < _minTokensToMint
+│   │   └── It should revert with AMMInsufficientDeposit
+│   └── When ETH deposit is sufficient
+│       ├── It should price tokens using premium price in ETH (_evePremiumPriceInETH)
+│       ├── It should exclude msg.value from NAV when pricing (pre-deposit NAV)
+│       ├── It should not inflate NAV with locked claim ETH
+│       ├── It should mint tokens to user (via mint)
+│       ├── It should transfer ETH to controller (via sendValue)
+│       └── It should emit UserEntered event
+└── Given contract is paused
+    └── It should revert with EnforcedPause
+
+AMM::enterWithInvite(uint256 _minTokensToMint, bytes32 _inviteId, uint256 _deadline, bytes calldata _signature) payable
+├── Given the voucher is invalid (per Whitelist.whitelist(): reused invite, expired deadline,
+│   unauthorized signer, or the caller is banned) and the caller is not already whitelisted
+│   └── It should revert (bubbling the Whitelist revert) before any enter() logic runs
+├── Given the voucher is valid and the caller was not previously whitelisted
+│   ├── It should whitelist msg.sender on the protocol Whitelist (as a side effect)
+│   ├── It should consume (mark as used) _inviteId
+│   └── It should then proceed exactly like enter(_minTokensToMint) (bootstrap or normal mint)
+├── Given the caller is already whitelisted (admin, prior invite, or Whitelist.disable())
+│   └── It should still proceed to enter() normally (Whitelist.whitelist() is a no-op; voucher left unconsumed)
+├── Given the caller is msg.sender for both the voucher and the mint
+│   └── A relayer submitting this call cannot redirect the minted EVE to itself (EVE is always minted to msg.sender)
+└── Given contract is paused
+    └── It should revert with EnforcedPause
+
+AMM::exit(uint256 _requestedETH, uint256 _maxTokensToBurn, uint256 _priceTolerance)
+├── Given contract is not bootstrapped
+│   └── It should revert with AMMZeroTotalSupply (zero supply during pricing)
+├── Given contract is bootstrapped
+│   ├── When _requestedETH is zero
+│   │   └── It should revert with AMMZeroETHRequested
+│   ├── When _maxTokensToBurn is zero
+│   │   └── It should revert with AMMZeroTokensToBurnAmount
+│   ├── When _priceTolerance is greater than Math.SCALE_FACTOR (1e18)
+│   │   └── It should revert with AMMInvalidRange
+│   ├── When calculating tokensToBurn and ethToRedeem
+│   │   └── It should use the base price in ETH (NAV / supply via _basePriceFromNAV)
+│   ├── When tokensToBurn calculation results in zero
+│   │   └── It should revert with AMMTooLowETHRequested
+│   ├── When _maxTokensToBurn is less than calculated tokensToBurn
+│   │   └── It should revert with AMMTooMuchETHRequested
+│   ├── When free balance is sufficient (freeBalance() >= ethToRedeem)
+│   │   ├── It should price the burn using base price in ETH (_eveBasePriceInETH)
+│   │   ├── It should size the burn against NAV including AMM free balance
+│   │   ├── It should burn tokens from user (via burnFrom)
+│   │   ├── It should transfer ETH to user (via sendValue)
+│   │   ├── It should emit RedeemedImmediately event
+│   │   ├── It should return 0 (no batch ID, processed immediately)
+│   │   ├── It should NOT queue redemption
+│   │   └── It should NOT enforce minBatchExitETH (immediate exit has no minimum)
+│   ├── When free balance is insufficient (freeBalance() < ethToRedeem)
+│   │   ├── When ethToRedeem is below minBatchExitETH
+│   │   │   └── It should revert with AMMTooLowBatchExitETH
+│   │   ├── When ethToRedeem is at or above minBatchExitETH
+│   │   │   ├── It should transfer tokens from user to AMM contract (via safeTransferFrom)
+│   │   │   ├── It should call exitQueue.pushRequest() to queue redemption
+│   │   │   ├── It should emit RedemptionQueued event (with batchId)
+│   │   │   ├── It should return batchId (non-zero)
+│   │   │   ├── It should NOT transfer ETH immediately
+│   │   │   ├── It should NOT call oracle (exit uses ETH prices directly)
+│   │   │   └── It should use freeBalance() (not total balance) so locked claims are excluded
+│   │   └── When minBatchExitETH is zero (admin disabled)
+│   │       └── It should allow queuing sub-minimum ethToRedeem amounts
+│   └── When contract is paused
+│       └── It should revert with EnforcedPause
+├── Given caller does not have CONTROLLER_ROLE (exit is public)
+│   └── It should allow execution (exit doesn't require CONTROLLER_ROLE)
+└── Given caller is not whitelisted
+    └── It should still succeed (exit() never consults the Whitelist — users can always leave)
+
+AMM::processRedemption(uint256 _batchId, address _user) payable
+├── Given caller does not have CONTROLLER_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+├── Given batch ID does not exist or user not in batch
+│   └── It should revert (ExitQueue reverts)
+├── Given request is already processed
+│   └── It should revert (ExitQueue reverts)
+├── Given request was closed due to slippage (closedDueToSlippage == true)
+│   ├── It should call exitQueue.pullRequest()
+│   ├── It should refund tokens to user (via safeTransfer)
+│   ├── It should return all sent ETH (msg.value) to controller (via sendValue)
+│   ├── It should NOT credit claimableBalances or update lockedForClaims
+│   └── It should emit RedemptionProcessed event
+└── Given request is within price tolerance (sufficient ETH sent)
+    ├── It should call exitQueue.pullRequest() to mark as processed
+    ├── It should burn tokens from AMM (via burn)
+    ├── It should calculate ethToRedeem from finalEvePrice (via batchInfo)
+    ├── It should credit ethToRedeem to claimableBalances[user] (pull-over-push, not direct transfer)
+    ├── It should increment lockedForClaims by ethToRedeem
+    ├── It should return excess ETH (msg.value - ethToRedeem) to controller
+    └── It should emit RedemptionProcessed event
+
+AMM::claim()
+├── Given caller has no claimable balance (claimableBalances[msg.sender] == 0)
+│   └── It should revert with AMMNoClaimableBalance
+├── Given caller has a claimable balance
+│   ├── It should transfer claimableETH to msg.sender (via sendValue)
+│   ├── It should set claimableBalances[msg.sender] to zero
+│   ├── It should decrement lockedForClaims by claimableETH
+│   └── It should emit Claimed event
+└── Given contract is paused
+    └── It should still succeed (claim is not gated by whenNotPaused)
+
+AMM::cancelRedemption(uint256 _batchId)
+├── Given batch ID does not exist or user not in batch
+│   └── It should revert with ExitQueueRequestNotInBatch
+├── Given caller is not the request owner
+│   └── It should revert with ExitQueueRequestNotInBatch
+├── Given request is already processed
+│   └── It should revert (ExitQueue reverts)
+├── Given batch is priced and within MAX_BATCH_PROCESSING_TIME
+│   └── It should revert with ExitQueueRequestCannotBeClosed
+├── Given batch is priced but MAX_BATCH_PROCESSING_TIME exceeded
+│   ├── It should call exitQueue.closeRequest() (escape hatch)
+│   ├── It should refund tokens to user (via safeTransfer)
+│   └── It should emit RedemptionCancelled event with viaEscapeHatch == true
+└── Given batch is not priced (valid cancellation)
+    ├── It should call exitQueue.closeRequest()
+    ├── It should refund tokens to user (via safeTransfer)
+    └── It should emit RedemptionCancelled event with viaEscapeHatch == false
+
+AMM::freeBalance()
+├── Given no pending claims (lockedForClaims == 0)
+│   └── It should return address(this).balance
+└── Given pending claims exist (lockedForClaims > 0)
+    ├── It should return address(this).balance - lockedForClaims
+    └── It should route a new exit to the queue when free balance is fully locked
+
+AMM::setConnectorWeight(uint256 _cw)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+├── When connector weight is zero
+│   └── It should revert with AMMInvalidRange
+├── When connector weight is greater than Math.SCALE_FACTOR (1e18)
+│   └── It should revert with AMMInvalidRange
+└── Given valid connector weight
+    ├── It should update connectorWeight
+    └── It should emit ConnectorWeightChanged event
+
+AMM::setMinBatchExitETH(uint256 _minBatchExitETH)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+├── Given _minBatchExitETH exceeds MIN_BATCH_EXIT_ETH_UPPER_BOUND
+│   └── It should revert with AMMInvalidMinBatchExitETH
+├── Given valid parameters
+│   ├── It should update minBatchExitETH
+│   └── It should emit MinBatchExitETHChanged event
+├── Given _minBatchExitETH equals MIN_BATCH_EXIT_ETH_UPPER_BOUND
+│   └── It should update minBatchExitETH to the upper bound
+├── Given _minBatchExitETH is zero
+│   └── It should disable the batch exit minimum check
+└── Given contract is paused
+    └── It should still succeed (function doesn't check pause)
+
+AMM::pause()
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should pause the contract immediately (no timelock)
+├── Given contract is not paused
+│   ├── It should pause the contract
+│   └── It should emit Paused event
+└── Given contract is already paused
+    └── It should revert with EnforcedPause
+
+AMM::unpause()
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with AccessControlUnauthorizedAccount
+└── Given caller has ADMIN_ROLE and contract is paused
+    ├── It should unpause the contract (paused() == false)
+    └── It should resume enter/exit operations
+
+AMM::evePremiumPriceInETH()
+├── Given total supply is zero
+│   └── It should revert with AMMZeroTotalSupply
+└── Given valid state
+    ├── It should match formula: (NAV_ETH * NORMALIZATION_FACTOR) / (totalSupply * cw / SCALE_FACTOR)
+    └── It should use totalNAVInETH() (strategies + controller + AMM free balance)
+
+AMM::eveBasePriceInETH()
+└── Given valid state
+    ├── It should match formula: (NAV_ETH * NORMALIZATION_FACTOR) / totalSupply
+    └── It should use totalNAVInETH() (strategies + controller + AMM free balance)
+
+AMM::evePremiumPriceInUSD()
+├── Given total supply is zero
+│   └── It should revert with AMMZeroTotalSupply
+└── Given valid state
+    ├── It should equal evePremiumPriceInETH() converted via oracle.convertTokenToUSD
+    └── It should always be >= eveBasePriceInUSD()
+
+AMM::eveBasePriceInUSD()
+├── Given total supply is zero
+│   └── It should revert with AMMZeroTotalSupply
+├── Given oracle price is stale
+│   └── It should revert
+└── Given valid state
+    ├── It should match formula: totalNAVInUSD() * NORMALIZATION_FACTOR / supply
+    └── It should equal eveBasePriceInETH() converted via oracle.convertTokenToUSD
+
+AMM::Pricing & NAV (ETH-first)
+├── Given enter/exit use ETH prices (not USD)
+│   ├── enter() should price tokens via evePremiumPriceInETH()
+│   └── exit() should size the burn via eveBasePriceInETH()
+├── Given connector weight changes
+│   └── Premium price should decrease as connector weight increases (and stay >= base price)
+├── Given NAV includes AMM free balance
+│   ├── totalNAVInETH() should equal controller balance + AMM freeBalance() (no strategies)
+│   └── base/premium ETH prices should reflect AMM free balance in NAV
+├── Given ETH locked for pending claims (after processRedemption)
+│   ├── totalNAVInETH() should use AMM freeBalance() only (exclude lockedForClaims)
+│   └── enter premium price should not be inflated by locked claim ETH
+├── Given prices recomputed after operations
+│   ├── ETH prices should follow NAV/supply and change after enter
+│   └── USD prices should remain oracle conversions of ETH prices
+└── Given zero NAV
+    └── eveBasePriceInETH() should be zero when NAV is zero
+
+AMM::initialize / immutability
+├── Given freshly constructed AMM
+│   ├── controller() should equal the controller address
+│   ├── MIN_INITIAL_DEPOSIT_USD() should equal 1000e18
+│   └── connectorWeight() should equal the initial connector weight
+└── Given AMM is immutable (no upgrade path)
+    └── controller(), connectorWeight(), and eve() should remain stable
+
+AMM::pause behavior
+├── Given contract is paused
+│   ├── enter() should revert with EnforcedPause
+│   ├── exit() should revert with EnforcedPause
+│   └── View functions (paused, controller, connectorWeight, price views) should still work
+└── Given contract is unpaused again
+    └── enter() should work
+
+AMM::Large NAV moves (deviation guard removed in #241)
+├── Given bootstrap and a large enter land in the same block
+│   └── It should not freeze — next-block enter and immediate exit work (M-1 regression)
+├── Given NAV jumps far beyond the old 5% band (e.g. harvest yield accrual)
+│   └── It should price enter/exit against the new NAV without freezing (M-2 regression)
+└── Given NAV drops sharply (realized strategy loss)
+    └── It should price enter/exit against the new NAV (user slippage params are the protection)
+
+AMM::Fuzz Testing
+├── testFuzz_Enter_WithValidAmounts
+│   └── It should bootstrap and mint EVE for valid ETH deposits
+├── testFuzz_ExitWithValidAmounts
+│   └── It should process immediate redemption for valid ETH requests within user balance
+├── testFuzz_SetConnectorWeight
+│   └── It should set connectorWeight for any value in (0, 1e18]
+└── testFuzz_ConnectorWeight
+    └── It should accept any connector weight in (0, 1e18]

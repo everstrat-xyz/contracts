@@ -1,0 +1,11 @@
+{
+  "lib/chainlink-evm": {
+    "rev": "86aa5a1d34b20eda8d18fe6eb0e4882948e545ba"
+  },
+  "lib/forge-std": {
+    "rev": "8bbcf6e3f8f62f419e5429a0bd89331c85c37824"
+  },
+  "lib/openzeppelin-contracts-upgradeable": {
+    "rev": "60b305a8f3ff0c7688f02ac470417b6bbf1c4d27"
+  }
+}

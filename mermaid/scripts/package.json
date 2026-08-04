@@ -1,0 +1,29 @@
+{
+  "name": "simple-architecture-checker",
+  "version": "1.0.0",
+  "description": "Simple tool to check PR changes against Mermaid architecture",
+  "type": "module",
+  "main": "simple-architecture-checker.ts",
+  "scripts": {
+    "check": "ts-node --esm simple-architecture-checker.ts",
+    "build": "tsc simple-architecture-checker.ts --outDir dist --target es2020 --module esnext",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage"
+  },
+  "dependencies": {
+    "@octokit/rest": "^20.1.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.0.0",
+    "@types/node": "^20.0.0",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "ts-node": "^10.9.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  },
+  "ts-node": {
+    "esm": true
+  }
+}

@@ -1,0 +1,122 @@
+Whitelist::constructor(address _registry)
+├── Given _registry is the zero address
+│   └── It should revert with RegistryClientZeroRegistry
+└── Given _registry is non-zero
+    └── It should set up the EIP-712 domain (name "EverStratWhitelist", version "1")
+
+Whitelist::isWhitelisted(address _user)
+├── Given disabled() is true
+│   └── It should return true for every address (including previously banned ones —
+│       disable() opens the protocol; ban state is ignored for entry)
+└── Given disabled() is false
+    ├── Given _user is banned
+    │   └── It should return false (regardless of local whitelist state)
+    ├── Given _user is not banned and is locally whitelisted
+    │   └── It should return true
+    └── Given _user is not banned and is not locally whitelisted
+        └── It should return false
+
+Whitelist::whitelist(address _user, bytes32 _inviteId, uint256 _deadline, bytes calldata _signature)
+├── Given the gate is disabled
+│   └── It should return without reverting (no-op via isWhitelisted == true; invite left unconsumed)
+├── Given _user is already whitelisted (isWhitelisted(_user) == true)
+│   ├── It should return without reverting (no-op)
+│   ├── It should NOT mark _inviteId as used
+│   └── It should NOT emit UserWhitelisted
+├── Given _user is not whitelisted and is banned
+│   └── It should revert with WhitelistUserBanned (a stale unconsumed voucher cannot undo a ban)
+├── Given _user is not whitelisted and not banned
+│   ├── When _inviteId has already been used
+│   │   └── It should revert with WhitelistInviteAlreadyUsed
+│   ├── When block.timestamp is greater than _deadline
+│   │   └── It should revert with WhitelistSignatureExpired
+│   ├── When the signature is malformed (wrong length)
+│   │   └── It should revert (ECDSA error)
+│   ├── When the signature recovers to an address that is not an authorized signer
+│   │   └── It should revert with WhitelistInvalidSignature
+│   └── When the signature recovers to an authorized signer and the voucher is unexpired and unused
+│       ├── It should mark _inviteId as used (isInviteUsed(_inviteId) == true)
+│       ├── It should mark _user as whitelisted (isWhitelisted(_user) == true)
+│       ├── It should emit UserWhitelisted(_user, _inviteId, block.timestamp)
+│       ├── It should bind the signature to _user (a voucher signed for one user cannot whitelist another)
+│       ├── It should bind the signature to this contract and chain (EIP-712 domain separator)
+│       └── Given the caller is not _user (permissionless relaying)
+│           └── It should still succeed and whitelist _user (not msg.sender)
+└── Given the same voucher is replayed after _user is already whitelisted
+    ├── It should return without reverting (no-op, not WhitelistInviteAlreadyUsed)
+    └── It should NOT re-emit UserWhitelisted
+
+Whitelist::addToWhitelist(address[] _users)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given the gate is already disabled
+│   └── It should revert with WhitelistIsDisabled (admin whitelisting is meaningless once open)
+└── Given caller has ADMIN_ROLE and the gate is still active
+    ├── When _users contains the zero address
+    │   └── It should revert with WhitelistZeroAddress
+    └── When all addresses are valid
+        ├── It should whitelist every address (isWhitelisted() == true for each)
+        ├── It should emit UserWhitelistedByAdmin for each address
+        └── Given an address was previously banned via removeFromWhitelist
+            ├── It should clear isBanned for that address
+            ├── It should make isWhitelisted return true
+            └── It should allow a later voucher redeem (no WhitelistUserBanned)
+
+Whitelist::removeFromWhitelist(address _user)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given the gate is already disabled
+│   └── It should revert with WhitelistIsDisabled (banning after open is meaningless)
+└── Given caller has ADMIN_ROLE and the gate is still active
+    ├── It should clear local whitelisted state for _user
+    ├── It should set _user as banned for the invite period (isBanned(_user) == true)
+    ├── It should emit UserRemovedFromWhitelist
+    ├── It should make isWhitelisted(_user) return false while the gate is active
+    ├── Given disable() is later called
+    │   └── It should make isWhitelisted(_user) return true (pre-disable bans no longer gate entry)
+    └── Given a previously-unconsumed voucher exists for _user
+        └── It should still revert with WhitelistUserBanned if later redeemed via whitelist()
+            while the gate is still active
+
+Whitelist::addSigner(address _signer)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given the gate is already disabled
+│   └── It should revert with WhitelistIsDisabled (invite signing is meaningless once open)
+├── Given caller has ADMIN_ROLE and the gate is still active
+│   ├── When _signer is the zero address
+│   │   └── It should revert with WhitelistZeroAddress
+│   ├── When _signer is already an authorized signer
+│   │   └── It should revert with WhitelistSignerAlreadyAdded
+│   └── When _signer is new and non-zero
+│       ├── It should set isSigner(_signer) to true
+│       └── It should emit SignerAdded(_signer)
+└── Given caller has SECURITY_ROLE only (not ADMIN_ROLE)
+    └── It should revert with RegistryClientMissingRole (adding a signer is fail-closed: ADMIN-only, 48h timelock)
+
+Whitelist::removeSigner(address _signer)
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given the gate is already disabled
+│   └── It should revert with WhitelistIsDisabled (signer management is meaningless once open)
+├── Given caller has ADMIN_ROLE and the gate is still active
+│   ├── When _signer is not currently authorized
+│   │   └── It should revert with WhitelistSignerNotFound
+│   └── When _signer is currently authorized
+│       ├── It should set isSigner(_signer) to false
+│       └── It should emit SignerRemoved(_signer)
+└── Given caller has SECURITY_ROLE (no timelock) and the gate is still active
+    ├── It should remove the signer immediately
+    └── It should emit SignerRemoved(_signer)
+
+Whitelist::disable()
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given caller has SECURITY_ROLE only (not ADMIN_ROLE)
+│   └── It should revert with RegistryClientMissingRole (disabling the gate is a deliberate, timelocked product decision, not an emergency action)
+├── Given caller has ADMIN_ROLE and the gate is not yet disabled
+│   ├── It should set disabled() to true
+│   ├── It should emit WhitelistDisabled
+│   └── It should make isWhitelisted() return true for every address (including previously banned)
+└── Given the gate is already disabled
+    └── It should revert with WhitelistIsDisabled (irreversible, cannot be toggled back)

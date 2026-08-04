@@ -1,0 +1,101 @@
+EVE::constructor(address deployer)
+├── Given a valid (non-zero) deployer address
+│   ├── It should grant DEPLOYER_ROLE to the deployer
+│   ├── It should set DEPLOYER_ROLE as the admin of MINTER_ROLE
+│   ├── It should NOT grant DEFAULT_ADMIN_ROLE to the deployer
+│   ├── It should set token name to "Everything Strategy"
+│   ├── It should set token symbol to "EVE"
+│   ├── It should set decimals to 18
+│   ├── It should initialize ERC20 with zero total supply
+│   └── It should return version "1.0.0"
+└── Given any fuzzed non-zero deployer address (testFuzz_InitializeWithAnyOwner)
+    └── It should grant DEPLOYER_ROLE to that deployer
+
+EVE::mint(address to, uint256 amount)
+├── Given caller has MINTER_ROLE (test_OwnerCanMint)
+│   ├── When to is the zero address (test_MintToZeroAddress)
+│   │   └── It should revert
+│   ├── When amount is valid
+│   │   ├── It should mint tokens to the recipient
+│   │   ├── It should update the recipient balance
+│   │   ├── It should update total supply
+│   │   └── It should emit Transfer(address(0), to, amount)
+│   └── When amount is fuzzed and valid (testFuzz_MintAmount)
+│       ├── It should update the recipient balance
+│       └── It should update total supply
+└── Given caller does not have MINTER_ROLE (test_NonOwnerCannotMint)
+    └── It should revert
+
+EVE::burn(uint256 amount)
+├── Given caller has MINTER_ROLE
+│   ├── When caller has sufficient balance (test_Burn)
+│   │   ├── It should burn tokens from the caller
+│   │   ├── It should update the caller balance (decrease)
+│   │   ├── It should update total supply (decrease)
+│   │   └── It should emit Transfer(caller, address(0), amount)
+│   ├── When caller has insufficient balance (test_BurnInsufficientBalance)
+│   │   └── It should revert
+│   ├── When the amount is fuzzed and within balance (testFuzz_BurnAmount)
+│   │   ├── It should update the caller balance (decrease)
+│   │   └── It should update total supply (decrease)
+│   └── When a user is granted MINTER_ROLE and burns their own tokens (test_UserCanBurnOwnTokens)
+│       └── It should update the user balance (decrease)
+└── Given caller does not have MINTER_ROLE
+    └── It should revert (covered via access-control checks on burnFrom/mint)
+
+EVE::burnFrom(address account, uint256 amount)
+├── Given caller has MINTER_ROLE
+│   ├── When caller has allowance and account has sufficient balance (test_BurnFrom)
+│   │   ├── It should spend the allowance
+│   │   ├── It should burn tokens from the account
+│   │   ├── It should update the account balance (decrease)
+│   │   ├── It should update the allowance (decrease)
+│   │   └── It should update total supply (decrease)
+│   ├── When caller has exact allowance equal to amount (test_MinterCanBurnFromWithAllowance)
+│   │   ├── It should burn tokens from the account
+│   │   ├── It should reduce the allowance to zero
+│   │   ├── It should update total supply (decrease)
+│   │   └── It should emit Transfer(account, address(0), amount)
+│   ├── When caller has insufficient allowance (test_BurnFromInsufficientAllowance)
+│   │   └── It should revert
+│   ├── When caller has no allowance (test_MinterCannotBurnFromWithoutAllowance)
+│   │   └── It should revert with ERC20InsufficientAllowance
+│   ├── When the account has insufficient balance (test_MinterCannotBurnFromWhenAccountHasInsufficientBalance)
+│   │   └── It should revert with ERC20InsufficientBalance
+│   └── When the amount is greater than total supply (test_MinterCannotBurnFromGreaterThanTotalSupply)
+│       └── It should revert with ERC20InsufficientBalance
+└── Given caller does not have MINTER_ROLE (test_NonMinterCannotBurnFromWithAllowance)
+    └── It should revert with AccessControlUnauthorizedAccount
+
+EVE::transfer(address to, uint256 amount)
+├── Given caller has sufficient balance (test_Transfer)
+│   ├── It should transfer tokens to the recipient
+│   ├── It should update both balances
+│   ├── It should emit Transfer(caller, to, amount)
+│   └── It should return true
+├── Given caller has insufficient balance (test_TransferInsufficientBalance)
+│   └── It should revert
+└── Given a fuzzed non-zero recipient and valid amount (testFuzz_Transfer)
+    └── It should update the recipient balance
+
+EVE::approve(address spender, uint256 amount)
+└── Given a valid spender and amount (test_Approve)
+    ├── It should set the allowance
+    ├── It should emit Approval(owner, spender, amount)
+    └── It should return true
+
+EVE::transferFrom(address from, address to, uint256 amount)
+├── Given caller has sufficient allowance and from has balance (test_TransferFrom)
+│   ├── It should transfer tokens from the account to the recipient
+│   ├── It should update both balances
+│   ├── It should update the allowance (decrease)
+│   └── It should return true
+└── Given caller has insufficient allowance (test_TransferFromInsufficientAllowance)
+    └── It should revert
+
+EVE::MINTER_ROLE / AccessControl (test_MinterRole_AccessControl)
+├── Given the admin (DEPLOYER_ROLE holder) manages MINTER_ROLE
+│   ├── It should allow the admin to grant MINTER_ROLE via grantRole()
+│   └── It should allow the admin to revoke MINTER_ROLE via revokeRole()
+└── Given a non-admin attempts to revoke MINTER_ROLE
+    └── It should revert
