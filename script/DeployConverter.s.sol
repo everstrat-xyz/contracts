@@ -18,22 +18,22 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      `Converter.grantCallerRole`, which reverts loudly without it. Run this BEFORE
  *      `DeployUniCLStrat` (whose constructor also resolves the Converter from the Registry).
  *
- *      The grant and the optional adapter whitelisting run under the deployer's TEMPORARY
- *      bootstrap ADMIN grant (renounced by FinalizeProtocolDeploy) — the intended bootstrap
- *      pattern. Adapter changes after finalization must be scheduled through the admin
- *      timelock.
+ *      The grant runs under the deployer's TEMPORARY bootstrap ADMIN grant (renounced by
+ *      FinalizeProtocolDeploy) — the intended bootstrap pattern.
+ *
+ *      This script does **not** call `setAllowedAdapter`. DEX adapter allowlisting is always
+ *      scheduled on the 48h admin timelock after finalize / DeployAll (same gate as
+ *      `addStrategy`) — see `DeployUniswapV3ConverterAdapter` and `DeployUniCLStrat` NatSpec.
+ *      `DeployUniCLStrat` requires the adapter to already be allowed (constructor route
+ *      validation), so whitelist must execute before that script.
  *
  *      Env (required): PRIVATE_KEY, REGISTRY_ADDRESS, WETH_ADDRESS.
- *      Optional: SWAP_ADAPTER_ADDRESS — when set (and non-zero), the adapter is whitelisted
- *      via `setAllowedAdapter(adapter, true)` so DeployUniCLStrat's route validation can
- *      succeed; the same env var feeds DeployUniCLStrat's `swapAdapter` route config.
  */
 contract DeployConverter is ProtocolDeployBase {
     function run() external returns (address proxy, address implementation) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address registryAddress = vm.envAddress("REGISTRY_ADDRESS");
         address weth = vm.envAddress("WETH_ADDRESS");
-        address swapAdapter = vm.envOr("SWAP_ADAPTER_ADDRESS", address(0));
         address deployer = vm.addr(deployerPrivateKey);
 
         console.log("Deploying Converter with deployer:", deployer);
@@ -51,10 +51,6 @@ contract DeployConverter is ProtocolDeployBase {
 
         registry.grantRole(Auth.CONVERTER_CALLER_MANAGER_ROLE, proxy);
 
-        if (swapAdapter != address(0)) {
-            converter.setAllowedAdapter(swapAdapter, true);
-        }
-
         vm.stopBroadcast();
 
         require(address(converter.registry()) == registryAddress, "CRITICAL: Converter registry() mismatch");
@@ -63,15 +59,10 @@ contract DeployConverter is ProtocolDeployBase {
             registry.hasRole(Auth.CONVERTER_CALLER_MANAGER_ROLE, proxy),
             "CRITICAL: Converter missing CONVERTER_CALLER_MANAGER_ROLE"
         );
-        if (swapAdapter != address(0)) {
-            require(converter.isAdapterAllowed(swapAdapter), "CRITICAL: swap adapter not whitelisted on Converter");
-        }
 
         console.log("Converter proxy:", proxy);
         console.log("Converter implementation:", implementation);
-        if (swapAdapter != address(0)) {
-            console.log("Whitelisted swap adapter:", swapAdapter);
-        }
+        console.log("NOTE: setAllowedAdapter is not called here; schedule it on the admin timelock");
 
         return (proxy, implementation);
     }

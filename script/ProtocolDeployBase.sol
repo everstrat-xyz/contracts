@@ -30,10 +30,11 @@ abstract contract ProtocolDeployBase is Script {
 
     // ============ Timelock Tier Delays (PL-003) ============
     // The privileged ADMIN_ROLE is held by a TimelockController so the reaction window
-    // is enforced on-chain. Overridable via env for dev networks.
+    // is enforced on-chain. TIMELOCK_ADMIN_DELAY may be omitted and falls back to the
+    // production policy below — the sole envOr exception in deploy scripts (never weaker).
 
-    /// @notice Configuration, strategy set, registry wiring, role management, oracle feeds,
-    ///         unpause, and UUPS upgrades (ADMIN_ROLE). Upgrades should be scheduled with a
+    /// @notice Production policy minimum for admin timelock delay (48h). Used as the
+    ///         `TIMELOCK_ADMIN_DELAY` envOr fallback. Upgrades should be scheduled with a
     ///         longer delay (e.g. 72h) by policy — TimelockController enforces only the minimum.
     uint256 internal constant DEFAULT_ADMIN_TIMELOCK_DELAY = 48 hours;
 
@@ -156,14 +157,12 @@ abstract contract ProtocolDeployBase is Script {
         return vm.envAddress("DAO_TREASURY_ADDRESS");
     }
 
-    /// @notice Production fee config: DAO treasury + optional `PERFORMANCE_FEE_BPS` env.
-    /// @dev PERFORMANCE_FEE_BPS is a numeric operational parameter: the 0 default disables
-    ///      fee harvesting (the conservative choice) and can never resolve to an address, so
-    ///      an envOr fallback is safe here.
+    /// @notice Production fee config: DAO treasury + required `PERFORMANCE_FEE_BPS` env.
+    /// @dev PERFORMANCE_FEE_BPS must be set explicitly (`0` = fees disabled). No envOr fallback.
     function _protocolFeeConfig(address _daoTreasury) internal view returns (IStrategyManager.FeeConfig memory) {
         return IStrategyManager.FeeConfig({
             daoTreasury: _daoTreasury,
-            performanceFeeBps: vm.envOr("PERFORMANCE_FEE_BPS", uint256(0))
+            performanceFeeBps: vm.envUint("PERFORMANCE_FEE_BPS")
         });
     }
 
@@ -346,8 +345,9 @@ abstract contract ProtocolDeployBase is Script {
      * @param _proposer The DAO multisig — sole proposer (and canceller).
      * @param _security Emergency security — canceller (can kill malicious queued
      *        operations but can never propose or execute).
-     * @dev TIMELOCK_ADMIN_DELAY is a numeric operational parameter: when unset it falls back
-     *      to the production 48h delay (never to a weaker value), so an envOr default is safe.
+     * @dev TIMELOCK_ADMIN_DELAY may be omitted: envOr falls back to
+     *      {DEFAULT_ADMIN_TIMELOCK_DELAY} (48h) — never a weaker value. This is the only
+     *      deploy-script envOr exception; other knobs must be set explicitly.
      */
     function _deployTimelocks(address _deployer, address _proposer, address _security)
         internal

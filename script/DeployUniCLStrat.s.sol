@@ -4,14 +4,13 @@ pragma solidity ^0.8.30;
 import {Script, console} from "forge-std/Script.sol";
 
 import {Registry} from "registry/Registry.sol";
-import {StrategyManager} from "../src/contracts/StrategyManager.sol";
 import {UniCLStrat} from "../src/contracts/strategies/UniCLStrat.sol";
 import {IUniCLStrat} from "../src/interfaces/strategies/IUniCLStrat.sol";
 import {Auth} from "../src/libraries/Auth.sol";
 
 /**
  * @title DeployUniCLStrat
- * @notice Deploys UniCLStrat and registers it with StrategyManager (address from Registry).
+ * @notice Deploys UniCLStrat bytecode only. Does **not** call `StrategyManager.addStrategy`.
  *
  * @dev IMPORTANT DEPLOYMENT ORDER:
  *
@@ -22,15 +21,33 @@ import {Auth} from "../src/libraries/Auth.sol";
  *
  *        1. Converter contract must be deployed and registered in the Registry
  *           under the Auth.CONVERTER key.
- *        2. The DEX adapter (e.g. UniswapV3ConverterAdapter) must be whitelisted
- *           in the Converter via `setAllowedAdapter(adapter, true)`.
+ *        2. The DEX adapter (e.g. from `DeployUniswapV3ConverterAdapter`) must already
+ *           be whitelisted via a timelocked `Converter.setAllowedAdapter(adapter, true)`.
  *
  *      Deploying in any other order produces a confusing deep revert.
  *
  *      Expected Registry state at deployment time:
  *        - Auth.CONVERTER  → Converter proxy address
- *        - Auth.STRATEGY_MANAGER → StrategyManager proxy address
+ *        - Auth.STRATEGY_MANAGER → StrategyManager proxy address (needed later for
+ *          registration; verified here so deploy does not target an incomplete stack)
  *        - Converter has adapter(s) configured via setAllowedAdapter
+ *
+ *      This script needs no Registry ADMIN_ROLE — only a funded deployer key. Because
+ *      step 2 is always timelocked after finalize / DeployAll, this script runs only
+ *      after that allowlist transaction has executed.
+ *
+ *      UniCL GO-LIVE (always via the 48h admin timelock — same for modular and DeployAll):
+ *
+ *        A. After finalize: schedule `Converter.setAllowedAdapter(adapter, true)` (and
+ *           typically paired-token Oracle feed + optional `addSupportedERC20` in the same
+ *           or a prior batch). ETH (`address(0)`) feed is normally already set by
+ *           DeployOracle / DeployAll.
+ *        B. Run this script (bytecode only) once the adapter is allowed.
+ *        C. Schedule `StrategyManager.addStrategy(strategy, depositWeight, withdrawalWeight)`.
+ *
+ *      See `docs/STRATEGY_GUARDRAILS.md`. Do not use the deployer's temporary bootstrap
+ *      ADMIN for allowlisting or `addStrategy` — those paths are intentionally removed so
+ *      modular and one-shot deploys share one go-live gate.
  */
 contract DeployUniCLStrat is Script {
     // Mirrors of UniCLStrat.MIN_TWAP_INTERVAL / MIN_SHORT_TWAP_INTERVAL (contract constants
@@ -48,19 +65,11 @@ contract DeployUniCLStrat is Script {
         console.log("Deploying UniCLStrat with deployer:", deployer);
         console.log("Registry:", config.addresses.registry);
         console.log("StrategyManager (from Registry):", strategyManagerAddress);
+        console.log("NOTE: this script does not call addStrategy; schedule registration on the admin timelock");
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // addStrategy() is ADMIN_ROLE (48h timelock)-gated in production. During the initial
-        // modular deploy the broadcaster is the deployer using its TEMPORARY bootstrap
-        // Registry ADMIN grant (renounced afterwards by FinalizeProtocolDeploy) — the
-        // intended bootstrap pattern. Adding a strategy to a LIVE protocol cannot go through
-        // this script: it must be scheduled on the admin timelock by the DAO proposer.
-
         uniCLStrat = new UniCLStrat(config);
-        StrategyManager(payable(strategyManagerAddress)).addStrategy(
-            address(uniCLStrat), uint8(vm.envUint("DEPOSIT_WEIGHT")), uint8(vm.envUint("WITHDRAWAL_WEIGHT"))
-        );
 
         vm.stopBroadcast();
 
@@ -75,6 +84,8 @@ contract DeployUniCLStrat is Script {
         );
 
         console.log("UniCLStrat deployed at:", address(uniCLStrat));
+        console.log("Next: schedule StrategyManager.addStrategy on the admin TimelockController");
+        console.log("(paired-token feed / addSupportedERC20 usually share the prior allowlist batch).");
     }
 
     function _deploymentConfig() internal view returns (IUniCLStrat.DeploymentConfig memory) {

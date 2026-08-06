@@ -32,6 +32,12 @@ import {TickUtils} from "../../libraries/integrations/uniswap/TickUtils.sol";
  *         Swap, wrap, and unwrap operations are delegated to the shared Converter.
  * @dev The contract is intentionally static/non-upgradeable. It keeps the external protocol surface small and
  *      reports all value in ETH for StrategyManager and AMM pricing.
+ *      Oracle assumptions (not checked at construction): ETH (`address(0)`) and the pool's
+ *      paired token must both have USD feeds on the protocol Oracle — inventory-balancing
+ *      swaps and idle paired-token NAV call `Oracle.convert`. For emergency unwind into
+ *      StrategyManager NAV, also whitelist the paired token via `addSupportedERC20`.
+ *      Go-live (see `DeployUniCLStrat` NatSpec): timelock `setAllowedAdapter` (+ paired feed /
+ *      optional `addSupportedERC20`) → `DeployUniCLStrat` bytecode → timelock `addStrategy`.
  */
 contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20Metadata;
