@@ -141,7 +141,7 @@ contract DeployScriptsTest is Test {
         vm.setEnv("EXIT_LIQUIDITY_TARGET_ETH", "0");
         vm.setEnv("CONTROLLER_RESERVE_ETH", "0");
         vm.setEnv("TIMELOCK_ADMIN_DELAY", vm.toString(ADMIN_TIMELOCK_DELAY));
-        vm.setEnv("SWAP_ADAPTER_ADDRESS", vm.toString(SWAP_ADAPTER_ADDRESS));
+        vm.setEnv("GRANT_KEEPER_ROLE", "true");
     }
 
     function test_DeployAll_RegistryAdminIsTimelockWithDaoProposer() public {
@@ -209,8 +209,8 @@ contract DeployScriptsTest is Test {
 
         _runCoreModuleSteps();
         (address converterProxy,) = new DeployConverter().run();
-        (address strategyManagerProxy,) = new DeployAMM().run();
         new DeployWhitelist().run();
+        (address strategyManagerProxy,) = new DeployAMM().run();
         (, StrategyKeeperExecutor strategyExecutor) = new DeployKeeperExecutors().run();
         assertEq(strategyExecutor.exitLiquidityTargetETH(), 0);
         assertEq(strategyExecutor.controllerReserveETH(), 0);
@@ -230,9 +230,9 @@ contract DeployScriptsTest is Test {
             registry.hasRole(Auth.CONVERTER_CALLER_MANAGER_ROLE, converterProxy),
             "Converter missing CONVERTER_CALLER_MANAGER_ROLE"
         );
-        assertTrue(
+        assertFalse(
             Converter(payable(converterProxy)).isAdapterAllowed(SWAP_ADAPTER_ADDRESS),
-            "swap adapter not whitelisted on Converter"
+            "DeployConverter must not whitelist adapters (timelock-only)"
         );
         assertTrue(
             registry.hasRole(Auth.KEEPER_ROLE, registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR)),
@@ -249,6 +249,7 @@ contract DeployScriptsTest is Test {
         // ============ A skipped DeployConverter step fails finalization loudly ============
         _deployFreshRegistry();
         _runCoreModuleSteps();
+        new DeployWhitelist().run();
         new DeployAMM().run();
         new DeployKeeperExecutors().run();
         // DeployConverter intentionally skipped.
@@ -261,6 +262,7 @@ contract DeployScriptsTest is Test {
         _deployFreshRegistry();
         _runCoreModuleSteps();
         new DeployConverter().run();
+        new DeployWhitelist().run();
         new DeployAMM().run();
         // DeployKeeperExecutors intentionally skipped.
 
@@ -276,6 +278,7 @@ contract DeployScriptsTest is Test {
         registry = Registry(registryAddress);
         _runCoreModuleSteps();
         new DeployConverter().run();
+        new DeployWhitelist().run();
         (strategyManagerProxy,) = new DeployAMM().run();
         new DeployKeeperExecutors().run();
 

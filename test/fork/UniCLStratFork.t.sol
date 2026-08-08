@@ -33,9 +33,10 @@ import {ICanonicalSwapRouter} from "./helpers/UniswapV3ForkHelpers.sol";
  *         UniswapV3ConverterAdapter path against the real Uniswap V3 WETH/USDC 0.05% pool
  *         and real Chainlink ETH/USD + USDC/USD feeds.
  *
- * @dev Run: MAINNET_RPC_URL=https://ethereum-rpc.publicnode.com forge test --match-path 'test/fork/*'
- *      Optionally pin a block: MAINNET_FORK_BLOCK=<number>
- *      When MAINNET_RPC_URL is unset, tests skip so offline `forge test` stays green.
+ * @dev Run:
+ *        MAINNET_RPC_URL=... MAINNET_FORK_BLOCK=<n> forge test --match-path 'test/fork/*'
+ *      `MAINNET_FORK_BLOCK=0` means tip (latest). When `MAINNET_RPC_URL` is unset
+ *      (`vm.envExists` is false), tests skip so offline `forge test` stays green — no envOr.
  */
 contract UniCLStratForkTest is Test {
     // ============ Mainnet addresses ============
@@ -99,10 +100,12 @@ contract UniCLStratForkTest is Test {
     receive() external payable {}
 
     function setUp() public {
-        string memory rpcUrl = vm.envOr("MAINNET_RPC_URL", string(""));
-        if (bytes(rpcUrl).length == 0) return;
+        // Skip offline without envOr: absence is explicit, not a silent empty-string fallback.
+        if (!vm.envExists("MAINNET_RPC_URL")) return;
 
-        uint256 forkBlock = vm.envOr("MAINNET_FORK_BLOCK", uint256(0));
+        string memory rpcUrl = vm.envString("MAINNET_RPC_URL");
+        // Required when forking: 0 = tip. Omitting the var reverts (no silent tip fallback).
+        uint256 forkBlock = vm.envUint("MAINNET_FORK_BLOCK");
         if (forkBlock == 0) {
             vm.createSelectFork(rpcUrl);
         } else {

@@ -5,16 +5,18 @@ ProtocolDeploy::Deployment Flow
 │   ├── Given EXIT_LIQUIDITY_TARGET_ETH or CONTROLLER_RESERVE_ETH is unset
 │   │   └── It should revert (required env — StrategyKeeperExecutor policy knobs; 0 is a valid explicit choice)
 │   ├── Given TIMELOCK_ADMIN_DELAY is unset
-│   │   └── It should default to the production 48h delay (numeric operational default)
-│   └── Given PERFORMANCE_FEE_BPS is unset
-│       └── It should default to 0 (fees disabled; numeric operational default)
+│   │   └── It should default to the production 48h delay (sole deploy-script envOr exception)
+│   ├── Given PERFORMANCE_FEE_BPS is unset
+│   │   └── It should revert (required env — 0 is a valid explicit choice to disable fees)
+│   └── Given GRANT_KEEPER_ROLE is unset (DeployKeeperExecutors)
+│       └── It should revert (required bool — true grants in-bootstrap; false defers to timelock)
 ├── DeployRegistry
 │   ├── It should deploy the 48h admin TimelockController (DAO proposer/canceller, security canceller, open executor)
 │   ├── It should deploy the Registry with the admin timelock as its designated ADMIN_ROLE holder (never DAO_ADDRESS directly)
 │   ├── It should grant SECURITY_ROLE to the security multisig (SECURITY_ADDRESS) — mirrors DeployAll
 │   ├── It should leave the deployer a temporary bootstrap ADMIN_ROLE for the remaining modular steps
 │   └── It should NOT finalize deployer admin (deployer needs ADMIN for later scripts)
-├── Partial deploy scripts (EVE, ExitQueue, Controller, Oracle, AMM, Converter)
+├── Partial deploy scripts (EVE, ExitQueue, Controller, Oracle, Converter, Whitelist, AMM, Keepers)
 │   ├── Each script should register its contract on Registry via _registerAndVerify
 │   ├── Deployer should hold Registry ADMIN until finalize (bootstrap wiring of ADMIN-gated calls)
 │   └── DeployOracle should verify the admin timelock (TIMELOCK_ADDRESS) holds ADMIN_ROLE before configuring the feed
@@ -25,29 +27,40 @@ ProtocolDeploy::Deployment Flow
 │       └── It should revert the deployment with the offending description (USD-quote invariant)
 ├── DeployAMM
 │   ├── It should register STRATEGY_MANAGER and AMM keys
-│   ├── It should initialize StrategyManager with FeeConfig (required DAO_TREASURY_ADDRESS, optional PERFORMANCE_FEE_BPS)
+│   ├── It should initialize StrategyManager with FeeConfig (required DAO_TREASURY_ADDRESS + PERFORMANCE_FEE_BPS)
 │   └── It should grant MINTER_ROLE to BOTH the AMM and the StrategyManager on Registry
 ├── DeployConverter
 │   ├── It should register the CONVERTER key
 │   ├── It should grant CONVERTER_CALLER_MANAGER_ROLE to the Converter (required for StrategyManager.addStrategy)
-│   └── When SWAP_ADAPTER_ADDRESS is set
-│       └── It should whitelist the adapter via setAllowedAdapter (DeployUniCLStrat route-validation prerequisite)
+│   └── It should NOT call setAllowedAdapter (adapter allowlisting is always admin-timelocked after finalize)
+├── DeployUniswapV3ConverterAdapter
+│   ├── It should deploy UniswapV3ConverterAdapter bytecode only (no setAllowedAdapter)
+│   ├── It should resolve Oracle from Registry (run after DeployOracle / DeployAll)
+│   └── It is outside DeployAll (core-only); UniCL modular follow-up after finalize
+├── DeployUniCLStrat
+│   ├── It should deploy UniCLStrat bytecode only (no addStrategy)
+│   ├── It requires Converter + a timelocked setAllowedAdapter beforehand (constructor route validation)
+│   └── After deploy, addStrategy is always scheduled on the admin timelock
 ├── DeployAll
 │   ├── It should deploy the admin timelock first and construct the Registry with it as designated admin
 │   ├── It should register all Auth keys (core + QUEUE/STRATEGY_KEEPER_EXECUTOR)
-│   ├── It should initialize StrategyManager with FeeConfig (non-zero treasury, optional fee bps)
+│   ├── It should initialize StrategyManager with FeeConfig (required DAO_TREASURY_ADDRESS + PERFORMANCE_FEE_BPS)
 │   ├── It should grant SECURITY, MINTER (AMM + StrategyManager), CONVERTER_CALLER_MANAGER on Registry
 │   ├── It should deploy both keeper executors and grant them KEEPER_ROLE
 │   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH / CONTROLLER_RESERVE_ETH to StrategyKeeperExecutor
 │   ├── It should verify timelock wiring (ADMIN exclusivity + timelock governance roles) separately from SECURITY_ROLE
 │   ├── It should verify SECURITY / MINTER / CONVERTER_CALLER_MANAGER grants inline (Finalize uses _verifyCriticalRoleGrants)
+│   ├── It should NOT deploy DEX adapters or strategies (core-only; see DeployUniswapV3ConverterAdapter / DeployUniCLStrat)
+│   ├── It should NOT whitelist DEX adapters (setAllowedAdapter is always timelocked)
 │   └── It should renounce the deployer's bootstrap ADMIN_ROLE after setup (ADMIN_ROLE ends held only by the timelock)
 ├── DeployKeeperExecutors
 │   ├── It should deploy QueueKeeperExecutor and StrategyKeeperExecutor
 │   ├── It should register QUEUE_KEEPER_EXECUTOR and STRATEGY_KEEPER_EXECUTOR
 │   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH and CONTROLLER_RESERVE_ETH (required wei env) to StrategyKeeperExecutor
-│   └── When GRANT_KEEPER_ROLE is true
+│   └── When GRANT_KEEPER_ROLE is true (required env)
 │       └── It should grant KEEPER_ROLE to both executors
+│   └── When GRANT_KEEPER_ROLE is false
+│       └── It should register executors without granting KEEPER_ROLE (timelock grants before finalize)
 └── FinalizeProtocolDeploy
     ├── It should renounce the deployer's bootstrap ADMIN_ROLE (always — PL-003)
     ├── It should verify the admin timelock (TIMELOCK_ADDRESS) holds ADMIN_ROLE

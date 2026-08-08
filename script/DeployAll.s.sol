@@ -33,8 +33,13 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      missing value reverts the deploy. Setting either policy knob to 0 is a valid explicit
  *      choice (immediate exits disabled / no Controller float). Set WHITELIST_SIGNER_ADDRESS
  *      to the zero address to postpone invite-signer seeding (add later via timelocked
- *      `addSigner()`). Optional: TIMELOCK_ADMIN_DELAY (default 48h), PERFORMANCE_FEE_BPS
- *      (default 0).
+ *      `addSigner()`). Required: PERFORMANCE_FEE_BPS (`0` disables fees). Optional:
+ *      TIMELOCK_ADMIN_DELAY (defaults to 48h — sole deploy-script envOr exception).
+ *
+ *      Core-only: does **not** deploy DEX adapters (e.g. UniswapV3ConverterAdapter) or
+ *      strategies. Those are modular follow-ups — see `DeployUniswapV3ConverterAdapter` /
+ *      `DeployUniCLStrat` — with `setAllowedAdapter` / `addStrategy` always scheduled on the
+ *      48h admin timelock after this script.
  *
  *      Post-deployment: register each executor's upkeep in Chainlink Automation, then
  *      call `setForwarder(forwarder)` on each executor (ADMIN_ROLE / timelock).

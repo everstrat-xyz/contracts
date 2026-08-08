@@ -692,6 +692,7 @@ smart-contracts/
 │   ├── DeployWhitelist.s.sol
 │   ├── DeployOracle.s.sol
 │   ├── DeployConverter.s.sol
+│   ├── DeployUniswapV3ConverterAdapter.s.sol  # Optional UniCL path (not in DeployAll)
 │   ├── DeployKeeperExecutors.s.sol
 │   ├── DeployUniCLStrat.s.sol
 │   └── FinalizeProtocolDeploy.s.sol
@@ -737,7 +738,7 @@ Tests are organized into unit and integration tests:
 
 - **Unit Tests** (`test/unit/`): Test individual contracts in isolation with mocked dependencies
 - **Integration Tests** (`test/integration/`): Test cross-contract interactions and complete workflows
-- **Fork Tests** (`test/fork/`): Ethereum mainnet fork tests exercising UniCLStrat and the Converter/UniswapV3ConverterAdapter path against the real Uniswap V3 WETH/USDC 0.05% pool and real Chainlink feeds. They skip automatically when `MAINNET_RPC_URL` is not set, so plain `forge test` stays green offline
+- **Fork Tests** (`test/fork/`): Ethereum mainnet fork tests exercising UniCLStrat and the Converter/UniswapV3ConverterAdapter path against the real Uniswap V3 WETH/USDC 0.05% pool and real Chainlink feeds. They skip when `MAINNET_RPC_URL` is unset (`vm.envExists`); when set, `MAINNET_FORK_BLOCK` is required (`0` = tip) so plain `forge test` stays green offline without `envOr`
 - **Test Trees** (`test/trees/`): Bulloak tree files that guide comprehensive test coverage
 
 ### Test Naming Conventions
@@ -778,10 +779,10 @@ Run integration tests:
 forge test --match-path "test/integration/**"
 ```
 
-Run mainnet fork tests (skipped when `MAINNET_RPC_URL` is unset):
+Run mainnet fork tests (skipped when `MAINNET_RPC_URL` is unset; when set, `MAINNET_FORK_BLOCK` is required — `0` = tip):
 ```bash
-MAINNET_RPC_URL=https://ethereum-rpc.publicnode.com forge test --match-path "test/fork/*"
-# optional: pin a block for determinism and RPC-cache reuse
+MAINNET_RPC_URL=https://ethereum-rpc.publicnode.com MAINNET_FORK_BLOCK=0 forge test --match-path "test/fork/*"
+# or pin a block for determinism and RPC-cache reuse
 MAINNET_RPC_URL=<archive_rpc> MAINNET_FORK_BLOCK=<block> forge test --match-path "test/fork/*"
 ```
 
@@ -842,14 +843,18 @@ Registry-centric deployment is documented in [`mermaid/deployment-architecture.m
 |----------|---------|---------|
 | `PRIVATE_KEY` | All broadcast scripts | Deployer signer |
 | `RPC_URL` | CLI `--rpc-url` | Network endpoint |
-| `DAO_ADDRESS` | `ProtocolDeployBase` | Long-term Registry admin (defaults to deployer) |
-| `DAO_TREASURY_ADDRESS` | `DeployAll`, `DeployAMM` | Performance-fee EVE recipient (defaults to admin timelock) |
-| `PERFORMANCE_FEE_BPS` | `DeployAll`, `DeployAMM` | Initial fee rate in basis points (default 0 = disabled) |
-| `EXIT_LIQUIDITY_TARGET_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits (valid explicit choice) |
-| `CONTROLLER_RESERVE_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve (valid explicit choice) |
+| `DAO_ADDRESS` | `DeployRegistry`, `DeployAll` | **Required.** DAO multisig — timelock proposer/canceller |
+| `SECURITY_ADDRESS` | `DeployRegistry`, `DeployAll`, `FinalizeProtocolDeploy` | **Required.** Security multisig — SECURITY_ROLE + timelock canceller |
+| `DAO_TREASURY_ADDRESS` | `DeployAll`, `DeployAMM` | **Required.** Performance-fee EVE recipient |
+| `PERFORMANCE_FEE_BPS` | `DeployAll`, `DeployAMM` | **Required.** Initial fee rate in bps; `0` disables fees |
+| `TIMELOCK_ADMIN_DELAY` | `DeployRegistry`, `DeployAll` | Optional. Admin timelock min delay in seconds; defaults to 48h (sole `envOr` exception) |
+| `EXIT_LIQUIDITY_TARGET_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
+| `CONTROLLER_RESERVE_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
+| `GRANT_KEEPER_ROLE` | `DeployKeeperExecutors` | **Required** bool. `true` grants KEEPER_ROLE in-script; `false` defers to timelock |
 | `PRICE_FEED` | `DeployAll`, `DeployOracle` | Chainlink ETH/USD feed — must be USD-quoted; scripts assert `description()` ends with `" / USD"` |
-| `WHITELIST_SIGNER_ADDRESS` | `DeployAll`, `DeployWhitelist` | **Required.** Initial invite-signer key; explicit `address(0)` postpones seeding (add later via timelocked `addSigner`) |
-| `REGISTRY_ADDRESS` | Modular scripts after Registry | Registry proxy |
+| `WHITELIST_SIGNER_ADDRESS` | `DeployAll`, `DeployWhitelist` | **Required.** Initial invite-signer key; explicit `address(0)` postpones seeding |
+| `WETH_ADDRESS` | `DeployAll`, `DeployConverter`, … | **Required.** WETH |
+| `REGISTRY_ADDRESS` | Modular scripts after Registry | Registry address (static; logged by DeployRegistry) |
 
 ### Full protocol (`DeployAll.s.sol`)
 
@@ -857,44 +862,54 @@ Registry-centric deployment is documented in [`mermaid/deployment-architecture.m
 export PRIVATE_KEY=<your_private_key>
 export RPC_URL=<your_rpc_url>
 export PRICE_FEED=<chainlink_eth_usd_feed>
+export DAO_ADDRESS=<dao_multisig>
+export SECURITY_ADDRESS=<security_multisig>
+export DAO_TREASURY_ADDRESS=<treasury_multisig>
+export PERFORMANCE_FEE_BPS=0         # 0 = fees disabled
+# optional: export TIMELOCK_ADMIN_DELAY=172800  # defaults to 48h
 export EXIT_LIQUIDITY_TARGET_ETH=0   # wei; 0 = immediate exits disabled
 export CONTROLLER_RESERVE_ETH=0      # wei; 0 = no Controller float
 export WHITELIST_SIGNER_ADDRESS=<invite_signer_or_zero>
-# optional: export DAO_ADDRESS=<dao_multisig>
-# optional: export DAO_TREASURY_ADDRESS=<treasury_multisig>
-# optional: export PERFORMANCE_FEE_BPS=2000
+export WETH_ADDRESS=<weth>
 
 forge script script/DeployAll.s.sol:DeployAll --rpc-url $RPC_URL --broadcast
 ```
 
-Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter, Whitelist, and AMM; registers all `Auth` (including `WHITELIST`); grants `KEEPER_ROLE`, `MINTER_ROLE` (AMM + StrategyManager), and `CONVERTER_CALLER_MANAGER_ROLE`; initializes StrategyManager with fee config; configures the ETH/USD feed; seeds the initial Whitelist invite signer when `WHITELIST_SIGNER_ADDRESS` is non-zero; applies StrategyKeeperExecutor policy knobs from required env; renounces the deployer's bootstrap Registry admin (ADMIN_ROLE ends held only by the admin timelock).
+Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter, Whitelist, and AMM; registers all `Auth` (including `WHITELIST`); grants `KEEPER_ROLE`, `MINTER_ROLE` (AMM + StrategyManager), and `CONVERTER_CALLER_MANAGER_ROLE`; initializes StrategyManager with fee config; configures the ETH/USD feed; seeds the initial Whitelist invite signer when `WHITELIST_SIGNER_ADDRESS` is non-zero; applies StrategyKeeperExecutor policy knobs from required env; renounces the deployer's bootstrap Registry admin (ADMIN_ROLE ends held only by the admin timelock). **Core-only:** does not deploy DEX adapters or strategies (`DeployUniswapV3ConverterAdapter` / `DeployUniCLStrat` are modular follow-ups).
 
 ### Modular deployment order
 
 1. `DeployRegistry.s.sol` — deploys the admin timelock + Registry, grants `SECURITY_ROLE` to the security multisig; deployer keeps Registry `ADMIN_ROLE` for later steps
 2. `DeployEVE.s.sol` → `DeployExitQueue.s.sol` → `DeployController.s.sol` → `DeployOracle.s.sol` (each requires `REGISTRY_ADDRESS`)
-3. `DeployConverter.s.sol` — registers the Converter, grants it `CONVERTER_CALLER_MANAGER_ROLE` (required by `StrategyManager.addStrategy`), optionally whitelists `SWAP_ADAPTER_ADDRESS` (DeployUniCLStrat prerequisite)
+3. `DeployConverter.s.sol` — registers the Converter, grants `CONVERTER_CALLER_MANAGER_ROLE` (required by `StrategyManager.addStrategy`). Does **not** call `setAllowedAdapter`
 4. `DeployWhitelist.s.sol` — registers `WHITELIST`, optionally seeds `WHITELIST_SIGNER_ADDRESS` (required env; `address(0)` postpones seeding)
 5. `DeployAMM.s.sol` — registers StrategyManager + AMM, grants `MINTER_ROLE` to BOTH (deployer keeps ADMIN for remaining steps)
-6. `DeployKeeperExecutors.s.sol` — registers both keeper executors, grants them `KEEPER_ROLE`, and applies `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH`
-7. Optional: `DeployUniCLStrat.s.sol` then `StrategyManager.addStrategy` (Registry `ADMIN_ROLE`)
-8. `FinalizeProtocolDeploy.s.sol` — required final step; unconditionally renounces the deployer's bootstrap Registry ADMIN and VERIFIES every critical grant (`SECURITY_ROLE` → security multisig, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors), failing loudly on any skipped or mis-granted step
+6. `DeployKeeperExecutors.s.sol` — registers both keeper executors and applies `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH`; required `GRANT_KEEPER_ROLE` (`true` grants in-script, `false` defers grants to the admin timelock before finalize)
+7. `FinalizeProtocolDeploy.s.sol` — required final step; unconditionally renounces the deployer's bootstrap Registry ADMIN and VERIFIES every critical grant (`SECURITY_ROLE` → security multisig, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors), failing loudly on any skipped or mis-granted step
+8. Optional UniCL path (same after `DeployAll`):
+   - `DeployUniswapV3ConverterAdapter.s.sol` — adapter bytecode only (needs Oracle; no ADMIN); export `SWAP_ADAPTER_ADDRESS`
+   - Admin timelock: `Converter.setAllowedAdapter`, paired-token `Oracle.updateUsdFeedInfo`, optional `addSupportedERC20(pairedToken)`
+   - `DeployUniCLStrat.s.sol` — strategy bytecode only (constructor requires the adapter already allowed); does **not** call `addStrategy`
+   - Admin timelock: `StrategyManager.addStrategy` — see `DeployUniCLStrat` NatSpec / `docs/STRATEGY_GUARDRAILS.md`
 
 ```bash
-export REGISTRY_ADDRESS=<registry_proxy>
-export EXIT_LIQUIDITY_TARGET_ETH=0
-export CONTROLLER_RESERVE_ETH=0
-export WHITELIST_SIGNER_ADDRESS=<invite_signer_or_zero>
+# After DeployRegistry: export REGISTRY_ADDRESS and TIMELOCK_ADDRESS from logs.
+# Also required for later steps: PRICE_FEED, WETH_ADDRESS, DAO_TREASURY_ADDRESS,
+# PERFORMANCE_FEE_BPS, EXIT_LIQUIDITY_TARGET_ETH, CONTROLLER_RESERVE_ETH,
+# WHITELIST_SIGNER_ADDRESS, GRANT_KEEPER_ROLE, SECURITY_ADDRESS (finalize).
 
 forge script script/DeployRegistry.s.sol:DeployRegistry --rpc-url $RPC_URL --broadcast
 forge script script/DeployEVE.s.sol:DeployEVE --rpc-url $RPC_URL --broadcast
-# ... ExitQueue, Controller, Oracle (set PRICE_FEED for Oracle)
+forge script script/DeployExitQueue.s.sol:DeployExitQueue --rpc-url $RPC_URL --broadcast
+forge script script/DeployController.s.sol:DeployController --rpc-url $RPC_URL --broadcast
+forge script script/DeployOracle.s.sol:DeployOracle --rpc-url $RPC_URL --broadcast
 forge script script/DeployConverter.s.sol:DeployConverter --rpc-url $RPC_URL --broadcast
 forge script script/DeployWhitelist.s.sol:DeployWhitelist --rpc-url $RPC_URL --broadcast
 forge script script/DeployAMM.s.sol:DeployAMM --rpc-url $RPC_URL --broadcast
 forge script script/DeployKeeperExecutors.s.sol:DeployKeeperExecutors --rpc-url $RPC_URL --broadcast
-# ... optional DeployUniCLStrat + addStrategy, then finalize:
 forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-url $RPC_URL --broadcast
+# UniCL: DeployUniswapV3ConverterAdapter → timelock setAllowedAdapter (+ paired feed /
+# optional addSupportedERC20) → DeployUniCLStrat → timelock addStrategy
 ```
 
 ## Protocol Architecture
@@ -902,16 +917,18 @@ forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-ur
 ### Contract Types
 
 - **Static Contracts (Immutable):**
+  - Registry: Central contract addresses and operational roles (constructor-deployed; not a proxy)
   - EVE Token: Protocol token with role-based minting
   - AMM: Bonding curve for ETH/EVE trading
   - Whitelist: Invite-gated entry (EIP-712 vouchers)
+  - Strategies / DEX adapters (e.g. UniCLStrat, UniswapV3ConverterAdapter)
   
 - **Upgradeable Contracts (UUPS):**
-  - Registry: Central contract addresses and operational roles
   - Controller: ETH receiver and keeper coordinator
   - ExitQueue: Redemption request queue manager
   - StrategyManager: Strategy and NAV management
   - Oracle: Price feed management
+  - Converter: Shared wrap/unwrap/swap module
 
 ### Access Control (Registry)
 
@@ -920,7 +937,7 @@ forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-ur
 - **KEEPER_ROLE** (on Registry): Controller keeper automation
 - **MINTER_ROLE** (on Registry): EVE mint/burn (granted to AMM)
 - **Registered callers**: ExitQueue accepts registered AMM/Controller; StrategyManager accepts registered Controller; AMM resolves registered `WHITELIST` for entry gating
-- **Deployer cleanup**: `Registry.initialize` grants temporary ADMIN to deployer; always renounced via `FinalizeProtocolDeploy` or `DeployAll` so ADMIN_ROLE ends held only by the admin timelock
+- **Deployer cleanup**: Registry constructor grants temporary ADMIN to deployer; always renounced via `FinalizeProtocolDeploy` or `DeployAll` so ADMIN_ROLE ends held only by the admin timelock
 
 ### Pricing Mechanism
 
@@ -964,7 +981,7 @@ forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-ur
 
 ## Upgrading Contracts
 
-Upgradeable modules (Registry, ExitQueue, Controller, StrategyManager, Oracle) authorize upgrades via `ADMIN_ROLE` on Registry:
+Upgradeable modules (ExitQueue, Controller, StrategyManager, Oracle, Converter) authorize upgrades via `ADMIN_ROLE` on Registry:
 
 1. Deploy the new implementation (e.g., ControllerV2)
 2. Call `upgradeToAndCall()` on the proxy:

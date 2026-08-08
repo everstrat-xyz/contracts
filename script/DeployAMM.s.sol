@@ -15,9 +15,8 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  * @notice Deploys StrategyManager and AMM, registers them on an existing Registry, and
  *         grants MINTER_ROLE to both (AMM for enter/exit mints, StrategyManager for
  *         performance-fee mints).
- * @dev Env (required): PRIVATE_KEY, REGISTRY_ADDRESS, DAO_TREASURY_ADDRESS — the fee
- *      treasury is never defaulted; a missing value reverts the deploy.
- *      Optional: PERFORMANCE_FEE_BPS (default 0 = fees disabled).
+ *      Env (required): PRIVATE_KEY, REGISTRY_ADDRESS, DAO_TREASURY_ADDRESS, PERFORMANCE_FEE_BPS
+ *      — never defaulted; a missing value reverts the deploy (`PERFORMANCE_FEE_BPS=0` disables fees).
  */
 contract DeployAMM is ProtocolDeployBase {
     function run() external returns (address strategyManagerProxy, address ammAddress) {
@@ -57,8 +56,10 @@ contract DeployAMM is ProtocolDeployBase {
         registry.grantRoles(roles, accounts);
 
         // Deployer keeps its bootstrap Registry ADMIN_ROLE for any remaining modular steps
-        // (e.g. DeployUniCLStrat + addStrategy). Renounce explicitly at the end via
-        // FinalizeProtocolDeploy — the single, unconditional PL-003 finalization step.
+        // (e.g. DeployKeeperExecutors). Strategy bytecode (`DeployUniCLStrat`) needs no ADMIN;
+        // `addStrategy` is always scheduled on the admin timelock after finalize. Renounce
+        // explicitly at the end via FinalizeProtocolDeploy — the single, unconditional
+        // PL-003 finalization step.
 
         vm.stopBroadcast();
 

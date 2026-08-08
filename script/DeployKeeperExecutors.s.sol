@@ -27,8 +27,9 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *          ProvideExitLiquidity action (0 = disabled — valid explicit choice).
  *        - CONTROLLER_RESERVE_ETH: required. ETH (wei) kept idle on the Controller, not
  *          deposited to strategies (0 = no reserve — valid explicit choice).
- *        - GRANT_KEEPER_ROLE (optional, default true): grant KEEPER_ROLE to both
- *          executors from the deployer. Set false when grants must be timelocked.
+ *        - GRANT_KEEPER_ROLE: required bool. `true` grants KEEPER_ROLE to both executors
+ *          from the deployer; `false` when grants must be timelocked (finalize only after
+ *          those grants have executed).
  *
  *      Post-deployment (per executor):
  *        1. Register the upkeep in Chainlink Automation (UI or registrar),
@@ -45,12 +46,13 @@ contract DeployKeeperExecutors is ProtocolDeployBase {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
         address registryAddress = vm.envAddress("REGISTRY_ADDRESS");
-        bool grantKeeperRole = vm.envOr("GRANT_KEEPER_ROLE", true);
+        bool grantKeeperRole = vm.envBool("GRANT_KEEPER_ROLE");
 
         Registry registry = Registry(registryAddress);
 
         console.log("Deployer:", deployer);
         console.log("Registry:", registryAddress);
+        console.log("GRANT_KEEPER_ROLE:", grantKeeperRole);
 
         vm.startBroadcast(deployerPrivateKey);
 

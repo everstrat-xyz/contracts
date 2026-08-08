@@ -230,7 +230,7 @@ Performance fees are implemented **inside each strategy** (LP-fee base for UniCL
   - `emergencyExit()` writes off pending strategy-local fees after sweeping held funds (best-effort accrue then charged = earned — prevents phantom harvest of pre-exit pending if later unpaused).
 - **Configuration**: `FeeConfig{daoTreasury, performanceFeeBps}` at `initialize()`; `setDaoTreasury` / `setPerformanceFeeBps` (admin). Treasury must be non-zero; `performanceFeeBps == 0` disables harvesting.
 - **Access**: `ADMIN_ROLE` or `KEEPER_ROLE` on Registry for harvest; StrategyManager holds `MINTER_ROLE` on Registry.
-- **Deploy env**: `DAO_TREASURY_ADDRESS` (defaults to admin timelock), `PERFORMANCE_FEE_BPS` (default 0).
+- **Deploy env**: `DAO_TREASURY_ADDRESS`, `PERFORMANCE_FEE_BPS` (required; `0` disables fees).
 
 UniCLStrat responsibilities: poke-only on `sync()` (materialize `tokensOwed` for NAV/pending); poke-then-accrue on remove/collect; settle/pending over materialized fees only; report accurate `navInETH()`; freeze pending/settle while paused; on `emergencyExit()` best-effort `_tryAccrueLpFees` (aggregate snapshot fallback if `positions` reverts) then charged = earned.
 
@@ -280,22 +280,20 @@ Because `navInETH()` feeds AMM pricing (via `StrategyManager.totalNAVInETH()`), 
 
 Constructor takes a single `IUniCLStrat.DeploymentConfig` struct:
 
-- **`AddressConfig`**: `registry`, `weth`, `pool`, `swapRouter`, `quoter` (Oracle resolved via registered `ORACLE` on Registry)
-- **`SwapConfig`**: swap paths and `maxSwapSlippageBps`
+- **`AddressConfig`**: `registry`, `weth`, `pool` (Oracle / Converter resolved via Registry)
+- **`RouteConfig`**: `swapAdapter`, `wethToPairedTokenPath`, `pairedTokenToWethPath`
 - **`StrategyConfig`**: `positionWidth`, `rebalanceTickThreshold`, `maxTickDeviation`, `twapInterval`, `shortTwapInterval`, `maxTotalNAV`
 
-Deploy via `script/DeployUniCLStrat.s.sol` with `REGISTRY_ADDRESS` and env-driven strategy parameters. Performance-fee treasury and rate are configured on StrategyManager at deploy (`DAO_TREASURY_ADDRESS`, `PERFORMANCE_FEE_BPS`), not in UniCLStrat.
+Deploy via `script/DeployUniCLStrat.s.sol` with `REGISTRY_ADDRESS` and env-driven strategy parameters (bytecode only — no `addStrategy`; requires prior timelocked `Converter.setAllowedAdapter`). Register the strategy via the 48h admin timelock (`StrategyManager.addStrategy`; paired-token Oracle feed / optional `addSupportedERC20` usually share the allowlist batch). Performance-fee treasury and rate are configured on StrategyManager at protocol deploy (`DAO_TREASURY_ADDRESS`, `PERFORMANCE_FEE_BPS`), not in UniCLStrat.
 
 Mutable parameters (`ADMIN_ROLE` on Registry):
 
 - `setPositionWidth(int24)`
 - `setMaxTickDeviation(int56)`
 - `setRebalanceTickThreshold(int24)`
-- `setTwapInterval(uint32)`
-- `setSwapPath(bytes)`
-- `setMaxSwapSlippage(uint256)`
-- `setDaoTreasury(address)`
-- `setMaxSwapSlippage(uint256)`
+- `setTwapInterval(uint32)` / `setShortTwapInterval(uint32)`
+- `setRouteConfig(adapter, wethToPairedPath, pairedToWethPath)`
+- `setSwapSlippageBps(uint256)`
 - `setMaxTotalNAV(uint256)`
 - `pause()` / `unpause()`
 
