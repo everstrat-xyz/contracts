@@ -1,0 +1,222 @@
+name: Comprehensive Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: string
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    outputs:
+      architecture_status: ${{ steps.process-results.outputs.architecture_status }}
+      architecture_summary: ${{ steps.process-results.outputs.architecture_summary }}
+      architecture_issues_count: ${{ steps.process-results.outputs.architecture_issues_count }}
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install architecture checker dependencies
+      run: |
+        cd mermaid/scripts
+        npm install
+    
+    - name: Run Simple Architecture Check
+      id: architecture-check
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_REPO: ${{ github.repository }}
+      run: |
+        cd mermaid/scripts
+        # Use tsx instead of ts-node for better ES module support
+        npx tsx simple-architecture-checker.ts ${{ github.event.pull_request.number || inputs.pr_number || '0' }}
+        
+        # Extract outputs from the script's GITHUB_OUTPUT file
+        if [ -f "$GITHUB_OUTPUT" ]; then
+          echo "Architecture check completed. Outputs available in GITHUB_OUTPUT file."
+        else
+          echo "No GITHUB_OUTPUT file found. Architecture check may have failed."
+        fi
+    
+    - name: Process Architecture Check Results
+      id: process-results
+      if: always()
+      run: |
+        # Read architecture check results from GITHUB_OUTPUT file
+        if [ -f "$GITHUB_OUTPUT" ]; then
+          echo "Reading architecture check results..."
+          
+          # Extract values from GITHUB_OUTPUT file
+          ARCH_STATUS=$(grep "^status=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "unknown")
+          ARCH_SUMMARY=$(grep "^summary=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "No summary available")
+          ARCH_ISSUES=$(grep "^architectural_issues=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "0")
+          NEW_CONTRACTS=$(grep "^new_contracts=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "0")
+          ALIGNED_CONTRACTS=$(grep "^aligned_contracts=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "0")
+          ARCH_UPDATED=$(grep "^architecture_updated=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "false")
+          HAS_NEW_CONTRACTS=$(grep "^has_new_contracts=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "false")
+          UNDOCUMENTED_CONTRACTS=$(grep "^undocumented_contracts=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "")
+          
+          echo "Architecture Check Status: $ARCH_STATUS"
+          echo "Summary: $ARCH_SUMMARY"
+          echo "Architectural Issues: $ARCH_ISSUES"
+          echo "New Contracts: $NEW_CONTRACTS"
+          echo "Aligned Contracts: $ALIGNED_CONTRACTS"
+          echo "Architecture Updated: $ARCH_UPDATED"
+          echo "Has New Contracts: $HAS_NEW_CONTRACTS"
+          echo "Undocumented Contracts: $UNDOCUMENTED_CONTRACTS"
+          
+          # Set step-level outputs for other steps to use
+          echo "architecture_status=$ARCH_STATUS" >> $GITHUB_OUTPUT
+          echo "architecture_summary=$ARCH_SUMMARY" >> $GITHUB_OUTPUT
+          echo "architecture_issues_count=$ARCH_ISSUES" >> $GITHUB_OUTPUT
+          echo "new_contracts=$NEW_CONTRACTS" >> $GITHUB_OUTPUT
+          echo "aligned_contracts=$ALIGNED_CONTRACTS" >> $GITHUB_OUTPUT
+          echo "architecture_updated=$ARCH_UPDATED" >> $GITHUB_OUTPUT
+          echo "has_new_contracts=$HAS_NEW_CONTRACTS" >> $GITHUB_OUTPUT
+          echo "undocumented_contracts=$UNDOCUMENTED_CONTRACTS" >> $GITHUB_OUTPUT
+        else
+          echo "No architecture check results found. Setting defaults."
+          echo "architecture_status=unknown" >> $GITHUB_OUTPUT
+          echo "architecture_summary=Architecture check failed or not run" >> $GITHUB_OUTPUT
+          echo "architecture_issues_count=0" >> $GITHUB_OUTPUT
+          echo "new_contracts=0" >> $GITHUB_OUTPUT
+          echo "aligned_contracts=0" >> $GITHUB_OUTPUT
+          echo "architecture_updated=false" >> $GITHUB_OUTPUT
+          echo "has_new_contracts=false" >> $GITHUB_OUTPUT
+          echo "undocumented_contracts=" >> $GITHUB_OUTPUT
+        fi
+    
+    
+    - name: Run Claude Code Review
+      id: claude-review
+      uses: anthropics/claude-code-action@v1
+      with:
+        claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        prompt: |
+          REPO: ${{ github.repository }}
+          PR NUMBER: ${{ github.event.pull_request.number }}
+
+          ## 🏗️ Architecture Check Results
+          **Status:** ${{ steps.process-results.outputs.architecture_status }}
+          **Summary:** ${{ steps.process-results.outputs.architecture_summary }}
+          **Architectural Issues:** ${{ steps.process-results.outputs.architecture_issues_count }}
+          **New Contracts:** ${{ steps.process-results.outputs.new_contracts }}
+          **Aligned Contracts:** ${{ steps.process-results.outputs.aligned_contracts }}
+          **Architecture Updated:** ${{ steps.process-results.outputs.architecture_updated }}
+          **Has New Contracts:** ${{ steps.process-results.outputs.has_new_contracts }}
+          **Undocumented Contracts:** ${{ steps.process-results.outputs.undocumented_contracts }}
+
+          Please review this pull request and provide feedback on:
+          - Code quality and best practices
+          - Potential bugs or issues
+          - Performance considerations
+          - Security concerns
+          - Test coverage
+          - **Architecture compliance** (pay special attention to the architecture check results above)
+          
+          **Important:** The architecture check has already analyzed this PR against the target architecture. Please:
+          1. **Review the architecture check results above** - Pay attention to the status and summary
+          2. **Evaluate architectural alignment** - Check if new contracts follow established patterns
+          3. **Address architectural issues** - If issues were found, provide specific guidance on how to fix them
+          4. **Validate contract design** - Ensure new contracts fit well with the existing architecture
+          5. **Check documentation** - Verify that architecture diagrams are updated if needed
+          6. **Provide actionable feedback** - Give specific suggestions for improvement
+          
+          **Architecture Check Interpretation:**
+          - ✅ **PASSED**: All changes align with target architecture
+          - ⚠️ **WARNING**: Some concerns found, review and address
+          - ❌ **FAILED**: Significant architectural issues detected
+          
+          Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
+
+          Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
+        
+        claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
+    
+    - name: Check GitHub Token Permissions
+      if: always()
+      run: |
+        echo "Checking GitHub token permissions..."
+        echo "Repository: ${{ github.repository }}"
+        echo "Event: ${{ github.event_name }}"
+        echo "PR Number: ${{ github.event.pull_request.number }}"
+    
+    - name: Post Architecture Diagram Comment
+      if: always()
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          
+          console.log('Context:', JSON.stringify(context, null, 2));
+          console.log('Event name:', context.eventName);
+          console.log('Payload:', JSON.stringify(context.payload, null, 2));
+          
+          // Read the mermaid diagram
+          const mermaidPath = 'mermaid/mermaid-smart-contracts.md';
+          let mermaidContent = '';
+          
+          if (fs.existsSync(mermaidPath)) {
+            const content = fs.readFileSync(mermaidPath, 'utf8');
+            const match = content.match(/```mermaid\n([\s\S]*?)\n```/);
+            if (match) {
+              mermaidContent = match[1];
+            }
+          }
+          
+          // Create architecture diagram comment
+          const commentBody = `## 📊 Current Architecture
+          
+          This diagram shows the current system architecture for reference during code review.
+          
+          \`\`\`mermaid
+          ${mermaidContent}
+          \`\`\`
+          
+          ---
+          *This diagram is automatically updated and provided for reference during code review.*`;
+          
+          // Get the correct PR/issue number
+          const prNumber = context.payload.pull_request?.number || context.issue?.number;
+          console.log('Posting comment to PR/Issue number:', prNumber);
+          
+          if (!prNumber) {
+            console.log('No PR or issue number found, skipping comment');
+            return;
+          }
+          
+          try {
+            // Post comment to PR/Issue
+            await github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: commentBody
+            });
+            console.log('Comment posted successfully');
+          } catch (error) {
+            console.error('Error posting comment:', error);
+            throw error;
+          }
