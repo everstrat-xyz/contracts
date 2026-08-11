@@ -39,7 +39,7 @@ contract CREKeystoneMetadataTest is Test, CRETestUtils {
         bytes32 workflowId = keccak256("fork-meta");
         bytes10 workflowName = bytes10("fork-meta-");
         address workflowOwner = address(this);
-        executor.setExpectedWorkflowOwner(workflowOwner);
+        executor.setExpectedAuthor(workflowOwner);
         executor.setExpectedWorkflowName(workflowName);
         executor.setExpectedWorkflowId(workflowId);
 

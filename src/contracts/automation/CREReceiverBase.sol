@@ -15,11 +15,24 @@ import {IReceiver} from "../../interfaces/automation/IReceiver.sol";
 
 /**
  * @title CREReceiverBase
- * @notice Shared base for Chainlink CRE / Keystone report receivers.
- * @dev Static (non-upgradeable). The Chainlink-managed KeystoneForwarder is the
- * sole caller of {onReport}. Workflow identity is ADMIN-bound. Subclasses must
- * re-validate every condition and amount from live chain state inside
- * {_processReport} — the report is treated as action selection / hints only.
+ * @notice Chainlink CRE / Keystone receiver base for EverStrat keepers.
+ *
+ * Security checks follow Chainlink's recommended `ReceiverTemplate`
+ * (Building Consumer Contracts guide):
+ *   1. `msg.sender` must be the KeystoneForwarder
+ *   2. Optional workflow ID / author / name validation from metadata
+ *   3. Workflow name validation REQUIRES author validation (40-bit collision)
+ *   4. `_decodeMetadata` layout matches ReceiverTemplate
+ *   5. ERC-165 advertises `IReceiver`
+ *
+ * EverStrat adaptations (not deviations from the auth model):
+ *   - Forwarder is constructor-immutable (TECH_SPEC: rotating it is a redeploy)
+ *   - Configuration gated by Registry `ADMIN_ROLE` instead of OZ `Ownable`
+ *   - Receivers are unbound-inert until author or workflow ID is set
+ *   - After template auth, decode EverStrat `Envelope` and enforce
+ *     chainSelector / sequence / MAX_REPORT_AGE before `_processReport`
+ *
+ * @dev See https://docs.chain.link/cre/guides/workflow/using-evm-client/onchain-write/building-consumer-contracts
  */
 abstract contract CREReceiverBase is ICREReceiverBase, RegistryClient, Pausable, ReentrancyGuard, ERC165 {
     // ============ Immutables ============
@@ -33,13 +46,13 @@ abstract contract CREReceiverBase is ICREReceiverBase, RegistryClient, Pausable,
     /// @inheritdoc ICREReceiverBase
     uint64 public immutable MAX_REPORT_AGE;
 
-    // ============ State ============
+    // ============ ReceiverTemplate permission fields ============
 
     /// @inheritdoc ICREReceiverBase
     bytes32 public expectedWorkflowId;
 
     /// @inheritdoc ICREReceiverBase
-    address public expectedWorkflowOwner;
+    address public expectedAuthor;
 
     /// @inheritdoc ICREReceiverBase
     bytes10 public expectedWorkflowName;
@@ -47,13 +60,16 @@ abstract contract CREReceiverBase is ICREReceiverBase, RegistryClient, Pausable,
     /// @inheritdoc ICREReceiverBase
     uint64 public lastSequence;
 
+    /// @dev Hex charset for ReceiverTemplate workflow-name encoding
+    bytes private constant HEX_CHARS = "0123456789abcdef";
+
     // ============ Constructor ============
 
     /**
      * @param registry_ Protocol Registry
-     * @param forwarder_ Chainlink KeystoneForwarder (immutable)
+     * @param forwarder_ Chainlink KeystoneForwarder (required, non-zero — ReceiverTemplate rule)
      * @param chainSelector_ CCIP chain selector for this deployment
-     * @param maxReportAge_ Maximum age of `observedAt` relative to `block.timestamp`
+     * @param maxReportAge_ Maximum age of Envelope.observedAt relative to block.timestamp
      */
     constructor(address registry_, address forwarder_, uint64 chainSelector_, uint64 maxReportAge_)
         RegistryClient(registry_)
@@ -69,11 +85,21 @@ abstract contract CREReceiverBase is ICREReceiverBase, RegistryClient, Pausable,
 
     /**
      * @inheritdoc IReceiver
+     * @dev Order of checks mirrors ReceiverTemplate.onReport, then EverStrat Envelope guards.
      */
     function onReport(bytes calldata metadata, bytes calldata report) external nonReentrant whenNotPaused {
-        if (msg.sender != FORWARDER) revert CREReceiverOnlyForwarder();
-        _validateWorkflow(metadata);
+        // ReceiverTemplate Security Check 1: trusted forwarder
+        if (msg.sender != FORWARDER) revert InvalidSender(msg.sender, FORWARDER);
 
+        // ReceiverTemplate Security Checks 2-4: workflow identity (if configured)
+        _validateWorkflowIdentity(metadata);
+
+        // EverStrat: require at least author or workflow ID before accepting work
+        if (expectedWorkflowId == bytes32(0) && expectedAuthor == address(0)) {
+            revert CREReceiverWorkflowUnbound();
+        }
+
+        // EverStrat Envelope layer (replay / cross-chain / staleness)
         Envelope memory e = abi.decode(report, (Envelope));
         if (e.chainSelector != CHAIN_SELECTOR) revert CREReceiverWrongChain();
         if (e.sequence <= lastSequence) revert CREReceiverReplayedSequence();
@@ -85,55 +111,62 @@ abstract contract CREReceiverBase is ICREReceiverBase, RegistryClient, Pausable,
         _processReport(e.action, e.params);
     }
 
-    // ============ Admin ============
+    // ============ Admin (ReceiverTemplate setters; ADMIN_ROLE) ============
 
-    /**
-     * @inheritdoc ICREReceiverBase
-     * @dev Pinning a workflow ID is the steady-state binding. Clearing to
-     * `bytes32(0)` falls back to owner (+ optional name) validation.
-     */
-    function setExpectedWorkflowId(bytes32 _workflowId) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        emit ExpectedWorkflowIdChanged(expectedWorkflowId, _workflowId);
-        expectedWorkflowId = _workflowId;
+    /// @inheritdoc ICREReceiverBase
+    function setExpectedWorkflowId(bytes32 _id) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        emit ExpectedWorkflowIdUpdated(expectedWorkflowId, _id);
+        expectedWorkflowId = _id;
+    }
+
+    /// @inheritdoc ICREReceiverBase
+    function setExpectedAuthor(address _author) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        emit ExpectedAuthorUpdated(expectedAuthor, _author);
+        expectedAuthor = _author;
     }
 
     /**
      * @inheritdoc ICREReceiverBase
+     * @dev Encoding matches ReceiverTemplate / CRE engine:
+     * SHA256(name) → hex string → first 10 chars → bytes10.
      */
-    function setExpectedWorkflowOwner(address _owner) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        emit ExpectedWorkflowOwnerChanged(expectedWorkflowOwner, _owner);
-        expectedWorkflowOwner = _owner;
+    function setExpectedWorkflowName(string calldata _name) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        bytes10 previousName = expectedWorkflowName;
+        if (bytes(_name).length == 0) {
+            expectedWorkflowName = bytes10(0);
+            emit ExpectedWorkflowNameUpdated(previousName, bytes10(0));
+            return;
+        }
+
+        bytes32 hash = sha256(bytes(_name));
+        bytes memory hexString = _bytesToHexString(abi.encodePacked(hash));
+        bytes memory first10 = new bytes(10);
+        for (uint256 i = 0; i < 10; i++) {
+            first10[i] = hexString[i];
+        }
+        expectedWorkflowName = bytes10(first10);
+        emit ExpectedWorkflowNameUpdated(previousName, expectedWorkflowName);
     }
 
-    /**
-     * @inheritdoc ICREReceiverBase
-     * @dev Name validation is only meaningful when `expectedWorkflowOwner` is set —
-     * name-only binding is rejected at validation time (40-bit collision surface).
-     */
+    /// @inheritdoc ICREReceiverBase
     function setExpectedWorkflowName(bytes10 _name) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        emit ExpectedWorkflowNameChanged(expectedWorkflowName, _name);
+        emit ExpectedWorkflowNameUpdated(expectedWorkflowName, _name);
         expectedWorkflowName = _name;
     }
 
-    /**
-     * @inheritdoc ICREReceiverBase
-     */
+    /// @inheritdoc ICREReceiverBase
     function pause() external onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.SECURITY_ROLE) {
         _pause();
     }
 
-    /**
-     * @inheritdoc ICREReceiverBase
-     */
+    /// @inheritdoc ICREReceiverBase
     function unpause() external onlyAuthRole(Auth.ADMIN_ROLE) {
         _unpause();
     }
 
     // ============ ERC-165 ============
 
-    /**
-     * @inheritdoc ERC165
-     */
+    /// @inheritdoc ERC165
     function supportsInterface(bytes4 interfaceId) public view virtual override(ERC165, IERC165) returns (bool) {
         return interfaceId == type(IReceiver).interfaceId || super.supportsInterface(interfaceId);
     }
@@ -141,64 +174,75 @@ abstract contract CREReceiverBase is ICREReceiverBase, RegistryClient, Pausable,
     // ============ Internal ============
 
     /**
-     * @notice Subclass entrypoint after auth / replay / staleness checks
-     * @dev Must re-validate action conditions and recompute any amounts from
-     * live state. Wrong/stale claims should revert with the subclass's
-     * "no upkeep needed" error (never execute on trust of the report alone).
+     * @notice Subclass business logic after ReceiverTemplate auth + Envelope guards
      */
     function _processReport(uint8 action, bytes memory params) internal virtual;
 
     /**
-     * @notice Validates workflow identity from Keystone metadata
-     * @dev Metadata is typically 64 bytes from the production forwarder:
-     * `workflowId (32) | workflowName (10) | workflowOwner (20) | reportId (2)`.
-     * The first 62 bytes are the logical packed identity; trailing `reportId`
-     * is ignored for identity checks. Require at least 62 bytes.
-     *
-     * Validation order (matches Chainlink ReceiverTemplate guidance):
-     * 1. If `expectedWorkflowId` is set → require exact ID match (steady state)
-     * 2. Else require `expectedWorkflowOwner` set and matching (name optional)
-     * 3. Name-without-owner is rejected (collision guard)
-     * 4. Completely unbound receiver rejects all reports
+     * @notice ReceiverTemplate workflow-identity checks (ID / author / name)
+     * @dev Name validation REQUIRES author validation — enforced here exactly as
+     * in ReceiverTemplate.onReport. Metadata length: production delivers 64 bytes;
+     * we accept >= 62 (identity) and ignore trailing reportId. Do not require == 62.
      */
-    function _validateWorkflow(bytes calldata metadata) internal view {
+    function _validateWorkflowIdentity(bytes calldata metadata) internal view {
+        if (expectedWorkflowId == bytes32(0) && expectedAuthor == address(0) && expectedWorkflowName == bytes10(0)) {
+            return; // no identity checks configured (ReceiverTemplate behavior)
+        }
+
+        // Reject truncated metadata; 64-byte production slices are fine (>= 62).
         if (metadata.length < 62) revert CREReceiverInvalidMetadata();
 
         (bytes32 workflowId, bytes10 workflowName, address workflowOwner) = _decodeMetadata(metadata);
 
-        if (expectedWorkflowId != bytes32(0)) {
-            if (workflowId != expectedWorkflowId) revert CREReceiverUnexpectedWorkflow();
-            return;
+        if (expectedWorkflowId != bytes32(0) && workflowId != expectedWorkflowId) {
+            revert InvalidWorkflowId(workflowId, expectedWorkflowId);
+        }
+        if (expectedAuthor != address(0) && workflowOwner != expectedAuthor) {
+            revert InvalidAuthor(workflowOwner, expectedAuthor);
         }
 
-        if (expectedWorkflowOwner == address(0)) {
-            // Name-only is unsafe; unbound is inert.
-            if (expectedWorkflowName != bytes10(0)) revert CREReceiverUnexpectedWorkflow();
-            revert CREReceiverWorkflowUnbound();
-        }
-
-        if (workflowOwner != expectedWorkflowOwner) revert CREReceiverUnexpectedWorkflow();
-        if (expectedWorkflowName != bytes10(0) && workflowName != expectedWorkflowName) {
-            revert CREReceiverUnexpectedWorkflow();
+        // ================================================================
+        // WORKFLOW NAME VALIDATION - REQUIRES AUTHOR VALIDATION
+        // (copied rule from ReceiverTemplate — do not rely on name alone)
+        // ================================================================
+        if (expectedWorkflowName != bytes10(0)) {
+            if (expectedAuthor == address(0)) {
+                revert WorkflowNameRequiresAuthorValidation();
+            }
+            if (workflowName != expectedWorkflowName) {
+                revert InvalidWorkflowName(workflowName, expectedWorkflowName);
+            }
         }
     }
 
     /**
-     * @notice Decode workflow identity from Keystone metadata (first 62 bytes)
-     * @dev Layout matches Chainlink ReceiverTemplate / KeystoneFeedsConsumer:
-     * packed `bytes32 | bytes10 | address`. Assembly reads match the OZ/Chainlink
-     * reference (workflowName loaded at offset 64 of the bytes object; owner
-     * right-aligned via shr 96 from offset 74).
+     * @notice Decode workflow identity — ReceiverTemplate._decodeMetadata layout
+     * @dev Template takes `bytes memory` and reads:
+     *   - offset 32: workflowId
+     *   - offset 64: workflowName
+     *   - offset 74: workflowOwner (shr 96)
+     * We copy calldata → memory so the same assembly applies verbatim.
      */
     function _decodeMetadata(bytes calldata metadata)
         internal
         pure
         returns (bytes32 workflowId, bytes10 workflowName, address workflowOwner)
     {
+        bytes memory metadata_ = metadata;
         assembly {
-            workflowId := calldataload(metadata.offset)
-            workflowName := calldataload(add(metadata.offset, 32))
-            workflowOwner := shr(96, calldataload(add(metadata.offset, 42)))
+            workflowId := mload(add(metadata_, 32))
+            workflowName := mload(add(metadata_, 64))
+            workflowOwner := shr(mul(12, 8), mload(add(metadata_, 74)))
         }
+    }
+
+    /// @dev ReceiverTemplate helper: bytes → lowercase hex string
+    function _bytesToHexString(bytes memory data) private pure returns (bytes memory) {
+        bytes memory hexString = new bytes(data.length * 2);
+        for (uint256 i = 0; i < data.length; i++) {
+            hexString[i * 2] = HEX_CHARS[uint8(data[i] >> 4)];
+            hexString[i * 2 + 1] = HEX_CHARS[uint8(data[i] & 0x0f)];
+        }
+        return hexString;
     }
 }

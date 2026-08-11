@@ -294,7 +294,8 @@ abstract contract ProtocolDeployBase is Script {
      * @dev In the automated trust model the executors are the ONLY KEEPER_ROLE holders —
      *      Chainlink infrastructure never receives a protocol role. The KeystoneForwarder
      *      is immutable at construction; workflow identity is bound afterward via ADMIN
-     *      `setExpectedWorkflowOwner` / `setExpectedWorkflowName` / `setExpectedWorkflowId`.
+     *      `setExpectedAuthor` / `setExpectedWorkflowName` / `setExpectedWorkflowId`
+     *      (ReceiverTemplate setters; Registry ADMIN instead of Ownable).
      *
      *      Required CRE env:
      *        - KEYSTONE_FORWARDER: Chainlink-managed KeystoneForwarder address

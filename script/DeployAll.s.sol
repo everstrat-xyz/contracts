@@ -42,7 +42,7 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      48h admin timelock after this script.
  *
  *      Post-deployment: bind CRE workflow identity on each executor
- *      (`setExpectedWorkflowOwner` / name / id), then enable workflow `writeReport`.
+ *      (`setExpectedAuthor` / name / id), then enable workflow `writeReport`.
  */
 contract DeployAll is ProtocolDeployBase {
     struct DeploymentResult {

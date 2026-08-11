@@ -66,7 +66,7 @@ contract CREQueueExecutorTest is ProtocolTestBase, CRETestUtils {
 
         executor = new CREQueueExecutor(address(registry), forwarder, TEST_CHAIN_SELECTOR, TEST_MAX_REPORT_AGE);
         registry.grantRole(Auth.KEEPER_ROLE, address(executor));
-        executor.setExpectedWorkflowOwner(workflowOwner);
+        executor.setExpectedAuthor(workflowOwner);
         executor.setExpectedWorkflowName(workflowName);
         executor.setExpectedWorkflowId(workflowId);
 
@@ -109,12 +109,13 @@ contract CREQueueExecutorTest is ProtocolTestBase, CRETestUtils {
             uint8(ICREQueueExecutor.QueueAction.PriceBatch),
             abi.encode(uint256(1))
         );
-        vm.expectRevert(ICREReceiverBase.CREReceiverOnlyForwarder.selector);
+        vm.expectRevert(abi.encodeWithSelector(ICREReceiverBase.InvalidSender.selector, address(this), forwarder));
         executor.onReport(_metadata(), report);
     }
 
     function test_OnReport_WrongWorkflowId() public {
-        executor.setExpectedWorkflowId(keccak256("other"));
+        bytes32 other = keccak256("other");
+        executor.setExpectedWorkflowId(other);
         bytes memory report = _encodeReport(
             TEST_CHAIN_SELECTOR,
             1,
@@ -123,19 +124,20 @@ contract CREQueueExecutorTest is ProtocolTestBase, CRETestUtils {
             abi.encode(uint256(1))
         );
         vm.prank(forwarder);
-        vm.expectRevert(ICREReceiverBase.CREReceiverUnexpectedWorkflow.selector);
+        vm.expectRevert(abi.encodeWithSelector(ICREReceiverBase.InvalidWorkflowId.selector, workflowId, other));
         executor.onReport(_metadata(), report);
     }
 
-    function test_OnReport_NameWithoutOwnerRejected() public {
+    function test_OnReport_NameWithoutAuthorRejected() public {
+        // ReceiverTemplate: name validation REQUIRES author validation.
         CREQueueExecutor unbound =
             new CREQueueExecutor(address(registry), forwarder, TEST_CHAIN_SELECTOR, TEST_MAX_REPORT_AGE);
-        unbound.setExpectedWorkflowName(workflowName); // owner unset
+        unbound.setExpectedWorkflowName(workflowName); // author unset
         bytes memory report = _encodeReport(
             TEST_CHAIN_SELECTOR, 1, uint64(block.timestamp), uint8(ICREQueueExecutor.QueueAction.None), ""
         );
         vm.prank(forwarder);
-        vm.expectRevert(ICREReceiverBase.CREReceiverUnexpectedWorkflow.selector);
+        vm.expectRevert(ICREReceiverBase.WorkflowNameRequiresAuthorValidation.selector);
         unbound.onReport(_metadata(), report);
     }
 

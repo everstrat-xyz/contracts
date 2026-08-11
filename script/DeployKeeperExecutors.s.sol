@@ -36,8 +36,9 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *
  *      Post-deployment (per executor):
  *        1. Deploy CRE workflows (queue-keeper / strategy-keeper).
- *        2. Bind workflow identity (ADMIN): `setExpectedWorkflowOwner`, then
- *           `setExpectedWorkflowName`, then pin `setExpectedWorkflowId`.
+ *        2. Bind workflow identity (ADMIN), per ReceiverTemplate:
+ *           `setExpectedAuthor`, then `setExpectedWorkflowName`, then pin
+ *           `setExpectedWorkflowId`.
  *        3. Enable workflow `writeReport`.
  *        4. Before granting KEEPER_ROLE to anything new: set `strategyDepositCooldown` > 0.
  *        5. Keep a manual multisig KEEPER_ROLE as permanent break-glass.
