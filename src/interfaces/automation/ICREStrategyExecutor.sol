@@ -6,8 +6,7 @@ import {ICREReceiverBase} from "./ICREReceiverBase.sol";
 /**
  * @title ICREStrategyExecutor
  * @notice CRE receiver for strategy keeper actions.
- * @dev Action enum ordinals match CLA `IStrategyKeeperExecutor.StrategyAction`.
- * Amounts are never taken from the report — recomputed at execution time.
+ * @dev Amounts are never taken from the report — recomputed at execution time.
  */
 interface ICREStrategyExecutor is ICREReceiverBase {
     enum StrategyAction {

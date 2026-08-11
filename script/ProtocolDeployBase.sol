@@ -512,10 +512,10 @@ abstract contract ProtocolDeployBase is Script {
             _registry.hasRole(Auth.CONVERTER_CALLER_MANAGER_ROLE, converter),
             "CRITICAL: Converter missing CONVERTER_CALLER_MANAGER_ROLE"
         );
-        require(_registry.hasRole(Auth.KEEPER_ROLE, queueExecutor), "CRITICAL: QueueKeeperExecutor missing KEEPER_ROLE");
+        require(_registry.hasRole(Auth.KEEPER_ROLE, queueExecutor), "CRITICAL: CREQueueExecutor missing KEEPER_ROLE");
         require(
             _registry.hasRole(Auth.KEEPER_ROLE, strategyExecutor),
-            "CRITICAL: StrategyKeeperExecutor missing KEEPER_ROLE"
+            "CRITICAL: CREStrategyExecutor missing KEEPER_ROLE"
         );
     }
 
@@ -561,20 +561,20 @@ abstract contract ProtocolDeployBase is Script {
         );
         require(
             address(_keepers.queueExecutor.registry()) == address(_registry),
-            "CRITICAL: QueueKeeperExecutor registry() mismatch"
+            "CRITICAL: CREQueueExecutor registry() mismatch"
         );
         require(
             address(_keepers.strategyExecutor.registry()) == address(_registry),
-            "CRITICAL: StrategyKeeperExecutor registry() mismatch"
+            "CRITICAL: CREStrategyExecutor registry() mismatch"
         );
         if (_expectKeeperRole) {
             require(
                 _registry.hasRole(Auth.KEEPER_ROLE, address(_keepers.queueExecutor)),
-                "CRITICAL: QueueKeeperExecutor missing KEEPER_ROLE"
+                "CRITICAL: CREQueueExecutor missing KEEPER_ROLE"
             );
             require(
                 _registry.hasRole(Auth.KEEPER_ROLE, address(_keepers.strategyExecutor)),
-                "CRITICAL: StrategyKeeperExecutor missing KEEPER_ROLE"
+                "CRITICAL: CREStrategyExecutor missing KEEPER_ROLE"
             );
         }
 

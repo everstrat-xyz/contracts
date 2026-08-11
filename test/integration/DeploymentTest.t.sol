@@ -136,7 +136,7 @@ contract DeployScriptsTest is Test {
         // Explicit zero postpones invite-signer seeding (required env; never silently omitted).
         vm.setEnv("WHITELIST_SIGNER_ADDRESS", vm.toString(address(0)));
         vm.setEnv("PERFORMANCE_FEE_BPS", "0");
-        // Explicit StrategyKeeperExecutor policy knobs (wei) — required by deploy scripts;
+        // Explicit CREStrategyExecutor policy knobs (wei) — required by deploy scripts;
         // 0 is a valid bootstrap choice (immediate exits disabled / no Controller float).
         vm.setEnv("EXIT_LIQUIDITY_TARGET_ETH", "0");
         vm.setEnv("CONTROLLER_RESERVE_ETH", "0");
@@ -174,11 +174,11 @@ contract DeployScriptsTest is Test {
             "Converter missing CONVERTER_CALLER_MANAGER_ROLE"
         );
         assertTrue(
-            registry.hasRole(Auth.KEEPER_ROLE, result.queueKeeperExecutor), "QueueKeeperExecutor missing KEEPER_ROLE"
+            registry.hasRole(Auth.KEEPER_ROLE, result.queueKeeperExecutor), "CREQueueExecutor missing KEEPER_ROLE"
         );
         assertTrue(
             registry.hasRole(Auth.KEEPER_ROLE, result.strategyKeeperExecutor),
-            "StrategyKeeperExecutor missing KEEPER_ROLE"
+            "CREStrategyExecutor missing KEEPER_ROLE"
         );
         assertEq(registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR), result.queueKeeperExecutor);
         assertEq(registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR), result.strategyKeeperExecutor);
@@ -240,11 +240,11 @@ contract DeployScriptsTest is Test {
         );
         assertTrue(
             registry.hasRole(Auth.KEEPER_ROLE, registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR)),
-            "QueueKeeperExecutor missing KEEPER_ROLE"
+            "CREQueueExecutor missing KEEPER_ROLE"
         );
         assertTrue(
             registry.hasRole(Auth.KEEPER_ROLE, registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR)),
-            "StrategyKeeperExecutor missing KEEPER_ROLE"
+            "CREStrategyExecutor missing KEEPER_ROLE"
         );
 
         // NOTE: `new FinalizeProtocolDeploy().run()` would make the CREATE the "next call"

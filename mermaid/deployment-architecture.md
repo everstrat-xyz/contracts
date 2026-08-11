@@ -161,7 +161,7 @@ oracle.updateUsdFeedInfo(address(0), priceFeed, stalenessInterval);
 if (whitelistSigner != address(0)) whitelist.addSigner(whitelistSigner);
 registry.renounceRole(ADMIN_ROLE, deployer); // always — ADMIN ends held only by the timelock
 // UniCL adapter / strategy / setAllowedAdapter / addStrategy are NOT part of DeployAll
-// Then: register Chainlink upkeeps → setForwarder on each executor
+// Then: bind workflow identity on each executor
 ```
 
 ### Option B: Modular (recommended order)
@@ -202,7 +202,7 @@ forge script script/DeployUniswapV3ConverterAdapter.s.sol:DeployUniswapV3Convert
 # 3) Deploy strategy bytecode (constructor requires adapter already allowed)
 forge script script/DeployUniCLStrat.s.sol:DeployUniCLStrat --broadcast
 # 4) Timelock: StrategyManager.addStrategy
-# Then: register Chainlink upkeeps → setForwarder on each executor
+# Then: bind workflow identity on each executor
 ```
 
 Each partial script calls `_registerAndVerify` so the contract is live on Registry before the script finishes.
@@ -228,8 +228,8 @@ The Registry constructor grants `ADMIN_ROLE` to both `_admin` (the admin timeloc
 | StrategyManager | Upgradeable | `STRATEGY_MANAGER` |
 | Oracle | Upgradeable | `ORACLE` |
 | Converter | Upgradeable | `CONVERTER` |
-| QueueKeeperExecutor | Static | `QUEUE_KEEPER_EXECUTOR` |
-| StrategyKeeperExecutor | Static | `STRATEGY_KEEPER_EXECUTOR` |
+| CREQueueExecutor | Static | `QUEUE_KEEPER_EXECUTOR` |
+| CREStrategyExecutor | Static | `STRATEGY_KEEPER_EXECUTOR` |
 | UniCLStrat | Static | — (registered in StrategyManager only) |
 | UniswapV3ConverterAdapter | Static | — (Converter allowlist only) |
 

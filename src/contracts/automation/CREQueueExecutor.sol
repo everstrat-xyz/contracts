@@ -17,10 +17,9 @@ import {CREReceiverBase} from "./CREReceiverBase.sol";
  * @title CREQueueExecutor
  * @notice CRE / Keystone receiver for redemption-queue keeper actions.
  *
- * Decision logic mirrors {QueueKeeperExecutor} (CLA). The CRE workflow may scan
- * the full queue off-chain; on-chain {queueUpkeepStatus} remains the gas-bounded
- * fallback / cross-check. Report params are hints — every action is re-validated
- * against live state before Controller calls.
+ * The CRE workflow may scan the full queue off-chain; on-chain {queueUpkeepStatus}
+ * remains the gas-bounded fallback / cross-check. Report params are hints — every
+ * action is re-validated against live state before Controller calls.
  *
  * ProcessRequests params: `abi.encode(batchId, startIndex, endIndex)` —
  * `endIndex` is exclusive (matches Controller.processRequests).
@@ -76,7 +75,7 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
             if (endIndex <= startIndex) revert KeeperExecutorNoUpkeepNeeded();
 
             // Re-validate: claimed range must be a prefix of the affordable set
-            // (CLA always starts at 0; CRE workflows may claim a shorter prefix).
+            // starting at index 0 (workflows may claim a shorter prefix).
             uint256 affordable = _affordableRequests(queue, address(controller), batchId);
             if (startIndex != 0 || endIndex > affordable) revert KeeperExecutorNoUpkeepNeeded();
 
@@ -166,14 +165,14 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     function advanceBatchCursor(uint256 _toBatchId) external onlyAuthRole(Auth.ADMIN_ROLE) {
         uint256 cursor = nextBatchIdToProcess;
         uint256 currentBatchId = IExitQueue(registry().exitQueue()).currentBatchId();
-        if (_toBatchId <= cursor) revert QueueKeeperExecutorBatchCursorPrecedesCurrent();
-        if (_toBatchId > currentBatchId) revert QueueKeeperExecutorBatchCursorPastCurrent();
+        if (_toBatchId <= cursor) revert CREQueueExecutorBatchCursorPrecedesCurrent();
+        if (_toBatchId > currentBatchId) revert CREQueueExecutorBatchCursorPastCurrent();
 
         nextBatchIdToProcess = _toBatchId;
         emit BatchCursorAdvanced(cursor, _toBatchId);
     }
 
-    // ============ Internal (byte-identical to CLA QueueKeeperExecutor) ============
+    // ============ Internal ============
 
     function _isBatchSkippable(IExitQueue _queue, uint256 _batchId) internal view returns (bool) {
         if (_queue.unprocessedUsersCount(_batchId) == 0) return true;

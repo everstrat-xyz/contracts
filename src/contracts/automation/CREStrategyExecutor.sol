@@ -28,7 +28,7 @@ import {CREReceiverBase} from "./CREReceiverBase.sol";
  * from live Controller / StrategyManager / ExitQueue / AMM state.
  *
  * Couples to the registered queue keeper via Registry `QUEUE_KEEPER_EXECUTOR`
- * and `nextLiveBatchIdToProcess()` (CLA or CRE queue executor).
+ * and `nextLiveBatchIdToProcess()`.
  */
 contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
     using Math for uint256;
@@ -213,7 +213,7 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         minExitLiquidityTopUpETH = _minExitLiquidityTopUpETH;
     }
 
-    // ============ Internal (mirrors CLA StrategyKeeperExecutor) ============
+    // ============ Internal ============
 
     function _rebalanceNeeded(IStrategyManager _strategyManager) internal view returns (bool) {
         address[] memory strategies = _strategyManager.strategies();
@@ -277,8 +277,6 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         IExitQueue queue = IExitQueue(_registry.exitQueue());
         uint256 currentBatchId = queue.currentBatchId();
 
-        // Supports both CLA QueueKeeperExecutor and CREQueueExecutor — both expose
-        // nextLiveBatchIdToProcess() with identical semantics.
         uint256 cursor = ICREQueueExecutor(_registry.queueKeeperExecutor()).nextLiveBatchIdToProcess();
 
         uint256 scanLimit = cursor + MAX_BATCH_SCAN;

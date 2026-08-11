@@ -6,8 +6,6 @@ import {ICREReceiverBase} from "./ICREReceiverBase.sol";
 /**
  * @title ICREQueueExecutor
  * @notice CRE receiver for redemption-queue keeper actions.
- * @dev Action enum ordinals match CLA `IQueueKeeperExecutor.QueueAction`. Config and
- * cursor APIs mirror the CLA queue executor so decision logic stays shared in spirit.
  */
 interface ICREQueueExecutor is ICREReceiverBase {
     enum QueueAction {
@@ -25,8 +23,8 @@ interface ICREQueueExecutor is ICREReceiverBase {
     error KeeperExecutorNoUpkeepNeeded();
     error KeeperExecutorUnknownAction();
     error KeeperExecutorInvalidConfig();
-    error QueueKeeperExecutorBatchCursorPrecedesCurrent();
-    error QueueKeeperExecutorBatchCursorPastCurrent();
+    error CREQueueExecutorBatchCursorPrecedesCurrent();
+    error CREQueueExecutorBatchCursorPastCurrent();
 
     function MAX_BATCH_SCAN() external pure returns (uint256);
     function MIN_BATCH_AGE_UPPER_BOUND() external pure returns (uint256);

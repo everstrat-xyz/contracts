@@ -18,7 +18,7 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *                                 feeds, unpause, UUPS upgrades — schedule upgrades with a
  *                                 longer delay by policy)
  *        - SECURITY_ROLE       -> security multisig (immediate pause + timelock canceller)
- *        - KEEPER_ROLE         -> QueueKeeperExecutor + StrategyKeeperExecutor only
+ *        - KEEPER_ROLE         -> CREQueueExecutor + CREStrategyExecutor only
  *        - DAO multisig        -> proposer/canceller on the timelock; NO direct roles
  *        - deployer            -> all bootstrap roles renounced
  *      During the run the deployer wires the protocol (contract registration, role grants,
@@ -28,7 +28,7 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      pattern.
  *      Env (required): PRIVATE_KEY, PRICE_FEED, WETH_ADDRESS, DAO_ADDRESS, SECURITY_ADDRESS,
  *      DAO_TREASURY_ADDRESS, EXIT_LIQUIDITY_TARGET_ETH, CONTROLLER_RESERVE_ETH,
- *      WHITELIST_SIGNER_ADDRESS — critical addresses and StrategyKeeperExecutor policy knobs
+ *      WHITELIST_SIGNER_ADDRESS — critical addresses and CREStrategyExecutor policy knobs
  *      (wei) are never defaulted (in particular never to the deployer key / silent 0); a
  *      missing value reverts the deploy. Setting either policy knob to 0 is a valid explicit
  *      choice (immediate exits disabled / no Controller float). Set WHITELIST_SIGNER_ADDRESS

@@ -171,7 +171,7 @@ An upgradeable controller contract that orchestrates protocol operations, receiv
 - **Access:** `KEEPER_ROLE` and `ADMIN_ROLE` on Registry; resolves AMM, StrategyManager, ExitQueue, and EVE via `Auth`
 - **Keeper Functionality:** Deposit/withdraw/rebalance, redemption queue, `provideExitLiquidity`
 - **AMM / ExitQueue / StrategyManager:** Caller must be the registered `CONTROLLER` address on Registry for cross-contract ops
-- **Exit Liquidity:** KEEPER_ROLE can route Controller ETH to the AMM via `provideExitLiquidity()`; in the automated trust model the `StrategyKeeperExecutor` does this via its `ProvideExitLiquidity` action, which tops the AMM immediate-exit float up to `exitLiquidityTargetETH` (default `0` = disabled until admin-set, same pattern as `controllerReserveETH`) from idle Controller ETH above the reserve and pending redemption needs; ADMIN_ROLE can sweep all Controller ETH to the AMM via `emergencyExitToAMM()` during emergencies
+- **Exit Liquidity:** KEEPER_ROLE can route Controller ETH to the AMM via `provideExitLiquidity()`; in the automated trust model the `CREStrategyExecutor` does this via its `ProvideExitLiquidity` action, which tops the AMM immediate-exit float up to `exitLiquidityTargetETH` (default `0` = disabled until admin-set, same pattern as `controllerReserveETH`) from idle Controller ETH above the reserve and pending redemption needs; ADMIN_ROLE can sweep all Controller ETH to the AMM via `emergencyExitToAMM()` during emergencies
 - **Version Tracking:** Returns "1.0.0"
 - **Upgrade Safety:** Includes storage gaps to prevent storage collisions
 - **Security:** Only ADMIN_ROLE can authorize upgrades
@@ -223,7 +223,7 @@ Peers (AMM, StrategyManager, ExitQueue, EVE) are resolved via Registry at call t
 - `harvestPerformanceFeeFromStrategy(address _strategy)`: Harvests accrued performance fees for one strategy via StrategyManager; emits `DirectPerformanceFeeHarvestCompleted`
 - `harvestPerformanceFeeFromStrategies()`: Harvests all registered strategies in one EVE mint; emits `PerformanceFeeHarvestCompleted(0, strategyCount, …)`
 - `harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex)`: Paginated harvest with one EVE mint; emits `PerformanceFeeHarvestCompleted(startIndex, endIndex, …)`
-- `provideExitLiquidity(uint256 _amount)`: Sends ETH from Controller to the AMM to fund immediate redemptions; reverts with `ControllerInsufficientBalance` when `_amount > controller.balance`. Driven automatically by the `StrategyKeeperExecutor`'s `ProvideExitLiquidity` action (AMM float below `exitLiquidityTargetETH` → top up from idle Controller ETH, minimum top-up `minExitLiquidityTopUpETH`)
+- `provideExitLiquidity(uint256 _amount)`: Sends ETH from Controller to the AMM to fund immediate redemptions; reverts with `ControllerInsufficientBalance` when `_amount > controller.balance`. Driven automatically by the `CREStrategyExecutor`'s `ProvideExitLiquidity` action (AMM float below `exitLiquidityTargetETH` → top up from idle Controller ETH, minimum top-up `minExitLiquidityTopUpETH`)
 
 **Redemption Queue Operations:**
 - `priceBatch()`: Prices the current batch using AMM's base EVE price, making it processable
@@ -875,7 +875,7 @@ export WETH_ADDRESS=<weth>
 forge script script/DeployAll.s.sol:DeployAll --rpc-url $RPC_URL --broadcast
 ```
 
-Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter, Whitelist, and AMM; registers all `Auth` (including `WHITELIST`); grants `KEEPER_ROLE`, `MINTER_ROLE` (AMM + StrategyManager), and `CONVERTER_CALLER_MANAGER_ROLE`; initializes StrategyManager with fee config; configures the ETH/USD feed; seeds the initial Whitelist invite signer when `WHITELIST_SIGNER_ADDRESS` is non-zero; applies StrategyKeeperExecutor policy knobs from required env; renounces the deployer's bootstrap Registry admin (ADMIN_ROLE ends held only by the admin timelock). **Core-only:** does not deploy DEX adapters or strategies (`DeployUniswapV3ConverterAdapter` / `DeployUniCLStrat` are modular follow-ups).
+Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter, Whitelist, and AMM; registers all `Auth` (including `WHITELIST`); grants `KEEPER_ROLE`, `MINTER_ROLE` (AMM + StrategyManager), and `CONVERTER_CALLER_MANAGER_ROLE`; initializes StrategyManager with fee config; configures the ETH/USD feed; seeds the initial Whitelist invite signer when `WHITELIST_SIGNER_ADDRESS` is non-zero; applies CREStrategyExecutor policy knobs from required env; renounces the deployer's bootstrap Registry admin (ADMIN_ROLE ends held only by the admin timelock). **Core-only:** does not deploy DEX adapters or strategies (`DeployUniswapV3ConverterAdapter` / `DeployUniCLStrat` are modular follow-ups).
 
 ### Modular deployment order
 
