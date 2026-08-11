@@ -13,7 +13,7 @@ import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
 
 import {AMM} from "../../src/contracts/AMM.sol";
 import {Converter} from "../../src/contracts/Converter.sol";
-import {StrategyKeeperExecutor} from "../../src/contracts/automation/StrategyKeeperExecutor.sol";
+import {CREStrategyExecutor} from "../../src/contracts/automation/CREStrategyExecutor.sol";
 import {Registry} from "registry/Registry.sol";
 import {IRegistry} from "interfaces/IRegistry.sol";
 
@@ -142,6 +142,10 @@ contract DeployScriptsTest is Test {
         vm.setEnv("CONTROLLER_RESERVE_ETH", "0");
         vm.setEnv("TIMELOCK_ADMIN_DELAY", vm.toString(ADMIN_TIMELOCK_DELAY));
         vm.setEnv("GRANT_KEEPER_ROLE", "true");
+        // CRE / Keystone constructor immutables (Sepolia forwarder used as a stand-in).
+        vm.setEnv("KEYSTONE_FORWARDER", vm.toString(makeAddr("keystoneForwarder")));
+        vm.setEnv("CHAIN_SELECTOR", "16015286601757825753"); // Ethereum Sepolia
+        vm.setEnv("MAX_REPORT_AGE", "3600");
     }
 
     function test_DeployAll_RegistryAdminIsTimelockWithDaoProposer() public {
@@ -180,7 +184,7 @@ contract DeployScriptsTest is Test {
         assertEq(registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR), result.strategyKeeperExecutor);
 
         // Policy knobs applied from required env (explicit 0 in setUp = bootstrap choice).
-        StrategyKeeperExecutor strategyExecutor = StrategyKeeperExecutor(result.strategyKeeperExecutor);
+        CREStrategyExecutor strategyExecutor = CREStrategyExecutor(result.strategyKeeperExecutor);
         assertEq(strategyExecutor.exitLiquidityTargetETH(), 0);
         assertEq(strategyExecutor.controllerReserveETH(), 0);
     }
@@ -211,7 +215,7 @@ contract DeployScriptsTest is Test {
         (address converterProxy,) = new DeployConverter().run();
         new DeployWhitelist().run();
         (address strategyManagerProxy,) = new DeployAMM().run();
-        (, StrategyKeeperExecutor strategyExecutor) = new DeployKeeperExecutors().run();
+        (, CREStrategyExecutor strategyExecutor) = new DeployKeeperExecutors().run();
         assertEq(strategyExecutor.exitLiquidityTargetETH(), 0);
         assertEq(strategyExecutor.controllerReserveETH(), 0);
 

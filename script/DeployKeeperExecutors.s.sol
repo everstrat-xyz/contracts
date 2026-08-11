@@ -4,15 +4,15 @@ pragma solidity ^0.8.30;
 import {Script, console} from "forge-std/Script.sol";
 
 import {Registry} from "registry/Registry.sol";
-import {QueueKeeperExecutor} from "../src/contracts/automation/QueueKeeperExecutor.sol";
-import {StrategyKeeperExecutor} from "../src/contracts/automation/StrategyKeeperExecutor.sol";
+import {CREQueueExecutor} from "../src/contracts/automation/CREQueueExecutor.sol";
+import {CREStrategyExecutor} from "../src/contracts/automation/CREStrategyExecutor.sol";
 
 import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
 
 /**
  * @title DeployKeeperExecutors
- * @notice Modular deploy step: deploys both Chainlink Automation keeper executors,
- *         registers them on the Registry address book, and optionally grants KEEPER_ROLE.
+ * @notice Modular deploy step: deploys both CRE keeper executors, registers them on the
+ *         Registry address book, and optionally grants KEEPER_ROLE.
  *
  * @dev Shared implementation lives in {ProtocolDeployBase-_deployKeeperExecutors}; DeployAll
  *      calls the same helper. Run this after core Registry wiring and before
@@ -23,6 +23,9 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *        - PRIVATE_KEY: deployer key (must hold ADMIN_ROLE on the Registry for bootstrap
  *          registration, optional role grants, and policy-knob setters).
  *        - REGISTRY_ADDRESS: the protocol Registry.
+ *        - KEYSTONE_FORWARDER: Chainlink-managed KeystoneForwarder (immutable on executors).
+ *        - CHAIN_SELECTOR: CCIP chain selector for this deployment (uint64).
+ *        - MAX_REPORT_AGE: max report `observedAt` age in seconds (uint64, > 0).
  *        - EXIT_LIQUIDITY_TARGET_ETH: required. AMM free-balance target in wei for the
  *          ProvideExitLiquidity action (0 = disabled — valid explicit choice).
  *        - CONTROLLER_RESERVE_ETH: required. ETH (wei) kept idle on the Controller, not
@@ -32,17 +35,19 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *          those grants have executed).
  *
  *      Post-deployment (per executor):
- *        1. Register the upkeep in Chainlink Automation (UI or registrar),
- *           targeting the executor with empty checkData.
- *        2. Read the upkeep's Forwarder address from the Automation registry.
- *        3. Call `setForwarder(forwarder)` on the executor (ADMIN_ROLE).
+ *        1. Deploy CRE workflows (queue-keeper / strategy-keeper).
+ *        2. Bind workflow identity (ADMIN): `setExpectedWorkflowOwner`, then
+ *           `setExpectedWorkflowName`, then pin `setExpectedWorkflowId`.
+ *        3. Enable workflow `writeReport`.
+ *        4. Before granting KEEPER_ROLE to anything new: set `strategyDepositCooldown` > 0.
+ *        5. Keep a manual multisig KEEPER_ROLE as permanent break-glass.
  *
- *      SECURITY: never grant KEEPER_ROLE to the Chainlink registry/registrar or
- *      a deployer EOA in production — only to the executor contracts. The
- *      executors stay inert until their Forwarder is set.
+ *      SECURITY: never grant KEEPER_ROLE to Chainlink infra or a deployer EOA in
+ *      production — only to the executor contracts (and optional break-glass multisig).
+ *      Executors reject reports until workflow identity is bound.
  */
 contract DeployKeeperExecutors is ProtocolDeployBase {
-    function run() external returns (QueueKeeperExecutor queueExecutor, StrategyKeeperExecutor strategyExecutor) {
+    function run() external returns (CREQueueExecutor queueExecutor, CREStrategyExecutor strategyExecutor) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
         address registryAddress = vm.envAddress("REGISTRY_ADDRESS");
@@ -53,6 +58,9 @@ contract DeployKeeperExecutors is ProtocolDeployBase {
         console.log("Deployer:", deployer);
         console.log("Registry:", registryAddress);
         console.log("GRANT_KEEPER_ROLE:", grantKeeperRole);
+        console.log("KEYSTONE_FORWARDER:", vm.envAddress("KEYSTONE_FORWARDER"));
+        console.log("CHAIN_SELECTOR:", vm.envUint("CHAIN_SELECTOR"));
+        console.log("MAX_REPORT_AGE:", vm.envUint("MAX_REPORT_AGE"));
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -65,9 +73,8 @@ contract DeployKeeperExecutors is ProtocolDeployBase {
         queueExecutor = keepers.queueExecutor;
         strategyExecutor = keepers.strategyExecutor;
 
-        console.log("QueueKeeperExecutor:", address(queueExecutor));
-        console.log("StrategyKeeperExecutor:", address(strategyExecutor));
-        console.log("Next steps: register upkeeps in Chainlink Automation,");
-        console.log("then call setForwarder(<forwarder>) on each executor.");
+        console.log("CREQueueExecutor:", address(queueExecutor));
+        console.log("CREStrategyExecutor:", address(strategyExecutor));
+        console.log("Next steps: bind workflow identity on each executor, then enable writeReport.");
     }
 }

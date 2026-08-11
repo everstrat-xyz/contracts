@@ -15,8 +15,8 @@ import {StrategyManager} from "../src/contracts/StrategyManager.sol";
 import {Oracle} from "../src/contracts/Oracle.sol";
 import {ExitQueue} from "../src/contracts/ExitQueue.sol";
 import {Whitelist} from "../src/contracts/Whitelist.sol";
-import {QueueKeeperExecutor} from "../src/contracts/automation/QueueKeeperExecutor.sol";
-import {StrategyKeeperExecutor} from "../src/contracts/automation/StrategyKeeperExecutor.sol";
+import {CREQueueExecutor} from "../src/contracts/automation/CREQueueExecutor.sol";
+import {CREStrategyExecutor} from "../src/contracts/automation/CREStrategyExecutor.sol";
 
 import {Auth} from "../src/libraries/Auth.sol";
 import {IStrategyManager} from "../src/interfaces/IStrategyManager.sol";
@@ -55,8 +55,8 @@ abstract contract ProtocolDeployBase is Script {
     }
 
     struct KeeperExecutors {
-        QueueKeeperExecutor queueExecutor;
-        StrategyKeeperExecutor strategyExecutor;
+        CREQueueExecutor queueExecutor;
+        CREStrategyExecutor strategyExecutor;
     }
 
     function _deployRegistry(address _admin) internal returns (Registry registry) {
@@ -288,17 +288,21 @@ abstract contract ProtocolDeployBase is Script {
     }
 
     /**
-     * @notice Deploys both Chainlink Automation keeper executors, registers them on the
-     *         Registry address book, optionally grants them KEEPER_ROLE, and applies the
-     *         StrategyKeeperExecutor policy knobs from required env.
+     * @notice Deploys both CRE keeper executors, registers them on the Registry address
+     *         book, optionally grants them KEEPER_ROLE, and applies Strategy executor
+     *         policy knobs from required env.
      * @dev In the automated trust model the executors are the ONLY KEEPER_ROLE holders —
-     *      Chainlink infrastructure never receives a protocol role. `setForwarder` remains
-     *      a post-step after each upkeep is registered with Chainlink Automation.
+     *      Chainlink infrastructure never receives a protocol role. The KeystoneForwarder
+     *      is immutable at construction; workflow identity is bound afterward via ADMIN
+     *      `setExpectedWorkflowOwner` / `setExpectedWorkflowName` / `setExpectedWorkflowId`.
+     *
+     *      Required CRE env:
+     *        - KEYSTONE_FORWARDER: Chainlink-managed KeystoneForwarder address
+     *        - CHAIN_SELECTOR: CCIP chain selector for this deployment (uint64)
+     *        - MAX_REPORT_AGE: max report age in seconds (uint64, must be > 0)
+     *
      *      Policy knobs (`EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`) are REQUIRED
-     *      env (wei) — `vm.envUint` reverts when unset. Zero is a valid explicit choice
-     *      (immediate exits disabled / no Controller float); omission is not. Callers must
-     *      still hold Registry `ADMIN_ROLE` to invoke the setters (bootstrap window before
-     *      finalize, or schedule through the 48h admin timelock afterward).
+     *      env (wei) — `vm.envUint` reverts when unset. Zero is a valid explicit choice.
      * @param _registry The protocol Registry (caller must hold ADMIN_ROLE)
      * @param _grantKeeperRole Whether to grant KEEPER_ROLE to both executors (false in
      *        production when the grant must be scheduled through the 48h admin timelock)
@@ -307,8 +311,12 @@ abstract contract ProtocolDeployBase is Script {
         internal
         returns (KeeperExecutors memory keepers)
     {
-        keepers.queueExecutor = new QueueKeeperExecutor(address(_registry));
-        keepers.strategyExecutor = new StrategyKeeperExecutor(address(_registry));
+        address forwarder = vm.envAddress("KEYSTONE_FORWARDER");
+        uint64 chainSelector = uint64(vm.envUint("CHAIN_SELECTOR"));
+        uint64 maxReportAge = uint64(vm.envUint("MAX_REPORT_AGE"));
+
+        keepers.queueExecutor = new CREQueueExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
+        keepers.strategyExecutor = new CREStrategyExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
 
         bytes32[] memory keys = new bytes32[](2);
         address[] memory addresses = new address[](2);

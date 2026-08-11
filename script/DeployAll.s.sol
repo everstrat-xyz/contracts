@@ -41,8 +41,8 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      `DeployUniCLStrat` — with `setAllowedAdapter` / `addStrategy` always scheduled on the
  *      48h admin timelock after this script.
  *
- *      Post-deployment: register each executor's upkeep in Chainlink Automation, then
- *      call `setForwarder(forwarder)` on each executor (ADMIN_ROLE / timelock).
+ *      Post-deployment: bind CRE workflow identity on each executor
+ *      (`setExpectedWorkflowOwner` / name / id), then enable workflow `writeReport`.
  */
 contract DeployAll is ProtocolDeployBase {
     struct DeploymentResult {
@@ -95,9 +95,9 @@ contract DeployAll is ProtocolDeployBase {
         _registerProtocolContracts(protocol.registry, protocol, true);
         _grantTieredProtocolRoles(protocol.registry, protocol, timelocks, security);
 
-        // Keepers are a dedicated step: deploy, register on the Registry address book,
-        // and grant KEEPER_ROLE. Executors stay inert until setForwarder after Chainlink
-        // upkeep registration.
+        // Keepers are a dedicated step: deploy CRE receivers, register on the Registry
+        // address book, and grant KEEPER_ROLE. Executors reject reports until workflow
+        // identity is ADMIN-bound.
         KeeperExecutors memory keepers = _deployKeeperExecutors(protocol.registry, true);
 
         Oracle(protocol.oracle).updateUsdFeedInfo(address(0), priceFeed, STALENESS_INTERVAL);
@@ -168,8 +168,8 @@ contract DeployAll is ProtocolDeployBase {
         console.log("Converter proxy:", result.converterProxy);
         console.log("Whitelist:", result.whitelist);
         console.log("Admin timelock (48h):", result.adminTimelock);
-        console.log("QueueKeeperExecutor:", result.queueKeeperExecutor);
-        console.log("StrategyKeeperExecutor:", result.strategyKeeperExecutor);
+        console.log("CREQueueExecutor:", result.queueKeeperExecutor);
+        console.log("CREStrategyExecutor:", result.strategyKeeperExecutor);
 
         _verifyRegistryWiring(protocol.registry, protocol);
         _verifyModuleRegistryBackpointers(protocol, result.registryProxy);
@@ -197,8 +197,8 @@ contract DeployAll is ProtocolDeployBase {
 
         console.log("ETH price feed:", priceFeed);
         console.log("All deployment checks passed");
-        console.log("Next steps: register upkeeps in Chainlink Automation,");
-        console.log("then call setForwarder(<forwarder>) on each executor.");
+        console.log("Next steps: bind CRE workflow identity on each executor,");
+        console.log("then enable writeReport. Keep a manual multisig KEEPER_ROLE.");
     }
 
     /// @dev Every module resolves the protocol Registry; verify each back-pointer so a
