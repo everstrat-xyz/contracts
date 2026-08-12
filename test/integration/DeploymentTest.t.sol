@@ -177,8 +177,7 @@ contract DeployScriptsTest is Test {
             registry.hasRole(Auth.KEEPER_ROLE, result.queueKeeperExecutor), "CREQueueExecutor missing KEEPER_ROLE"
         );
         assertTrue(
-            registry.hasRole(Auth.KEEPER_ROLE, result.strategyKeeperExecutor),
-            "CREStrategyExecutor missing KEEPER_ROLE"
+            registry.hasRole(Auth.KEEPER_ROLE, result.strategyKeeperExecutor), "CREStrategyExecutor missing KEEPER_ROLE"
         );
         assertEq(registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR), result.queueKeeperExecutor);
         assertEq(registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR), result.strategyKeeperExecutor);

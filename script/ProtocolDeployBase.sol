@@ -515,8 +515,7 @@ abstract contract ProtocolDeployBase is Script {
         );
         require(_registry.hasRole(Auth.KEEPER_ROLE, queueExecutor), "CRITICAL: CREQueueExecutor missing KEEPER_ROLE");
         require(
-            _registry.hasRole(Auth.KEEPER_ROLE, strategyExecutor),
-            "CRITICAL: CREStrategyExecutor missing KEEPER_ROLE"
+            _registry.hasRole(Auth.KEEPER_ROLE, strategyExecutor), "CRITICAL: CREStrategyExecutor missing KEEPER_ROLE"
         );
     }
 
