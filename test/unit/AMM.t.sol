@@ -17,6 +17,7 @@ import {IRegistryClient} from "interfaces/IRegistryClient.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockController} from "../mocks/MockController.sol";
+import {MockMintOrderController} from "../mocks/MockMintOrderController.sol";
 
 import {AMM} from "../../src/contracts/AMM.sol";
 import {EVE} from "../../src/contracts/EVE.sol";
@@ -285,21 +286,30 @@ contract AMMTest is ProtocolTestBase {
     }
 
     /// @dev AMM-3: mint must precede the external ETH transfer so NAV/supply stay consistent
-    ///      for any observer during Controller.receive.
+    ///      for any observer during Controller.receive. Assert mid-call via a spy Controller —
+    ///      `vm.expectCall` alone does not enforce relative order between two targets.
     function test_Enter_MintsBeforeTransferringETHToController() public {
         vm.prank(user1);
         bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
         vm.roll(block.number + 1);
 
+        // Swap CONTROLLER for a spy, but keep bootstrap ETH in NAV (still attributed to Controller).
+        MockMintOrderController orderSpy = new MockMintOrderController(address(eve));
+        uint256 priorControllerEth = address(controller).balance;
+        registry.registerContract(Auth.CONTROLLER, address(orderSpy));
+        vm.deal(address(orderSpy), priorControllerEth);
+
         uint256 depositAmount = ENTER_ETH_DEPOSIT;
         uint256 tokensToMint = Math.convertAssetsInverse(depositAmount, bondingCurve.evePremiumPriceInETH());
-
-        // Stacked expectCall matches in call order: mint first, then value-bearing call to Controller.
-        vm.expectCall(address(eve), abi.encodeCall(EVE.mint, (user2, tokensToMint)));
-        vm.expectCall(address(controller), depositAmount, bytes(""));
+        uint256 supplyAfterMint = eve.totalSupply() + tokensToMint;
+        orderSpy.expectMinSupplyOnReceive(supplyAfterMint);
 
         vm.prank(user2);
         bondingCurve.enter{value: depositAmount}(ENTER_MIN_TOKENS);
+
+        assertTrue(orderSpy.received(), "Controller must receive enter ETH");
+        assertEq(eve.totalSupply(), supplyAfterMint);
+        assertEq(address(orderSpy).balance, priorControllerEth + depositAmount);
     }
 
     function test_EnterInsufficientDeposit() public {
