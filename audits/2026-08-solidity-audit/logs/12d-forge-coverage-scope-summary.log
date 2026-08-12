@@ -1,0 +1,208 @@
+COVERAGE EXECUTION STATUS
+1) forge coverage --report summary => exit 1
+7:Error: Compiler error (/solidity/libsolidity/codegen/LValue.cpp:54): Stack too deep. Try compiling with `--via-ir` (cli) or the equivalent `viaIR: true` (standard JSON) while enabling the optimizer. Otherwise, try removing local variables.
+8:   --> script/DeployAll.s.sol:119:90:
+2) forge coverage --ir-minimum --report summary --report lcov => report generated, exit 1 because instrumentation exceeded one gas benchmark threshold
+40882:[FAIL: AddStrategy gas usage too high: 356014 >= 345000] test_GasBenchmark_AddStrategy() (gas: 366299)
+41262:Wrote LCOV report.
+41264:Failing tests:
+41265:Encountered 1 failing test in test/unit/StrategyManager.t.sol:StrategyManagerTest
+41266:[FAIL: AddStrategy gas usage too high: 356014 >= 345000] test_GasBenchmark_AddStrategy() (gas: 366299)
+41268:Encountered a total of 1 failing tests, 1175 tests succeeded
+3) forge coverage --ir-minimum --no-match-test ^test_GasBenchmark_ --report summary => exit 0
+Ran 43 test suites in 1.21s (8.15s CPU time): 1169 tests passed, 0 failed, 15 skipped (1184 total tests)
+| Total                                                       | 90.33% (3149/3486) | 90.19% (3529/3913) | 64.91% (492/758) | 91.36% (624/683) |
+IN-SCOPE SRC PER-FILE COVERAGE (IR-minimum source mapping; see raw warnings)
+| src/contracts/AMM.sol                                       | 97.20% (139/143)   | 95.95% (166/173)   | 80.00% (20/25)   | 100.00% (30/30)  |
+| src/contracts/Controller.sol                                | 89.92% (107/119)   | 89.47% (102/114)   | 100.00% (8/8)    | 93.75% (30/32)   |
+| src/contracts/Converter.sol                                 | 89.15% (115/129)   | 90.14% (128/142)   | 84.62% (33/39)   | 96.43% (27/28)   |
+| src/contracts/EVE.sol                                       | 100.00% (9/9)      | 100.00% (5/5)      | 100.00% (0/0)    | 100.00% (4/4)    |
+| src/contracts/ExitQueue.sol                                 | 93.26% (83/89)     | 93.26% (83/89)     | 92.86% (13/14)   | 94.44% (17/18)   |
+| src/contracts/Oracle.sol                                    | 96.45% (136/141)   | 97.44% (152/156)   | 96.55% (28/29)   | 93.94% (31/33)   |
+| src/contracts/StrategyManager.sol                           | 95.11% (350/368)   | 95.54% (407/426)   | 93.55% (58/62)   | 97.26% (71/73)   |
+| src/contracts/Whitelist.sol                                 | 100.00% (49/49)    | 100.00% (47/47)    | 100.00% (13/13)  | 100.00% (12/12)  |
+| src/contracts/adapters/UniswapV3ConverterAdapter.sol        | 94.20% (65/69)     | 89.32% (92/103)    | 60.00% (9/15)    | 92.86% (13/14)   |
+| src/contracts/automation/KeeperExecutorBase.sol             | 80.00% (8/10)      | 75.00% (6/8)       | 100.00% (2/2)    | 100.00% (4/4)    |
+| src/contracts/automation/QueueKeeperExecutor.sol            | 100.00% (107/107)  | 98.80% (164/166)   | 92.86% (26/28)   | 100.00% (13/13)  |
+| src/contracts/automation/StrategyKeeperExecutor.sol         | 98.73% (156/158)   | 97.90% (233/238)   | 76.92% (30/39)   | 100.00% (20/20)  |
+| src/contracts/registry/Registry.sol                         | 96.88% (93/96)     | 97.30% (108/111)   | 100.00% (16/16)  | 100.00% (23/23)  |
+| src/contracts/registry/client/RegistryClient.sol            | 100.00% (5/5)      | 100.00% (4/4)      | 100.00% (1/1)    | 100.00% (2/2)    |
+| src/contracts/registry/client/RegistryClientBase.sol        | 100.00% (9/9)      | 100.00% (9/9)      | 100.00% (3/3)    | 100.00% (3/3)    |
+| src/contracts/registry/client/RegistryClientUpgradeable.sol | 85.71% (6/7)       | 80.00% (4/5)       | 100.00% (1/1)    | 100.00% (3/3)    |
+| src/contracts/strategies/UniCLStrat.sol                     | 89.61% (440/491)   | 87.35% (518/593)   | 75.68% (84/111)  | 98.92% (92/93)   |
+| src/libraries/Auth.sol                                      | 90.00% (18/20)     | 90.00% (18/20)     | 100.00% (0/0)    | 90.00% (9/10)    |
+| src/libraries/Math.sol                                      | 95.83% (23/24)     | 93.55% (29/31)     | 60.00% (3/5)     | 100.00% (8/8)    |
+| src/libraries/integrations/uniswap/FullMath.sol             | 65.52% (19/29)     | 66.67% (20/30)     | 20.00% (1/5)     | 100.00% (1/1)    |
+| src/libraries/integrations/uniswap/LiquidityAmounts.sol     | 81.58% (31/38)     | 82.05% (32/39)     | 50.00% (8/16)    | 100.00% (7/7)    |
+| src/libraries/integrations/uniswap/TickMath.sol             | 100.00% (26/26)    | 79.69% (51/64)     | 31.82% (7/22)    | 100.00% (1/1)    |
+| src/libraries/integrations/uniswap/TickUtils.sol            | 100.00% (23/23)    | 85.19% (23/27)     | 50.00% (2/4)     | 100.00% (6/6)    |
+| src/libraries/integrations/uniswap/UniswapV3Path.sol        | 65.22% (15/23)     | 62.07% (18/29)     | 0.00% (0/3)      | 75.00% (6/8)     |
+IN-SCOPE SRC AGGREGATE FROM LCOV
+lines=2032/2182 (93.13%)
+branches=366/461 (79.39%)
+functions=433/446 (97.09%)
+IN-SCOPE ZERO-HIT FUNCTIONS
+src/contracts/Controller.sol:317 Controller.harvestPerformanceFeeFromStrategies.1
+src/contracts/Controller.sol:354 Controller.processRequests.1
+src/contracts/Converter.sol:302 Converter.getAllowedAdapters
+src/contracts/ExitQueue.sol:340 ExitQueue._authorizeUpgrade
+src/contracts/Oracle.sol:64 Oracle.version
+src/contracts/Oracle.sol:85 Oracle._authorizeUpgrade
+src/contracts/StrategyManager.sol:134 StrategyManager.version
+src/contracts/StrategyManager.sol:570 StrategyManager.strategyAt
+src/contracts/adapters/UniswapV3ConverterAdapter.sol:135 UniswapV3ConverterAdapter.version
+src/contracts/strategies/UniCLStrat.sol:1302 UniCLStrat._revertWithReason
+src/libraries/Auth.sol:56 Auth.strategyKeeperExecutor
+src/libraries/integrations/uniswap/UniswapV3Path.sol:63 UniswapV3Path.tokenIn
+src/libraries/integrations/uniswap/UniswapV3Path.sol:73 UniswapV3Path.tokenOut
+IN-SCOPE ZERO-HIT LINES
+src/contracts/AMM.sol:158
+src/contracts/AMM.sol:269
+src/contracts/AMM.sol:276
+src/contracts/AMM.sol:439
+src/contracts/Controller.sol:49
+src/contracts/Controller.sol:66
+src/contracts/Controller.sol:68
+src/contracts/Controller.sol:69
+src/contracts/Controller.sol:114
+src/contracts/Controller.sol:121
+src/contracts/Controller.sol:317
+src/contracts/Controller.sol:323
+src/contracts/Controller.sol:325
+src/contracts/Controller.sol:354
+src/contracts/Controller.sol:355
+src/contracts/Controller.sol:356
+src/contracts/Converter.sol:52
+src/contracts/Converter.sol:69
+src/contracts/Converter.sol:71
+src/contracts/Converter.sol:72
+src/contracts/Converter.sol:302
+src/contracts/Converter.sol:303
+src/contracts/Converter.sol:335
+src/contracts/Converter.sol:342
+src/contracts/Converter.sol:457
+src/contracts/Converter.sol:458
+src/contracts/Converter.sol:471
+src/contracts/Converter.sol:472
+src/contracts/Converter.sol:486
+src/contracts/Converter.sol:487
+src/contracts/ExitQueue.sol:53
+src/contracts/ExitQueue.sol:65
+src/contracts/ExitQueue.sol:67
+src/contracts/ExitQueue.sol:325
+src/contracts/ExitQueue.sol:332
+src/contracts/ExitQueue.sol:340
+src/contracts/Oracle.sol:59
+src/contracts/Oracle.sol:64
+src/contracts/Oracle.sol:65
+src/contracts/Oracle.sol:75
+src/contracts/Oracle.sol:85
+src/contracts/StrategyManager.sol:113
+src/contracts/StrategyManager.sol:122
+src/contracts/StrategyManager.sol:124
+src/contracts/StrategyManager.sol:125
+src/contracts/StrategyManager.sol:134
+src/contracts/StrategyManager.sol:135
+src/contracts/StrategyManager.sol:290
+src/contracts/StrategyManager.sol:291
+src/contracts/StrategyManager.sol:305
+src/contracts/StrategyManager.sol:320
+src/contracts/StrategyManager.sol:349
+src/contracts/StrategyManager.sol:364
+src/contracts/StrategyManager.sol:508
+src/contracts/StrategyManager.sol:515
+src/contracts/StrategyManager.sol:570
+src/contracts/StrategyManager.sol:571
+src/contracts/StrategyManager.sol:640
+src/contracts/StrategyManager.sol:654
+src/contracts/adapters/UniswapV3ConverterAdapter.sol:135
+src/contracts/adapters/UniswapV3ConverterAdapter.sol:136
+src/contracts/adapters/UniswapV3ConverterAdapter.sol:318
+src/contracts/adapters/UniswapV3ConverterAdapter.sol:319
+src/contracts/automation/KeeperExecutorBase.sol:72
+src/contracts/automation/KeeperExecutorBase.sol:79
+src/contracts/automation/StrategyKeeperExecutor.sol:374
+src/contracts/automation/StrategyKeeperExecutor.sol:408
+src/contracts/registry/Registry.sol:81
+src/contracts/registry/Registry.sol:288
+src/contracts/registry/Registry.sol:295
+src/contracts/registry/client/RegistryClientUpgradeable.sol:28
+src/contracts/strategies/UniCLStrat.sol:150
+src/contracts/strategies/UniCLStrat.sol:166
+src/contracts/strategies/UniCLStrat.sol:171
+src/contracts/strategies/UniCLStrat.sol:241
+src/contracts/strategies/UniCLStrat.sol:243
+src/contracts/strategies/UniCLStrat.sol:244
+src/contracts/strategies/UniCLStrat.sol:245
+src/contracts/strategies/UniCLStrat.sol:276
+src/contracts/strategies/UniCLStrat.sol:277
+src/contracts/strategies/UniCLStrat.sol:278
+src/contracts/strategies/UniCLStrat.sol:279
+src/contracts/strategies/UniCLStrat.sol:325
+src/contracts/strategies/UniCLStrat.sol:342
+src/contracts/strategies/UniCLStrat.sol:343
+src/contracts/strategies/UniCLStrat.sol:354
+src/contracts/strategies/UniCLStrat.sol:355
+src/contracts/strategies/UniCLStrat.sol:356
+src/contracts/strategies/UniCLStrat.sol:357
+src/contracts/strategies/UniCLStrat.sol:371
+src/contracts/strategies/UniCLStrat.sol:403
+src/contracts/strategies/UniCLStrat.sol:461
+src/contracts/strategies/UniCLStrat.sol:469
+src/contracts/strategies/UniCLStrat.sol:517
+src/contracts/strategies/UniCLStrat.sol:613
+src/contracts/strategies/UniCLStrat.sol:634
+src/contracts/strategies/UniCLStrat.sol:644
+src/contracts/strategies/UniCLStrat.sol:655
+src/contracts/strategies/UniCLStrat.sol:659
+src/contracts/strategies/UniCLStrat.sol:660
+src/contracts/strategies/UniCLStrat.sol:720
+src/contracts/strategies/UniCLStrat.sol:753
+src/contracts/strategies/UniCLStrat.sol:754
+src/contracts/strategies/UniCLStrat.sol:764
+src/contracts/strategies/UniCLStrat.sol:765
+src/contracts/strategies/UniCLStrat.sol:817
+src/contracts/strategies/UniCLStrat.sol:818
+src/contracts/strategies/UniCLStrat.sol:947
+src/contracts/strategies/UniCLStrat.sol:1027
+src/contracts/strategies/UniCLStrat.sol:1103
+src/contracts/strategies/UniCLStrat.sol:1104
+src/contracts/strategies/UniCLStrat.sol:1106
+src/contracts/strategies/UniCLStrat.sol:1108
+src/contracts/strategies/UniCLStrat.sol:1202
+src/contracts/strategies/UniCLStrat.sol:1203
+src/contracts/strategies/UniCLStrat.sol:1205
+src/contracts/strategies/UniCLStrat.sol:1207
+src/contracts/strategies/UniCLStrat.sol:1242
+src/contracts/strategies/UniCLStrat.sol:1284
+src/contracts/strategies/UniCLStrat.sol:1285
+src/contracts/strategies/UniCLStrat.sol:1302
+src/contracts/strategies/UniCLStrat.sol:1304
+src/libraries/Auth.sol:56
+src/libraries/Auth.sol:57
+src/libraries/Math.sol:42
+src/libraries/integrations/uniswap/FullMath.sol:12
+src/libraries/integrations/uniswap/FullMath.sol:13
+src/libraries/integrations/uniswap/FullMath.sol:14
+src/libraries/integrations/uniswap/FullMath.sol:20
+src/libraries/integrations/uniswap/FullMath.sol:29
+src/libraries/integrations/uniswap/FullMath.sol:30
+src/libraries/integrations/uniswap/FullMath.sol:31
+src/libraries/integrations/uniswap/FullMath.sol:36
+src/libraries/integrations/uniswap/FullMath.sol:37
+src/libraries/integrations/uniswap/FullMath.sol:38
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:21
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:33
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:46
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:56
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:66
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:80
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:93
+src/libraries/integrations/uniswap/UniswapV3Path.sol:63
+src/libraries/integrations/uniswap/UniswapV3Path.sol:64
+src/libraries/integrations/uniswap/UniswapV3Path.sol:65
+src/libraries/integrations/uniswap/UniswapV3Path.sol:73
+src/libraries/integrations/uniswap/UniswapV3Path.sol:74
+src/libraries/integrations/uniswap/UniswapV3Path.sol:75
+src/libraries/integrations/uniswap/UniswapV3Path.sol:112
+src/libraries/integrations/uniswap/UniswapV3Path.sol:122

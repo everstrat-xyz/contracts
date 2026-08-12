@@ -1,0 +1,17 @@
+PINNED FOUNDRY ENVIRONMENT
+Required version:
+1.0.0
+Pinned binary path:
+<portable-foundry>/forge
+Pinned binary version:
+forge Version: 1.0.0-v1.0.0
+Commit SHA: 8692e926198056d0228c1e166b1b6c34a5bed66c
+Build Timestamp: 2025-02-10T09:05:59.911807000Z (1739178359)
+Build Profile: maxperf
+Pinned binary SHA-256:
+3b833feb456601ee6b9ca2244b75bd6bb28216fc094cfd95cacd18079818c226  <portable-foundry>/forge
+Target commit:
+734df96a1391e95dd40843210997da0b9f3ab05e
+Configured solc:
+solc_version = "0.8.30"
+solc_version = "0.8.30"

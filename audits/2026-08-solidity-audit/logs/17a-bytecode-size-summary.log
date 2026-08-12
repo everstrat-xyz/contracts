@@ -1,0 +1,29 @@
+DEPLOYABLE PRODUCTION CONTRACT BYTECODE SIZES
+Limits used by forge table: runtime 24,576 B; initcode 49,152 B
+| AMM                                                                                                    | 8,002            | 8,330             | 16,574             | 40,822              |
+| Controller                                                                                             | 14,044           | 14,275            | 10,532             | 34,877              |
+| Converter                                                                                              | 9,233            | 9,464             | 15,343             | 39,688              |
+| EVE                                                                                                    | 2,615            | 3,526             | 21,961             | 45,626              |
+| ExitQueue                                                                                              | 6,314            | 6,545             | 18,262             | 42,607              |
+| Oracle                                                                                                 | 7,666            | 7,897             | 16,910             | 41,255              |
+| QueueKeeperExecutor                                                                                    | 6,855            | 7,031             | 17,721             | 42,121              |
+| Registry                                                                                               | 5,357            | 6,863             | 19,219             | 42,289              |
+| StrategyKeeperExecutor                                                                                 | 9,572            | 9,783             | 15,004             | 39,369              |
+| StrategyManager                                                                                        | 22,436           | 22,667            | 2,140              | 26,485              |
+| UniCLStrat                                                                                             | 23,629           | 27,773            | 947                | 21,379              |
+| UniswapV3ConverterAdapter                                                                              | 6,381            | 6,776             | 18,195             | 42,376              |
+| Whitelist                                                                                              | 4,540            | 5,720             | 20,036             | 43,432              |
+LOWEST POSITIVE RUNTIME MARGINS (entire compiled project; table sorted numerically outside this log is not claimed)
+| AMM                                                                                                    | 8,002            | 8,330             | 16,574             | 40,822              |
+| Controller                                                                                             | 14,044           | 14,275            | 10,532             | 34,877              |
+| Converter                                                                                              | 9,233            | 9,464             | 15,343             | 39,688              |
+| EVE                                                                                                    | 2,615            | 3,526             | 21,961             | 45,626              |
+| ExitQueue                                                                                              | 6,314            | 6,545             | 18,262             | 42,607              |
+| Oracle                                                                                                 | 7,666            | 7,897             | 16,910             | 41,255              |
+| QueueKeeperExecutor                                                                                    | 6,855            | 7,031             | 17,721             | 42,121              |
+| Registry                                                                                               | 5,357            | 6,863             | 19,219             | 42,289              |
+| StrategyKeeperExecutor                                                                                 | 9,572            | 9,783             | 15,004             | 39,369              |
+| StrategyManager                                                                                        | 22,436           | 22,667            | 2,140              | 26,485              |
+| UniCLStrat                                                                                             | 23,629           | 27,773            | 947                | 21,379              |
+| UniswapV3ConverterAdapter                                                                              | 6,381            | 6,776             | 18,195             | 42,376              |
+| Whitelist                                                                                              | 4,540            | 5,720             | 20,036             | 43,432              |

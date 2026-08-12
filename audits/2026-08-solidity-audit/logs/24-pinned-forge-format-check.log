@@ -1,0 +1,2 @@
+Command: FOUNDRY_PROFILE=ci forge-v1.0.0 fmt --check src/ test/
+exit_code=0

@@ -1,0 +1,56 @@
+DEPENDENCY AUDIT COMPACT SUMMARY
+production dependencies:
+{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0,"total":0},"dependencies":{"prod":1,"dev":100,"optional":1,"peer":0,"peerOptional":0,"total":100}}
+all dependencies (production + dev):
+{"vulnerabilities":{"info":0,"low":0,"moderate":1,"high":5,"critical":0,"total":6},"dependencies":{"prod":1,"dev":100,"optional":1,"peer":0,"peerOptional":0,"total":100}}
+advisory package summary:
+ajv	moderate	false	node_modules/ajv,node_modules/table/node_modules/ajv	true
+brace-expansion	high	false	node_modules/brace-expansion	true
+fast-uri	high	false	node_modules/fast-uri	true
+js-yaml	high	false	node_modules/js-yaml	true
+lodash	high	false	node_modules/lodash	true
+minimatch	high	false	node_modules/minimatch	true
+top-level installed dependency:
+{
+  "version": "1.0.0",
+  "name": "guide-dao-smart-contracts",
+  "dependencies": {
+    "solhint": {
+      "version": "4.5.4",
+      "resolved": "https://registry.npmjs.org/solhint/-/solhint-4.5.4.tgz",
+      "overridden": false
+    }
+  }
+}
+submodule initialization:
+ 86aa5a1d34b20eda8d18fe6eb0e4882948e545ba lib/chainlink-evm (v0.3.3-9-g86aa5a1d34)
+ 8bbcf6e3f8f62f419e5429a0bd89331c85c37824 lib/forge-std (v1.10.0)
+ 60b305a8f3ff0c7688f02ac470417b6bbf1c4d27 lib/openzeppelin-contracts-upgradeable (60b305a8)
+ 8b1d7c2ac248c33c3506b1bff8321758943c5e11 lib/openzeppelin-contracts-upgradeable/lib/erc4626-tests (v0.1.0)
+ 1eea5bae12ae557d589f9f0f0edae2faa47cb262 lib/openzeppelin-contracts-upgradeable/lib/forge-std (v1.9.4)
+ c0d865508c0fee0a11b97732c5e90f9cad6b65a5 lib/openzeppelin-contracts-upgradeable/lib/halmos-cheatcodes (c0d8655)
+ e4f70216d759d8e6a64144a9e1f7bbeed78e7079 lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts (v4.8.0-870-ge4f70216)
+ 8b1d7c2ac248c33c3506b1bff8321758943c5e11 lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/erc4626-tests (v0.1.0)
+ 1eea5bae12ae557d589f9f0f0edae2faa47cb262 lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/forge-std (v1.9.4)
+ c0d865508c0fee0a11b97732c5e90f9cad6b65a5 lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/halmos-cheatcodes (c0d8655)
+submodule dirtiness:
+Entering 'lib/chainlink-evm'
+path=lib/chainlink-evm dirty=no
+Entering 'lib/forge-std'
+path=lib/forge-std dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable'
+path=lib/openzeppelin-contracts-upgradeable dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable/lib/erc4626-tests'
+path=lib/erc4626-tests dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable/lib/forge-std'
+path=lib/forge-std dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable/lib/halmos-cheatcodes'
+path=lib/halmos-cheatcodes dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts'
+path=lib/openzeppelin-contracts dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/erc4626-tests'
+path=lib/erc4626-tests dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/forge-std'
+path=lib/forge-std dirty=no
+Entering 'lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/lib/halmos-cheatcodes'
+path=lib/halmos-cheatcodes dirty=no

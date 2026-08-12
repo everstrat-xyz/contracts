@@ -1,0 +1,55 @@
+LINT AND FORMAT SUMMARY
+forge lint (global Foundry 1.7.1): exit 0
+forge_lint_src_warning_blocks=19
+forge_lint_src_warning_types:
+  15 warning[block-timestamp]: usage of `block.timestamp` in a comparison may be manipulated by validators
+   4 warning[unsafe-typecast]: typecasts that can truncate values should be checked
+forge_lint_src_unique_locations:
+src/contracts/Converter.sol:156:13
+src/contracts/Converter.sol:379:13
+src/contracts/ExitQueue.sol:262:57
+src/contracts/ExitQueue.sol:294:38
+src/contracts/ExitQueue.sol:313:38
+src/contracts/Oracle.sol:371:13
+src/contracts/Oracle.sol:372:13
+src/contracts/Oracle.sol:377:28
+src/contracts/StrategyManager.sol:903:39
+src/contracts/Whitelist.sol:132:13
+src/contracts/automation/QueueKeeperExecutor.sol:167:17
+src/contracts/automation/QueueKeeperExecutor.sol:204:17
+src/contracts/automation/QueueKeeperExecutor.sol:305:16
+src/contracts/automation/StrategyKeeperExecutor.sol:203:34
+src/contracts/automation/StrategyKeeperExecutor.sol:264:38
+src/contracts/automation/StrategyKeeperExecutor.sol:527:29
+src/libraries/integrations/uniswap/LiquidityAmounts.sol:12:22
+src/libraries/integrations/uniswap/TickMath.sol:13:32
+src/libraries/integrations/uniswap/TickUtils.sol:45:16
+forge fmt global Foundry 1.7.1: exit 1
+global_formatter_files_with_diffs=20
+Diff in src/contracts/Controller.sol:
+Diff in src/contracts/AMM.sol:
+Diff in src/contracts/Whitelist.sol:
+Diff in src/contracts/adapters/UniswapV3ConverterAdapter.sol:
+Diff in src/contracts/StrategyManager.sol:
+Diff in src/contracts/automation/StrategyKeeperExecutor.sol:
+Diff in src/contracts/automation/QueueKeeperExecutor.sol:
+Diff in src/contracts/automation/KeeperExecutorBase.sol:
+Diff in src/libraries/Math.sol:
+Diff in src/interfaces/IOracle.sol:
+Diff in src/interfaces/integrations/uniswap/IUniswapV3Factory.sol:
+Diff in src/interfaces/integrations/uniswap/IUniswapV3Router.sol:
+Diff in src/interfaces/integrations/uniswap/IUniswapV3Pool.sol:
+Diff in test/mocks/MockSimpleOracle.sol:
+Diff in test/fork/UniCLStratFork.t.sol:
+Diff in test/unit/Converter.t.sol:
+Diff in test/unit/StrategyManager.t.sol:
+Diff in test/integration/TimelockGovernance.t.sol:
+Diff in test/helpers/UniCLStratTestBase.sol:
+Diff in test/helpers/ProtocolTestBase.sol:
+forge fmt pinned Foundry 1.0.0:
+Command: FOUNDRY_PROFILE=ci forge-v1.0.0 fmt --check src/ test/
+exit_code=0
+solhint 4.5.4 src-only:
+59 problem/s (59 warning/s)
+solhint 4.5.4 src+test:
+✖ 1122 problems (5 errors, 1117 warnings)

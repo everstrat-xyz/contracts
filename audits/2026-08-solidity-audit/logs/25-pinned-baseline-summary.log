@@ -1,0 +1,54 @@
+PINNED FOUNDRY V1.0.0 BASELINE SUMMARY
+VERSION
+forge Version: 1.0.0-v1.0.0
+Commit SHA: 8692e926198056d0228c1e166b1b6c34a5bed66c
+Build Timestamp: 2025-02-10T09:05:59.911807000Z (1739178359)
+Build Profile: maxperf
+BUILD
+Compiling 173 files with Solc 0.8.30
+Solc 0.8.30 finished in 165.98s
+Compiler run successful with warnings:
+compiler_warning_blocks=30
+compiler_warning_types:
+   2 Warning (2018): Function state mutability can be restricted to pure
+  23 Warning (2018): Function state mutability can be restricted to view
+   5 Warning (9302): Return value of low-level calls not used.
+compiler_warning_top_level_areas:
+  30 test
+TEST
+Ran 43 test suites in 483.43ms (2.16s CPU time): 1176 tests passed, 0 failed, 15 skipped (1191 total tests)
+skipped tests:
+[SKIP] test_Fork_Converter_ExactOutputSwapExecutesOnRealPool() (gas: 0)
+[SKIP] test_Fork_Deposit_ProvidesLiquidityToRealPool() (gas: 0)
+[SKIP] test_Fork_Deposit_RevertsAboveMaxDeposit() (gas: 0)
+[SKIP] test_Fork_Deposit_RevertsWhenPaused() (gas: 0)
+[SKIP] test_Fork_Deposit_SucceedsWhenSpotDriftsBelowTwap() (gas: 0)
+[SKIP] test_Fork_EmergencyExit_RevertsWhenNotPaused() (gas: 0)
+[SKIP] test_Fork_EmergencyExit_UnwindsRealPositionWhilePaused() (gas: 0)
+[SKIP] test_Fork_NavInETH_ReflectsDepositedValue() (gas: 0)
+[SKIP] test_Fork_ProtocolRouterInterfaceMatchesCanonicalRouter() (gas: 0)
+[SKIP] test_Fork_Rebalance_RecentersPositionAfterPriceMove() (gas: 0)
+[SKIP] test_Fork_Rebalance_RevertsWhenHealthy() (gas: 0)
+[SKIP] test_Fork_Rebalance_RevertsWhenPoolNotCalm() (gas: 0)
+[SKIP] test_Fork_Sync_PokesRealPoolFeesIntoTokensOwed() (gas: 0)
+[SKIP] test_Fork_Withdraw_FullRoundTripEmptiesStrategy() (gas: 0)
+[SKIP] test_Fork_Withdraw_PartialSendsExactETHToReceiver() (gas: 0)
+SIZE LIMITS: runtime 24,576 B; initcode 49,152 B
+| AMM                              | 8,002            | 8,330             | 16,574             | 40,822              |
+| Controller                       | 14,044           | 14,275            | 10,532             | 34,877              |
+| Converter                        | 9,233            | 9,464             | 15,343             | 39,688              |
+| EVE                              | 2,615            | 3,526             | 21,961             | 45,626              |
+| ExitQueue                        | 6,314            | 6,545             | 18,262             | 42,607              |
+| Oracle                           | 7,666            | 7,897             | 16,910             | 41,255              |
+| QueueKeeperExecutor              | 6,855            | 7,031             | 17,721             | 42,121              |
+| Registry                         | 5,357            | 6,863             | 19,219             | 42,289              |
+| StrategyKeeperExecutor           | 9,572            | 9,783             | 15,004             | 39,369              |
+| StrategyManager                  | 22,436           | 22,667            | 2,140              | 26,485              |
+| UniCLStrat                       | 23,629           | 27,773            | 947                | 21,379              |
+| UniswapV3ConverterAdapter        | 6,381            | 6,776             | 18,195             | 42,376              |
+| Whitelist                        | 4,540            | 5,720             | 20,036             | 43,432              |
+FORMAT
+Command: FOUNDRY_PROFILE=ci forge-v1.0.0 fmt --check src/ test/
+exit_code=0
+ENVIRONMENT-ONLY WARNING
+2026-08-12T12:17:00.022811Z  WARN evm::traces: failed to flush signature cache at <user-foundry-cache>/signatures: Operation not permitted

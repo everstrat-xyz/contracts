@@ -1,0 +1,25 @@
+SOLHINT COMPACT SUMMARY
+src-only result:
+59 problem/s (59 warning/s)
+src-only warnings by rule:
+func-name-mixedcase	8
+immutable-vars-naming	5
+named-parameters-mapping	10
+no-unused-import	5
+ordering	30
+private-vars-leading-underscore	1
+full src+test result:
+✖ 1122 problems (5 errors, 1117 warnings)
+full error locations:
+test/integration/ETHFlowTest.t.sol
+     6:1  error    Unexpected import of console file                                                            no-console
+test/integration/ETHFlowTest.t.sol
+   176:9  error    Unexpected console statement                                                                 no-console
+test/integration/ETHFlowTest.t.sol
+   183:9  error    Unexpected console statement                                                                 no-console
+test/unit/AMM.t.sol
+     5:1   error    Unexpected import of console file                                                                 no-console
+test/unit/Controller.t.sol
+     5:1  error    Unexpected import of console file                                                              no-console
+network-only update-check message (does not affect lint result):
+Error checking for updates: getaddrinfo ENOTFOUND registry.npmjs.org

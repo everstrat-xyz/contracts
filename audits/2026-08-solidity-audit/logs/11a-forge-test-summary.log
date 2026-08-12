@@ -1,0 +1,131 @@
+FORGE TEST SUMMARY
+Ran 43 test suites in 334.14ms (2.91s CPU time): 1176 tests passed, 0 failed, 15 skipped (1191 total tests)
+PER-SUITE RESULTS
+Ran 3 tests for test/unit/Converter.t.sol:ConverterReceiveTest
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 9.96ms (290.08µs CPU time)
+Ran 6 tests for test/unit/Converter.t.sol:ConverterMockAdapterSwapTest
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 10.60ms (823.29µs CPU time)
+Ran 6 tests for test/unit/Converter.t.sol:ConverterQuoteSwapTest
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 10.73ms (1.03ms CPU time)
+Ran 13 tests for test/unit/Converter.t.sol:ConverterPauseTest
+Suite result: ok. 13 passed; 0 failed; 0 skipped; finished in 10.82ms (1.27ms CPU time)
+Ran 5 tests for test/unit/Converter.t.sol:ConverterRegistryIntegrationTest
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 1.11ms (164.96µs CPU time)
+Ran 4 tests for test/unit/Converter.t.sol:ConverterInitializeTest
+Suite result: ok. 4 passed; 0 failed; 0 skipped; finished in 11.53ms (2.35ms CPU time)
+Ran 8 tests for test/unit/Converter.t.sol:ConverterWrapETHTest
+Suite result: ok. 8 passed; 0 failed; 0 skipped; finished in 11.54ms (1.73ms CPU time)
+Ran 9 tests for test/unit/Converter.t.sol:ConverterUnwrapWETHTest
+Suite result: ok. 9 passed; 0 failed; 0 skipped; finished in 11.56ms (1.81ms CPU time)
+Ran 4 tests for test/unit/Converter.t.sol:ConverterUpgradeableTest
+Suite result: ok. 4 passed; 0 failed; 0 skipped; finished in 1.18ms (267.42µs CPU time)
+Ran 9 tests for test/unit/Converter.t.sol:ConverterCallerRoleManagementTest
+Suite result: ok. 9 passed; 0 failed; 0 skipped; finished in 12.05ms (2.35ms CPU time)
+Ran 6 tests for test/unit/Converter.t.sol:ConverterSetAllowedAdapterTest
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 1.13ms (239.04µs CPU time)
+Ran 12 tests for test/unit/Converter.t.sol:ConverterAccessControlTest
+Suite result: ok. 12 passed; 0 failed; 0 skipped; finished in 1.98ms (364.71µs CPU time)
+Ran 18 tests for test/unit/Converter.t.sol:UniswapV3ConverterAdapterTest
+Suite result: ok. 18 passed; 0 failed; 0 skipped; finished in 1.63ms (571.63µs CPU time)
+Ran 12 tests for test/unit/Converter.t.sol:ConverterViewTest
+Suite result: ok. 12 passed; 0 failed; 0 skipped; finished in 1.25ms (348.21µs CPU time)
+Ran 8 tests for test/unit/Converter.t.sol:ConverterEdgeCaseTest
+Suite result: ok. 8 passed; 0 failed; 0 skipped; finished in 1.49ms (550.33µs CPU time)
+Ran 4 tests for test/unit/Converter.t.sol:ConverterMockAdapterSwapExactAmountOutTest
+Suite result: ok. 4 passed; 0 failed; 0 skipped; finished in 2.56ms (281.29µs CPU time)
+Ran 7 tests for test/integration/DeployerAdminAccessTest.t.sol:DeployerAdminAccessTest
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 2.04ms (1.36ms CPU time)
+Ran 14 tests for test/unit/Converter.t.sol:ConverterExecuteSwapExactAmountOutTest
+Suite result: ok. 14 passed; 0 failed; 0 skipped; finished in 2.68ms (1.74ms CPU time)
+Ran 14 tests for test/unit/Converter.t.sol:ConverterExecuteSwapTest
+Suite result: ok. 14 passed; 0 failed; 0 skipped; finished in 2.17ms (1.21ms CPU time)
+Ran 3 tests for test/unit/RegistryClientUpgradeable.t.sol:RegistryClientUpgradeableTest
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 140.42µs (80.33µs CPU time)
+Ran 11 tests for test/integration/TimelockGovernance.t.sol:TimelockGovernanceTest
+Suite result: ok. 11 passed; 0 failed; 0 skipped; finished in 3.28ms (1.02ms CPU time)
+Ran 54 tests for test/unit/StrategyKeeperExecutor.t.sol:StrategyKeeperExecutorTest
+Suite result: ok. 54 passed; 0 failed; 0 skipped; finished in 13.65ms (11.70ms CPU time)
+Ran 39 tests for test/unit/QueueKeeperExecutor.t.sol:QueueKeeperExecutorTest
+Suite result: ok. 39 passed; 0 failed; 0 skipped; finished in 20.26ms (17.75ms CPU time)
+Ran 2 tests for test/integration/DeploymentTest.t.sol:DeployScriptsTest
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 25.63ms (22.53ms CPU time)
+Ran 3 tests for test/integration/DeploymentTest.t.sol:DeploymentTest
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 3.18ms (2.28ms CPU time)
+Ran 7 tests for test/integration/DeploymentTest.t.sol:UsdQuotedFeedGuardTest
+Suite result: ok. 7 passed; 0 failed; 0 skipped; finished in 236.88µs (141.96µs CPU time)
+Ran 58 tests for test/integration/ETHFlowTest.t.sol:ETHFlowTest
+Suite result: ok. 58 passed; 0 failed; 0 skipped; finished in 10.46ms (8.12ms CPU time)
+Ran 72 tests for test/unit/ExitQueue.t.sol:ExitQueueTest
+Suite result: ok. 72 passed; 0 failed; 0 skipped; finished in 3.84ms (2.99ms CPU time)
+Ran 114 tests for test/unit/UniCLStrat.t.sol:UniCLStratTest
+Suite result: ok. 114 passed; 0 failed; 0 skipped; finished in 48.86ms (47.19ms CPU time)
+Ran 15 tests for test/fork/UniCLStratFork.t.sol:UniCLStratForkTest
+Suite result: ok. 0 passed; 0 failed; 15 skipped; finished in 901.08µs (121.67µs CPU time)
+Ran 3 tests for test/integration/UpgradeSimulation.t.sol:UpgradeSimulationTest
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 2.32ms (545.63µs CPU time)
+Ran 43 tests for test/unit/Whitelist.t.sol:WhitelistTest
+Suite result: ok. 43 passed; 0 failed; 0 skipped; finished in 6.92ms (5.24ms CPU time)
+Ran 87 tests for test/unit/Controller.t.sol:ControllerTest
+Suite result: ok. 87 passed; 0 failed; 0 skipped; finished in 164.36ms (163.76ms CPU time)
+Ran 83 tests for test/unit/Oracle.t.sol:OracleTest
+Suite result: ok. 83 passed; 0 failed; 0 skipped; finished in 125.77ms (127.14ms CPU time)
+Ran 24 tests for test/unit/EVE.t.sol:EVETest
+Suite result: ok. 24 passed; 0 failed; 0 skipped; finished in 231.04ms (235.15ms CPU time)
+Ran 5 tests for test/fuzz/OracleFuzz.t.sol:OracleFuzzTest
+Suite result: ok. 5 passed; 0 failed; 0 skipped; finished in 151.42ms (228.22ms CPU time)
+Ran 2 tests for test/fuzz/ControllerFuzz.t.sol:ControllerFuzzTest
+Suite result: ok. 2 passed; 0 failed; 0 skipped; finished in 275.58ms (264.55ms CPU time)
+Ran 6 tests for test/unit/Converter.t.sol:ConverterFuzzTest
+Suite result: ok. 6 passed; 0 failed; 0 skipped; finished in 273.15ms (275.66ms CPU time)
+Ran 70 tests for test/unit/Registry.t.sol:RegistryTest
+Suite result: ok. 70 passed; 0 failed; 0 skipped; finished in 252.58ms (14.28ms CPU time)
+Ran 3 tests for test/fuzz/UniCLStratFuzz.t.sol:UniCLStratFuzzTest
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 271.99ms (629.75ms CPU time)
+Ran 92 tests for test/unit/AMM.t.sol:AMMTest
+Suite result: ok. 92 passed; 0 failed; 0 skipped; finished in 313.94ms (319.41ms CPU time)
+Ran 219 tests for test/unit/StrategyManager.t.sol:StrategyManagerTest
+Suite result: ok. 219 passed; 0 failed; 0 skipped; finished in 289.31ms (319.19ms CPU time)
+Ran 14 tests for test/unit/AMMWhitelist.t.sol:AMMWhitelistTest
+Suite result: ok. 14 passed; 0 failed; 0 skipped; finished in 313.01ms (5.25ms CPU time)
+SKIPPED TESTS
+[SKIP] test_Fork_Converter_ExactOutputSwapExecutesOnRealPool() (gas: 0)
+[SKIP] test_Fork_Deposit_ProvidesLiquidityToRealPool() (gas: 0)
+[SKIP] test_Fork_Deposit_RevertsAboveMaxDeposit() (gas: 0)
+[SKIP] test_Fork_Deposit_RevertsWhenPaused() (gas: 0)
+[SKIP] test_Fork_Deposit_SucceedsWhenSpotDriftsBelowTwap() (gas: 0)
+[SKIP] test_Fork_EmergencyExit_RevertsWhenNotPaused() (gas: 0)
+[SKIP] test_Fork_EmergencyExit_UnwindsRealPositionWhilePaused() (gas: 0)
+[SKIP] test_Fork_NavInETH_ReflectsDepositedValue() (gas: 0)
+[SKIP] test_Fork_ProtocolRouterInterfaceMatchesCanonicalRouter() (gas: 0)
+[SKIP] test_Fork_Rebalance_RecentersPositionAfterPriceMove() (gas: 0)
+[SKIP] test_Fork_Rebalance_RevertsWhenHealthy() (gas: 0)
+[SKIP] test_Fork_Rebalance_RevertsWhenPoolNotCalm() (gas: 0)
+[SKIP] test_Fork_Sync_PokesRealPoolFeesIntoTokensOwed() (gas: 0)
+[SKIP] test_Fork_Withdraw_FullRoundTripEmptiesStrategy() (gas: 0)
+[SKIP] test_Fork_Withdraw_PartialSendsExactETHToReceiver() (gas: 0)
+SKIP ENVIRONMENT
+MAINNET_RPC_URL=absent
+FORK TEST SKIP IMPLEMENTATION
+92-    bytes internal wethToUsdcPath;
+93-    bytes internal usdcToWethPath;
+94-
+95-    modifier onlyFork() {
+96:        if (!forkAvailable) vm.skip(true);
+97-        _;
+98-    }
+99-
+100-    receive() external payable {}
+101-
+102-    function setUp() public {
+103-        // Skip offline without envOr: absence is explicit, not a silent empty-string fallback.
+104:        if (!vm.envExists("MAINNET_RPC_URL")) return;
+105-
+106-        string memory rpcUrl = vm.envString("MAINNET_RPC_URL");
+107-        // Required when forking: 0 = tip. Omitting the var reverts (no silent tip fallback).
+108:        uint256 forkBlock = vm.envUint("MAINNET_FORK_BLOCK");
+109-        if (forkBlock == 0) {
+110-            vm.createSelectFork(rpcUrl);
+111-        } else {
+112-            vm.createSelectFork(rpcUrl, forkBlock);
+RUNTIME ENVIRONMENT WARNINGS
+2026-08-12T12:00:30.240782Z  WARN evm::traces: failed to flush signature cache at <user-foundry-cache>/signatures: Operation not permitted (os error 1)

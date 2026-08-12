@@ -1,0 +1,14 @@
+STATIC ANALYZER AVAILABILITY
+slither=not installed
+aderyn=not installed
+myth=not installed
+mythril=not installed
+semgrep=not installed
+forge-lint=<global-foundry>/forge
+forge-lint-version=forge Version: 1.7.1
+solhint=./node_modules/.bin/solhint
+solhint-version=4.5.4
+RUN STATUS
+forge lint src: exit 0; raw output 14-forge-lint-src.log
+solhint src+test: process exit 0; formatter reports 5 errors and 1117 warnings; raw output 16-solhint.log
+No Slither/Aderyn/Mythril/Semgrep run because no CLI is installed.
