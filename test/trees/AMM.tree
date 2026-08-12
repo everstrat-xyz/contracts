@@ -23,7 +23,7 @@ AMM::enter(uint256 _minTokensToMint) payable
 │   │   ├── It should call oracle to convert ETH to USD for validation
 │   │   ├── It should set bootstrapped = true
 │   │   ├── It should mint _DEAD_SUPPLY (1e18) to address(0xdead)
-│   │   ├── It should mint userTokens (= depositUSD - _DEAD_SUPPLY) to user
+│   │   ├── It should mint userTokens (= depositUSD - _DEAD_SUPPLY) to user BEFORE transferring ETH to controller (same CEI as post-bootstrap enter)
 │   │   ├── It should set total supply to depositUSD
 │   │   ├── It should transfer ETH to controller (via sendValue)
 │   │   └── It should emit Bootstrapped event

@@ -391,7 +391,11 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
 
     /**
      * @dev Shared body of `enter()` and `enterWithInvite()`: both wrappers apply
-     * `whenNotPaused`/`nonReentrant` and their own whitelist check before delegating here.
+     *      `whenNotPaused`/`nonReentrant` and their own whitelist check before delegating here.
+     *      Effects before interactions (AMM-3): mint EVE before `sendValue` to the Controller
+     *      so any observer during the Controller's `receive` sees supply already include the
+     *      deposit. Transfer-then-mint would leave NAV (ETH already on Controller) ahead of
+     *      supply for the duration of that external call. Bootstrap already mints before transfer.
      * @param _minTokensToMint Minimum amount of tokens to mint.
      */
     function _enter(uint256 _minTokensToMint) internal {
@@ -412,13 +416,11 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         uint256 tokensToMint = _ethToProtocolTokens(msg.value, evePrice);
         if (tokensToMint < _minTokensToMint) revert AMMInsufficientDeposit();
 
-        /* Not re-calculating received ETH here, since rounding is already favoring the protocol,
-        and under the normal conditions re-calculation will actually cost user
-        more ETH than they would get back.
-        */
-        payable(controller).sendValue(msg.value);
-
         eve.mint(msg.sender, tokensToMint);
+
+        // Not re-calculating received ETH: rounding already favors the protocol; under normal
+        // conditions a re-calc would cost the user more ETH than they would get back.
+        payable(controller).sendValue(msg.value);
 
         emit UserEntered(msg.sender, msg.value, tokensToMint, block.timestamp);
     }

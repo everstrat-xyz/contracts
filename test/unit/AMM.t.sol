@@ -284,6 +284,24 @@ contract AMMTest is ProtocolTestBase {
         assertEq(address(user2).balance, user2BalanceBefore - depositAmount);
     }
 
+    /// @dev AMM-3: mint must precede the external ETH transfer so NAV/supply stay consistent
+    ///      for any observer during Controller.receive.
+    function test_Enter_MintsBeforeTransferringETHToController() public {
+        vm.prank(user1);
+        bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
+        vm.roll(block.number + 1);
+
+        uint256 depositAmount = ENTER_ETH_DEPOSIT;
+        uint256 tokensToMint = Math.convertAssetsInverse(depositAmount, bondingCurve.evePremiumPriceInETH());
+
+        // Stacked expectCall matches in call order: mint first, then value-bearing call to Controller.
+        vm.expectCall(address(eve), abi.encodeCall(EVE.mint, (user2, tokensToMint)));
+        vm.expectCall(address(controller), depositAmount, bytes(""));
+
+        vm.prank(user2);
+        bondingCurve.enter{value: depositAmount}(ENTER_MIN_TOKENS);
+    }
+
     function test_EnterInsufficientDeposit() public {
         vm.prank(user1);
         bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS); // Bootstrap
