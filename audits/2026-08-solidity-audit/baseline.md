@@ -7,8 +7,10 @@ This document records build and test facts only. It is not a vulnerability asses
 - Branch: `audit/solidity-audit-skills-734df96`
 - Commit: `734df96a1391e95dd40843210997da0b9f3ab05e`
 - Platform: EVM / Solidity / Foundry
-- Scope inventory: 25 implementation and library files, 3,884 normalized LOC
-- Context-only inventory: 21 interfaces, 40 test files, 14 deployment scripts
+- Scope inventory: 39 files / 4,849 normalized LOC: 25 implementation and
+  library files (3,884 nSLOC) plus 14 deployment/finalization scripts
+  (965 nSLOC)
+- Context-only inventory: 21 interfaces and 40 pre-existing test files
 
 ## Pinned toolchain result
 
