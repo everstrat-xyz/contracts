@@ -2,6 +2,12 @@
 cache/
 out/
 
+# Isolated audit/test build artifacts
+/cache-audit-*/
+/out-audit-*/
+/cache-pashov-*/
+/out-pashov-*/
+
 # Ignores development broadcast logs
 !/broadcast
 /broadcast/*/31337/

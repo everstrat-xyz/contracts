@@ -1,0 +1,26 @@
+Target: 734df96a1391e95dd40843210997da0b9f3ab05e
+Audit branch: audit/solidity-audit-skills-734df96
+Toolchain: Foundry 1.0.0 (8692e926198056d0228c1e166b1b6c34a5bed66c), solc 0.8.30
+
+Command:
+FOUNDRY_OUT=/private/tmp/everstrat-audit-handoff-regression-out \
+FOUNDRY_CACHE_PATH=/private/tmp/everstrat-audit-handoff-regression-cache \
+/private/tmp/everstrat-foundry-v1.0.0/forge test --offline \
+  --match-path 'test/audit/candidates/verification/*.t.sol' \
+  -vv
+
+Result:
+- 22 suites
+- 37 passed
+- 0 failed
+- 0 skipped
+
+The compiler emitted four pre-existing mutability suggestions in
+test/mocks/MockConverter.sol and no production-source warning. Foundry could not
+write its optional global signature cache under the desktop sandbox; this did
+not affect compilation or test execution.
+
+Final handoff checks:
+- full base suite: exit 0 under pinned Foundry 1.0.0, offline (the baseline
+  inventory records 1,176 local passes and 15 fork skips)
+- `forge fmt --check`: exit 0
