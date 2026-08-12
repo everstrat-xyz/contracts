@@ -191,9 +191,11 @@ Converter::isCaller(address _account)
     └── It should return false
 
 Converter::pause()
-├── Given caller does not have ADMIN_ROLE on Registry (onlyAuthRole)
-│   └── It should revert with RegistryClientMissingRole
-├── Given contract is not paused
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry (onlyEitherAuthRole)
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given caller has SECURITY_ROLE on Registry
+│   └── It should pause the contract immediately
+├── Given contract is not paused (ADMIN_ROLE)
 │   └── It should pause the contract
 └── Given contract is already paused
     └── It should revert with EnforcedPause
@@ -201,6 +203,8 @@ Converter::pause()
 Converter::unpause()
 ├── Given caller does not have ADMIN_ROLE on Registry (onlyAuthRole)
 │   └── It should revert with RegistryClientMissingRole
+├── Given caller has SECURITY_ROLE but not ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole (SECURITY cannot unpause)
 ├── Given contract is paused
 │   └── It should unpause the contract
 └── Given contract is not paused
@@ -217,11 +221,12 @@ Converter::Access Control Testing
 │   ├── wrapETH / unwrapWETH / executeSwapExactAmountIn / executeSwapExactAmountOut require caller permission (RegistryClientMissingRole)
 │   ├── quoteSwapExactAmountIn / quoteSwapExactAmountOut are permissionless (no onlyCaller check)
 │   └── grantCallerRole / revokeCallerRole do not require caller permission
-├── Registry role gates (onlyAuthRole)
+├── Registry role gates (onlyAuthRole / onlyEitherAuthRole)
 │   ├── setAllowedAdapter requires ADMIN_ROLE on Registry
-│   ├── pause / unpause require ADMIN_ROLE on Registry
+│   ├── pause requires ADMIN_ROLE or SECURITY_ROLE on Registry
+│   ├── unpause requires ADMIN_ROLE on Registry
 │   ├── _authorizeUpgrade requires ADMIN_ROLE on Registry
-│   └── Non-admin cannot call these functions
+│   └── Non-privileged callers cannot call these functions
 ├── Registry contract gates (onlyAuthContract)
 │   ├── grantCallerRole requires registered StrategyManager contract
 │   └── revokeCallerRole requires registered StrategyManager contract
