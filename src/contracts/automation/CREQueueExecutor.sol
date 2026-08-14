@@ -49,52 +49,39 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
         minBatchAge = _DEFAULT_MIN_BATCH_AGE;
     }
 
-    function version() external pure returns (string memory) {
-        return "1.0.0-cre";
+    // ============ Admin ============
+
+    function setMinBatchAge(uint256 _minBatchAge) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        if (_minBatchAge < MIN_BATCH_AGE_LOWER_BOUND || _minBatchAge > MIN_BATCH_AGE_UPPER_BOUND) {
+            revert KeeperExecutorInvalidConfig();
+        }
+        emit MinBatchAgeChanged(minBatchAge, _minBatchAge);
+        minBatchAge = _minBatchAge;
     }
 
-    // ============ CRE processing ============
-
-    function _processReport(uint8 action, bytes memory params) internal override {
-        QueueAction queueAction = QueueAction(action);
-        IRegistry registry_ = registry();
-        IController controller = IController(registry_.controller());
-        IExitQueue queue = IExitQueue(registry_.exitQueue());
-
-        if (queueAction == QueueAction.PriceBatch) {
-            uint256 batchId = abi.decode(params, (uint256));
-            if (batchId != queue.currentBatchId()) revert KeeperExecutorNoUpkeepNeeded();
-            (,,, uint256 createdAt,) = queue.batchInfo(batchId);
-            if (block.timestamp - createdAt < minBatchAge) revert KeeperExecutorNoUpkeepNeeded();
-
-            controller.priceBatch();
-            _advanceBatchCursor(queue);
-            emit QueueUpkeepPerformed(queueAction, batchId, 0);
-        } else if (queueAction == QueueAction.ProcessRequests) {
-            (uint256 batchId, uint256 startIndex, uint256 endIndex) = abi.decode(params, (uint256, uint256, uint256));
-            if (endIndex <= startIndex) revert KeeperExecutorNoUpkeepNeeded();
-
-            // Re-validate: claimed range must be a prefix of the affordable set
-            // starting at index 0 (workflows may claim a shorter prefix).
-            uint256 affordable = _affordableRequests(queue, address(controller), batchId);
-            if (startIndex != 0 || endIndex > affordable) revert KeeperExecutorNoUpkeepNeeded();
-
-            controller.processRequests(batchId, startIndex, endIndex);
-            _advanceBatchCursor(queue);
-            emit QueueUpkeepPerformed(queueAction, batchId, endIndex - startIndex);
-        } else if (queueAction == QueueAction.AdvanceCursor) {
-            uint256 batchId = abi.decode(params, (uint256));
-            uint256 cursorBefore = nextBatchIdToProcess;
-            _advanceBatchCursor(queue);
-            if (nextBatchIdToProcess == cursorBefore) revert KeeperExecutorNoUpkeepNeeded();
-            if (nextBatchIdToProcess < batchId) revert KeeperExecutorNoUpkeepNeeded();
-            emit QueueUpkeepPerformed(queueAction, nextBatchIdToProcess, 0);
-        } else {
-            revert KeeperExecutorUnknownAction();
+    function setMaxUsersPerUpkeep(uint256 _maxUsersPerUpkeep) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        if (_maxUsersPerUpkeep == 0 || _maxUsersPerUpkeep > MAX_USERS_PER_UPKEEP_UPPER_BOUND) {
+            revert KeeperExecutorInvalidConfig();
         }
+        emit MaxUsersPerUpkeepChanged(maxUsersPerUpkeep, _maxUsersPerUpkeep);
+        maxUsersPerUpkeep = _maxUsersPerUpkeep;
+    }
+
+    function advanceBatchCursor(uint256 _toBatchId) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        uint256 cursor = nextBatchIdToProcess;
+        uint256 currentBatchId = IExitQueue(registry().exitQueue()).currentBatchId();
+        if (_toBatchId <= cursor) revert CREQueueExecutorBatchCursorPrecedesCurrent();
+        if (_toBatchId > currentBatchId) revert CREQueueExecutorBatchCursorPastCurrent();
+
+        nextBatchIdToProcess = _toBatchId;
+        emit BatchCursorAdvanced(cursor, _toBatchId);
     }
 
     // ============ Views ============
+
+    function version() external pure returns (string memory) {
+        return "1.0.0-cre";
+    }
 
     function queueUpkeepStatus() external view returns (QueueAction action, uint256 batchId, uint256 count) {
         if (paused()) return (QueueAction.None, 0, 0);
@@ -144,32 +131,45 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
         return _affordableRequests(IExitQueue(registry_.exitQueue()), registry_.controller(), _batchId);
     }
 
-    // ============ Admin ============
+    // ============ CRE processing ============
 
-    function setMinBatchAge(uint256 _minBatchAge) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        if (_minBatchAge < MIN_BATCH_AGE_LOWER_BOUND || _minBatchAge > MIN_BATCH_AGE_UPPER_BOUND) {
-            revert KeeperExecutorInvalidConfig();
+    function _processReport(uint8 action, bytes memory params) internal override {
+        QueueAction queueAction = QueueAction(action);
+        IRegistry registry_ = registry();
+        IController controller = IController(registry_.controller());
+        IExitQueue queue = IExitQueue(registry_.exitQueue());
+
+        if (queueAction == QueueAction.PriceBatch) {
+            uint256 batchId = abi.decode(params, (uint256));
+            if (batchId != queue.currentBatchId()) revert KeeperExecutorNoUpkeepNeeded();
+            (,,, uint256 createdAt,) = queue.batchInfo(batchId);
+            if (block.timestamp - createdAt < minBatchAge) revert KeeperExecutorNoUpkeepNeeded();
+
+            controller.priceBatch();
+            _advanceBatchCursor(queue);
+            emit QueueUpkeepPerformed(queueAction, batchId, 0);
+        } else if (queueAction == QueueAction.ProcessRequests) {
+            (uint256 batchId, uint256 startIndex, uint256 endIndex) = abi.decode(params, (uint256, uint256, uint256));
+            if (endIndex <= startIndex) revert KeeperExecutorNoUpkeepNeeded();
+
+            // Re-validate: claimed range must be a prefix of the affordable set
+            // starting at index 0 (workflows may claim a shorter prefix).
+            uint256 affordable = _affordableRequests(queue, address(controller), batchId);
+            if (startIndex != 0 || endIndex > affordable) revert KeeperExecutorNoUpkeepNeeded();
+
+            controller.processRequests(batchId, startIndex, endIndex);
+            _advanceBatchCursor(queue);
+            emit QueueUpkeepPerformed(queueAction, batchId, endIndex - startIndex);
+        } else if (queueAction == QueueAction.AdvanceCursor) {
+            uint256 batchId = abi.decode(params, (uint256));
+            uint256 cursorBefore = nextBatchIdToProcess;
+            _advanceBatchCursor(queue);
+            if (nextBatchIdToProcess == cursorBefore) revert KeeperExecutorNoUpkeepNeeded();
+            if (nextBatchIdToProcess < batchId) revert KeeperExecutorNoUpkeepNeeded();
+            emit QueueUpkeepPerformed(queueAction, nextBatchIdToProcess, 0);
+        } else {
+            revert KeeperExecutorUnknownAction();
         }
-        emit MinBatchAgeChanged(minBatchAge, _minBatchAge);
-        minBatchAge = _minBatchAge;
-    }
-
-    function setMaxUsersPerUpkeep(uint256 _maxUsersPerUpkeep) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        if (_maxUsersPerUpkeep == 0 || _maxUsersPerUpkeep > MAX_USERS_PER_UPKEEP_UPPER_BOUND) {
-            revert KeeperExecutorInvalidConfig();
-        }
-        emit MaxUsersPerUpkeepChanged(maxUsersPerUpkeep, _maxUsersPerUpkeep);
-        maxUsersPerUpkeep = _maxUsersPerUpkeep;
-    }
-
-    function advanceBatchCursor(uint256 _toBatchId) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        uint256 cursor = nextBatchIdToProcess;
-        uint256 currentBatchId = IExitQueue(registry().exitQueue()).currentBatchId();
-        if (_toBatchId <= cursor) revert CREQueueExecutorBatchCursorPrecedesCurrent();
-        if (_toBatchId > currentBatchId) revert CREQueueExecutorBatchCursorPastCurrent();
-
-        nextBatchIdToProcess = _toBatchId;
-        emit BatchCursorAdvanced(cursor, _toBatchId);
     }
 
     // ============ Internal ============
