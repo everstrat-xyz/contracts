@@ -9,7 +9,7 @@ graph TB
     Phase1["Phase 1<br/>Core modules<br/>(EVE, ExitQueue, Controller, Oracle)"]
     Phase2["Phase 2<br/>Converter"]
     Phase3["Phase 3<br/>Whitelist + AMM stack"]
-    Phase4["Phase 4<br/>CRE Keepers + Finalize"]
+    Phase4["Phase 4<br/>CRE Keepers + Finalize<br/>(DeployCREExecutors)"]
     Phase5["Phase 5<br/>Adapter bytecode"]
     Phase6["Phase 6<br/>Timelock UniCL prep"]
     Phase7["Phase 7<br/>Strategy bytecode"]

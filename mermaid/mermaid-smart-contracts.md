@@ -478,21 +478,86 @@ graph TB
 - **Purpose**: `CREQueueExecutor` and `CREStrategyExecutor` (static contracts, `src/contracts/automation/`) drive protocol keepers via Chainlink Runtime Environment (CRE) — replacing retired Chainlink Automation
 - **Trust Chain**: `CRE DON workflows → KeystoneForwarder → CRE*Executor (KEEPER_ROLE) → Controller` — Chainlink infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE` by deployment (an opt-in manual break-glass keeper is a separate governance decision — see `docs/FREEZE_RUNBOOK.md` §0.1)
 - **CREReceiverBase** (abstract mixin): follows Chainlink `ReceiverTemplate` patterns — RegistryClient + OZ Pausable + ReentrancyGuard + `IReceiver` / ERC-165. `onReport` gated to immutable `FORWARDER`; workflow identity via `setExpectedAuthor` / `setExpectedWorkflowName` / `setExpectedWorkflowId` (ADMIN). Unbound receivers reject reports. Envelope adds `chainSelector` / `sequence` / `MAX_REPORT_AGE` replay guards. `pause()` ADMIN or SECURITY, `unpause()` ADMIN
+- **Timestamp guards are two distinct errors**: `CREReceiverFutureTimestamp()` when `observedAt > block.timestamp` (malformed report / workflow clock skew) and `CREReceiverStaleReport()` when the report is older than `MAX_REPORT_AGE` (delivery latency). Splitting them keeps the two failure modes separately alertable — see `docs/FREEZE_RUNBOOK.md` §7.3
 - **Untrusted report**: the Envelope only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
+
+**`onReport` guard pipeline** (order is the security argument — cheapest, most authoritative check first; every branch is a revert, never a silent no-op):
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': { 'fontSize': '26px', 'primaryTextColor': '#000000'}, 'flowchart': {'nodeSpacing': 90, 'rankSpacing': 80, 'padding': 25}}}%%
+graph TB
+    Report["KeystoneForwarder<br/>onReport(metadata, report)"]
+
+    subgraph Template["ReceiverTemplate auth"]
+        G1{"msg.sender == FORWARDER?"}
+        G2{"workflow id / author / name<br/>match ADMIN binding?"}
+        G3{"receiver bound?<br/>(id or author set)"}
+    end
+
+    subgraph EnvelopeGuards["EverStrat Envelope guards"]
+        G4{"chainSelector == CHAIN_SELECTOR?"}
+        G5{"sequence > lastSequence?"}
+        G6{"observedAt <= block.timestamp?"}
+        G7{"age <= MAX_REPORT_AGE?"}
+    end
+
+    Commit["lastSequence = sequence<br/>then _processReport(action, params)"]
+    Revalidate{"live state still supports<br/>the claimed action?"}
+    Execute["Controller keeper call<br/>amounts recomputed on-chain"]
+
+    E1["InvalidSender"]
+    E2["InvalidWorkflowId / InvalidAuthor /<br/>InvalidWorkflowName /<br/>WorkflowNameRequiresAuthorValidation"]
+    E3["CREReceiverWorkflowUnbound"]
+    E4["CREReceiverWrongChain"]
+    E5["CREReceiverReplayedSequence"]
+    E6["CREReceiverFutureTimestamp<br/>clock skew / malformed"]
+    E7["CREReceiverStaleReport<br/>delivery latency"]
+    E8["KeeperExecutorNoUpkeepNeeded"]
+
+    Report --> G1
+    G1 -->|no| E1
+    G1 -->|yes| G2
+    G2 -->|no| E2
+    G2 -->|yes| G3
+    G3 -->|no| E3
+    G3 -->|yes| G4
+    G4 -->|no| E4
+    G4 -->|yes| G5
+    G5 -->|no| E5
+    G5 -->|yes| G6
+    G6 -->|no| E6
+    G6 -->|yes| G7
+    G7 -->|no| E7
+    G7 -->|yes| Commit
+    Commit --> Revalidate
+    Revalidate -->|no| E8
+    Revalidate -->|yes| Execute
+
+    classDef entry fill:#D3D3D3,stroke:#696969,stroke-width:3px
+    classDef guard fill:#87CEEB,stroke:#4682B4,stroke-width:3px
+    classDef err fill:#FFB6C1,stroke:#DC143C,stroke-width:3px
+    classDef ok fill:#90EE90,stroke:#006400,stroke-width:3px
+
+    class Report entry
+    class G1,G2,G3,G4,G5,G6,G7,Revalidate guard
+    class E1,E2,E3,E4,E5,E6,E7,E8 err
+    class Commit,Execute ok
+```
 - **CREQueueExecutor**: `queueUpkeepStatus()` is the gas-bounded fallback/cross-check (`MAX_BATCH_SCAN = 25`). Actions: `ProcessRequests` (affordable prefix; report params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`
+  - **Cursor skippability rule**: a batch is skippable only if it is priced AND (fully settled OR past `MAX_BATCH_PROCESSING_TIME`, where users self-serve via `AMM.cancelRedemption`). Unpriced batches — the current one and any future id — are never skipped, even when empty, since they can still receive requests. `ExitQueue.priceBatch` writes `canBeProcessed` and `pricedAt` together, so `canBeProcessed` alone is the "is priced" predicate
 - **CREStrategyExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the report — recomputed at execution. Status view: `strategyUpkeepStatus()`
 - **Interfaces**: `src/interfaces/automation/` (`IReceiver`, `ICREReceiverBase`, `ICREQueueExecutor`, `ICREStrategyExecutor`)
 - **Deployment**: `script/DeployCREExecutors.s.sol` / `DeployAll` via `ProtocolDeployBase._deployCREExecutors` — requires `KEYSTONE_FORWARDER`, `CHAIN_SELECTOR`, `MAX_REPORT_AGE`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → bind workflow identity → enable `writeReport`. Set `strategyDepositCooldown` > 0 before granting keeper roles to new addresses
 
 #### **Testing Infrastructure**
 - **Unit Tests**: Individual contract testing with mocking (`test/unit/`)
-  - `AMM.t.sol`, `Controller.t.sol`, `EVE.t.sol`, `ExitQueue.t.sol`, `StrategyManager.t.sol`, `Oracle.t.sol`, `Converter.t.sol`, `UniCLStrat.t.sol`, `CREQueueExecutor.t.sol`; fork: `CREKeystoneMetadata.t.sol`
+  - `AMM.t.sol`, `Controller.t.sol`, `EVE.t.sol`, `ExitQueue.t.sol`, `StrategyManager.t.sol`, `Oracle.t.sol`, `Converter.t.sol`, `UniCLStrat.t.sol`, `CREQueueExecutor.t.sol`, `CREStrategyExecutor.t.sol`; fork: `CREKeystoneMetadata.t.sol`
 - **Integration Tests**: Cross-contract interaction testing (`test/integration/`)
   - `DeploymentTest.t.sol`, `ETHFlowTest.t.sol`, `UpgradeSimulation.t.sol`, `ConverterStrategyManagerIntegration.t.sol`
 - **Fuzzing**: Bounded input testing for edge cases (`test/fuzz/`)
   - `OracleFuzz.t.sol`, `UniCLStratFuzz.t.sol`, `ControllerFuzz.t.sol`
 - **Test Trees**: Bulloak tree files for systematic test organization (`test/trees/`)
-  - `AMM.tree`, `Controller.tree`, `EVE.tree`, `ExitQueue.tree`, `Oracle.tree`, `Converter.tree`, `StrategyManager.tree`, `UniCLStrat.tree`
+  - `AMM.tree`, `Controller.tree`, `EVE.tree`, `ExitQueue.tree`, `Oracle.tree`, `Converter.tree`, `StrategyManager.tree`, `UniCLStrat.tree`, `CREReceiverBase.tree` (shared `onReport` branches), `CREQueueExecutor.tree`, `CREStrategyExecutor.tree`
 - **Mock Contracts**: `MockController`, `MockERC20`, `MockPriceFeed`, `MockStrategy`, `MockConverter`, `MockConverterAdapter`, `UniCLStratMocks`
 - **Helper Libraries**: `Halp` for systematic mocking
 - **Test Naming Conventions**:
