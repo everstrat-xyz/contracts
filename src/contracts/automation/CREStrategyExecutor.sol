@@ -63,60 +63,44 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         lastSyncAt = block.timestamp;
     }
 
-    function version() external pure returns (string memory) {
-        return "1.0.0-cre";
+    // ============ Admin ============
+
+    function setControllerReserveETH(uint256 _controllerReserveETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        emit ControllerReserveETHChanged(controllerReserveETH, _controllerReserveETH);
+        controllerReserveETH = _controllerReserveETH;
     }
 
-    // ============ CRE processing ============
+    function setMinDepositETH(uint256 _minDepositETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        if (_minDepositETH == 0) revert KeeperExecutorInvalidConfig();
+        emit MinDepositETHChanged(minDepositETH, _minDepositETH);
+        minDepositETH = _minDepositETH;
+    }
 
-    function _processReport(uint8 action, bytes memory /* params */ ) internal override {
-        StrategyAction strategyAction = StrategyAction(action);
+    function setMinWithdrawETH(uint256 _minWithdrawETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        emit MinWithdrawETHChanged(minWithdrawETH, _minWithdrawETH);
+        minWithdrawETH = _minWithdrawETH;
+    }
 
-        IRegistry registry_ = registry();
-        IController controller = IController(registry_.controller());
-        IStrategyManager strategyManager_ = IStrategyManager(registry_.strategyManager());
+    function setMinHarvestETH(uint256 _minHarvestETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        if (_minHarvestETH == 0) revert KeeperExecutorInvalidConfig();
+        emit MinHarvestETHChanged(minHarvestETH, _minHarvestETH);
+        minHarvestETH = _minHarvestETH;
+    }
 
-        if (strategyAction == StrategyAction.Rebalance) {
-            if (!_rebalanceNeeded(strategyManager_)) revert KeeperExecutorNoUpkeepNeeded();
-            controller.checkAndRebalanceStrategies();
-            emit StrategyUpkeepPerformed(strategyAction, 0);
-        } else if (strategyAction == StrategyAction.WithdrawShortfall) {
-            uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
-            uint256 controllerBalance = address(controller).balance;
-            if (needsETH <= controllerBalance || needsETH - controllerBalance < minWithdrawETH) {
-                revert KeeperExecutorNoUpkeepNeeded();
-            }
-            uint256 shortfall = needsETH - controllerBalance;
-            controller.withdrawFromStrategies(shortfall);
-            emit StrategyUpkeepPerformed(strategyAction, shortfall);
-        } else if (strategyAction == StrategyAction.ProvideExitLiquidity) {
-            uint256 topUp =
-                _exitLiquidityTopUp(registry_, address(controller).balance, _pendingRedemptionNeedsETH(registry_));
-            if (topUp < minExitLiquidityTopUpETH) revert KeeperExecutorNoUpkeepNeeded();
-            controller.provideExitLiquidity(topUp);
-            emit StrategyUpkeepPerformed(strategyAction, topUp);
-        } else if (strategyAction == StrategyAction.DepositExcess) {
-            uint256 excess = _idleExcess(address(controller).balance, _pendingRedemptionNeedsETH(registry_));
-            if (excess < minDepositETH || !_depositCapacityAvailable(strategyManager_)) {
-                revert KeeperExecutorNoUpkeepNeeded();
-            }
-            controller.depositToStrategies(excess);
-            emit StrategyUpkeepPerformed(strategyAction, excess);
-        } else if (strategyAction == StrategyAction.HarvestPerformanceFees) {
-            uint256 feeETH = _pendingPerformanceFeeETH(strategyManager_);
-            if (feeETH < minHarvestETH) revert KeeperExecutorNoUpkeepNeeded();
-            controller.harvestPerformanceFeeFromStrategies();
-            emit StrategyUpkeepPerformed(strategyAction, feeETH);
-        } else if (strategyAction == StrategyAction.Sync) {
-            if (syncInterval == 0 || block.timestamp - lastSyncAt < syncInterval) {
-                revert KeeperExecutorNoUpkeepNeeded();
-            }
-            lastSyncAt = block.timestamp;
-            controller.syncStrategies();
-            emit StrategyUpkeepPerformed(strategyAction, 0);
-        } else {
-            revert KeeperExecutorUnknownAction();
-        }
+    function setSyncInterval(uint256 _syncInterval) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        emit SyncIntervalChanged(syncInterval, _syncInterval);
+        syncInterval = _syncInterval;
+    }
+
+    function setExitLiquidityTargetETH(uint256 _exitLiquidityTargetETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        emit ExitLiquidityTargetETHChanged(exitLiquidityTargetETH, _exitLiquidityTargetETH);
+        exitLiquidityTargetETH = _exitLiquidityTargetETH;
+    }
+
+    function setMinExitLiquidityTopUpETH(uint256 _minExitLiquidityTopUpETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
+        if (_minExitLiquidityTopUpETH == 0) revert KeeperExecutorInvalidConfig();
+        emit MinExitLiquidityTopUpETHChanged(minExitLiquidityTopUpETH, _minExitLiquidityTopUpETH);
+        minExitLiquidityTopUpETH = _minExitLiquidityTopUpETH;
     }
 
     // ============ Views ============
@@ -173,46 +157,61 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         return _pendingRedemptionNeedsETH(registry());
     }
 
-    // ============ Admin ============
-
-    function setControllerReserveETH(uint256 _controllerReserveETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        emit ControllerReserveETHChanged(controllerReserveETH, _controllerReserveETH);
-        controllerReserveETH = _controllerReserveETH;
+    function version() external pure returns (string memory) {
+        return "1.0.0-cre";
     }
 
-    function setMinDepositETH(uint256 _minDepositETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        if (_minDepositETH == 0) revert KeeperExecutorInvalidConfig();
-        emit MinDepositETHChanged(minDepositETH, _minDepositETH);
-        minDepositETH = _minDepositETH;
-    }
+    // ============ CRE processing ============
 
-    function setMinWithdrawETH(uint256 _minWithdrawETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        emit MinWithdrawETHChanged(minWithdrawETH, _minWithdrawETH);
-        minWithdrawETH = _minWithdrawETH;
-    }
+    function _processReport(uint8 action, bytes memory /* params */ ) internal override {
+        StrategyAction strategyAction = StrategyAction(action);
 
-    function setMinHarvestETH(uint256 _minHarvestETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        if (_minHarvestETH == 0) revert KeeperExecutorInvalidConfig();
-        emit MinHarvestETHChanged(minHarvestETH, _minHarvestETH);
-        minHarvestETH = _minHarvestETH;
-    }
+        IRegistry registry_ = registry();
+        IController controller = IController(registry_.controller());
+        IStrategyManager strategyManager_ = IStrategyManager(registry_.strategyManager());
 
-    function setSyncInterval(uint256 _syncInterval) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        emit SyncIntervalChanged(syncInterval, _syncInterval);
-        syncInterval = _syncInterval;
+        if (strategyAction == StrategyAction.Rebalance) {
+            if (!_rebalanceNeeded(strategyManager_)) revert KeeperExecutorNoUpkeepNeeded();
+            controller.checkAndRebalanceStrategies();
+            emit StrategyUpkeepPerformed(strategyAction, 0);
+        } else if (strategyAction == StrategyAction.WithdrawShortfall) {
+            uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
+            uint256 controllerBalance = address(controller).balance;
+            if (needsETH <= controllerBalance || needsETH - controllerBalance < minWithdrawETH) {
+                revert KeeperExecutorNoUpkeepNeeded();
+            }
+            uint256 shortfall = needsETH - controllerBalance;
+            controller.withdrawFromStrategies(shortfall);
+            emit StrategyUpkeepPerformed(strategyAction, shortfall);
+        } else if (strategyAction == StrategyAction.ProvideExitLiquidity) {
+            uint256 topUp =
+                _exitLiquidityTopUp(registry_, address(controller).balance, _pendingRedemptionNeedsETH(registry_));
+            if (topUp < minExitLiquidityTopUpETH) revert KeeperExecutorNoUpkeepNeeded();
+            controller.provideExitLiquidity(topUp);
+            emit StrategyUpkeepPerformed(strategyAction, topUp);
+        } else if (strategyAction == StrategyAction.DepositExcess) {
+            uint256 excess = _idleExcess(address(controller).balance, _pendingRedemptionNeedsETH(registry_));
+            if (excess < minDepositETH || !_depositCapacityAvailable(strategyManager_)) {
+                revert KeeperExecutorNoUpkeepNeeded();
+            }
+            controller.depositToStrategies(excess);
+            emit StrategyUpkeepPerformed(strategyAction, excess);
+        } else if (strategyAction == StrategyAction.HarvestPerformanceFees) {
+            uint256 feeETH = _pendingPerformanceFeeETH(strategyManager_);
+            if (feeETH < minHarvestETH) revert KeeperExecutorNoUpkeepNeeded();
+            controller.harvestPerformanceFeeFromStrategies();
+            emit StrategyUpkeepPerformed(strategyAction, feeETH);
+        } else if (strategyAction == StrategyAction.Sync) {
+            if (syncInterval == 0 || block.timestamp - lastSyncAt < syncInterval) {
+                revert KeeperExecutorNoUpkeepNeeded();
+            }
+            lastSyncAt = block.timestamp;
+            controller.syncStrategies();
+            emit StrategyUpkeepPerformed(strategyAction, 0);
+        } else {
+            revert KeeperExecutorUnknownAction();
+        }
     }
-
-    function setExitLiquidityTargetETH(uint256 _exitLiquidityTargetETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        emit ExitLiquidityTargetETHChanged(exitLiquidityTargetETH, _exitLiquidityTargetETH);
-        exitLiquidityTargetETH = _exitLiquidityTargetETH;
-    }
-
-    function setMinExitLiquidityTopUpETH(uint256 _minExitLiquidityTopUpETH) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        if (_minExitLiquidityTopUpETH == 0) revert KeeperExecutorInvalidConfig();
-        emit MinExitLiquidityTopUpETHChanged(minExitLiquidityTopUpETH, _minExitLiquidityTopUpETH);
-        minExitLiquidityTopUpETH = _minExitLiquidityTopUpETH;
-    }
-
     // ============ Internal ============
 
     function _rebalanceNeeded(IStrategyManager _strategyManager) internal view returns (bool) {
