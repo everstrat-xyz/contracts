@@ -22,7 +22,7 @@ enforced on-chain.
 | **Security multisig** | holds `SECURITY_ROLE` on the Registry directly | none | `pause()` on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, Converter, and Registry; `Controller.emergencyExitToAMM()`; `StrategyManager.emergencyWithdrawToController()`; `UniCLStrat.emergencyExit()`; `StrategyManager.removeSupportedERC20()` (instant stale-feed / dust-NAV unfreeze; `addSupportedERC20` stays ADMIN-only); `CANCELLER_ROLE` on the admin timelock. **Cannot** unpause, configure, or upgrade. |
 | **ADMIN timelock** | 48h OpenZeppelin `TimelockController` holding `ADMIN_ROLE` on the Registry | 48h minimum | All configuration: Oracle feed/token setters, `unpause()` everywhere (including Converter), strategy add/remove, Registry contract registration and role management, all `set*` functions, UUPS upgrades, Converter adapter allowlist. ADMIN can also `pause()` (same gate as SECURITY). |
 | **DAO multisig** | `PROPOSER_ROLE` (and `CANCELLER_ROLE`) on the admin timelock | schedules ops | Holds **no direct protocol role**. Every ADMIN action below is: DAO proposes on the timelock → 48h elapses → anyone executes (executor is `address(0)`, open execution). |
-| **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `priceBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup KEEPER_ROLE is held only by the two Chainlink Automation executors; the StrategyKeeperExecutor funds the AMM immediate-exit float itself via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
+| **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `priceBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup `KEEPER_ROLE` is held by the two Chainlink CRE receivers (`CREQueueExecutor`, `CREStrategyExecutor`) and by nothing else; a manual break-glass multisig is an **optional, opt-in** additional holder — see §0.1 for the decision, risks, and policy. `CREStrategyExecutor` funds the AMM immediate-exit float via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
 | **Anyone** | — | none | `AMM.claim()`, `AMM.cancelRedemption()`, timelock execution after delay, Uniswap `pool.increaseObservationCardinalityNext()`. |
 
 Key asymmetries to remember under incident pressure:
@@ -42,6 +42,80 @@ Key asymmetries to remember under incident pressure:
   `grantRoles`, `revokeRole`, `revokeRoles`, `registerContract(s)`,
   `deregisterContract(s)` are all `whenNotPaused`), which blocks any in-flight
   privilege escalation. `renounceRole` still works while paused.
+
+### 0.1 Break-glass keeper — the manual `KEEPER_ROLE` multisig
+
+**Default: OFF.** A fresh deployment grants `KEEPER_ROLE` to the two CRE
+receivers and to nothing else (`ProtocolDeployBase._deployCREExecutors`, and the
+`_verifyCriticalRoleGrants` check that both executors hold it). Adding a manual
+holder is a deliberate, separately proposed governance action — never a
+deployment side effect. This section is the single source of truth for that
+decision; every other mention in the repo points here.
+
+**Why it exists as an option.** The CRE workflows are a *liveness* dependency:
+if the DON stops delivering reports, or a workflow is misconfigured, or the
+`writeReport` capability is disabled, every keeper path stops — `priceBatch()`,
+`processRequests()`, `provideExitLiquidity()`, strategy deposits/withdrawals and
+rebalances. The protocol keeps working for users on the paths that need no
+keeper (`enter()`, immediate `exit()` against existing AMM float, `claim()`,
+`cancelRedemption()` after the escape-hatch window), but queued redemptions stall
+and the AMM float is not topped up. The relevant clocks are unforgiving:
+
+| Clock | Value | What runs out |
+|---|---|---|
+| `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | Priced batches go unprocessed; users fall back to `AMM.cancelRedemption()` (escape hatch) |
+| Admin timelock delay | 48h minimum | Time to grant `KEEPER_ROLE` to a replacement address *after* the incident starts |
+
+Granting a keeper reactively therefore consumes most of the escape-hatch window
+before the first manual transaction can land. A pre-granted break-glass holder
+converts a 48h governance round-trip into a signer round-trip.
+
+**What the break-glass keeper can do.** Exactly the `KEEPER_ROLE` surface, no
+more: the Controller operational functions listed in the §0 table. It is **not**
+an admin — it cannot pause, unpause, configure any `set*`, register contracts,
+grant roles, or upgrade. It cannot move ETH out of the protocol: every keeper
+function moves value between Controller / StrategyManager / strategies / AMM,
+and user payouts still route through the AMM pull-over-push `claim()`.
+
+**What it costs — the honest risk.** `KEEPER_ROLE` is instant and untimelocked,
+so a compromised keeper multisig is a real economic surface even though it is
+not a fund-drain vector:
+
+- **Timing selection.** `priceBatch()` settles a batch at the current
+  `eveBasePriceInETH()`. A keeper chooses *which block* that happens in, and so
+  picks a NAV print within the range the market offers.
+- **Griefing / value leakage.** Repeated deposit → withdraw churn and forced
+  `checkAndRebalanceStrategies()` calls make the strategy cross Uniswap spreads
+  and pay LP/gas costs on every cycle. The strategy-layer guardrails (calm
+  checks, TWAP + Chainlink quote deviation bounds, slippage) bound the damage
+  per call; they do not bound the *number* of calls.
+- **Float manipulation.** `provideExitLiquidity()` and `depositToStrategies()`
+  let a keeper decide how much ETH sits in the AMM as immediate-exit float.
+
+**Containment when it does go wrong.** `Controller.pause()` — instant,
+`SECURITY_ROLE` — blocks every keeper entry point (all `KEEPER_ROLE` functions
+on the Controller are `whenNotPaused`). That is the fast stop; use it first.
+Revoking the role itself is `ADMIN_ROLE` and therefore 48h, and note the
+interaction: **a Registry pause blocks `revokeRole`**, so if the Registry is
+also paused the revoke cannot land until the Registry is unpaused. Sequence:
+pause the Controller → propose the revoke → unpause the Registry if needed →
+execute.
+
+**Policy if the DAO enables it.**
+
+1. Multisig only — never an EOA, and never the deployer key.
+2. Signer set distinct from the DAO and security multisigs, so one compromised
+   signer quorum cannot both act as keeper and cancel the response.
+3. Granted by its own timelock proposal, with the address in the proposal
+   description. Not bundled into an unrelated batch.
+4. `strategyDepositCooldown` > 0 must be set **before** the grant executes —
+   the cooldown is what bounds deposit/withdraw churn.
+5. Monitored like an operator, not like a contract: alert on **any** transaction
+   from the break-glass address (in steady state there should be none), and page
+   on the keeper-failure selectors in §7.3.
+6. Reviewed at every governance cycle: if the CRE workflows have been healthy,
+   the standing recommendation is to revoke and re-grant on demand, accepting the
+   48h latency.
 
 ---
 
@@ -827,6 +901,21 @@ Do not page on moves with an obvious on-chain explanation:
 `StrategyManagerERC20NotSupported(address)`,
 `StrategyManagerNoBalanceToRecover()`, `ExitQueueRequestCannotBeClosed()`,
 `ControllerInsufficientBalance()`, `EnforcedPause()` (OpenZeppelin).
+
+CRE receivers (`CREQueueExecutor` / `CREStrategyExecutor`) — these tell you *why* a
+report bounced, which is the difference between a workflow bug and a DON outage:
+
+| Selector | Reading |
+|---|---|
+| `InvalidSender(address,address)` | Something other than the KeystoneForwarder called `onReport` — **page**, this is an attempted forgery |
+| `InvalidWorkflowId(bytes32,bytes32)` / `InvalidAuthor(address,address)` / `InvalidWorkflowName(bytes10,bytes10)` | Identity binding does not match the deployed workflow — usually a re-deployed workflow that was never re-bound by ADMIN |
+| `CREReceiverWorkflowUnbound()` | Receiver deployed but never bound. Expected before go-live; **page** after |
+| `CREReceiverWrongChain()` | Envelope carries another chain's selector — a workflow is writing to the wrong deployment |
+| `CREReceiverReplayedSequence()` | Re-delivery of an already-executed report. Benign in isolation; a sustained stream means the workflow is not advancing its sequence |
+| `CREReceiverFutureTimestamp()` | `observedAt` is ahead of chain time — **workflow clock skew or a malformed report**, not a delivery-latency problem |
+| `CREReceiverStaleReport()` | `observedAt` is older than `MAX_REPORT_AGE` — **delivery latency**: DON congestion, a stuck workflow, or `MAX_REPORT_AGE` set too tight |
+| `KeeperExecutorNoUpkeepNeeded()` | The report's claim did not survive re-validation against live state. Normal at low rates (races); a sustained stream means the workflow's off-chain view has drifted |
+| `KeeperExecutorUnknownAction()` | Action byte outside the executor's enum — workflow/contract version mismatch |
 
 ### 7.4 Time constants cheat sheet
 

@@ -7,11 +7,15 @@ All operational roles (`ADMIN_ROLE`, `KEEPER_ROLE`, `MINTER_ROLE`) are granted a
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': { 'fontSize': '28px', 'primaryTextColor': '#000000'}, 'flowchart': {'nodeSpacing': 120, 'rankSpacing': 120, 'padding': 30}}}%%
 graph TB
-    DAO["DAO / Admin<br/>(ADMIN_ROLE on Registry)"]
-    Keeper["Keeper<br/>(KEEPER_ROLE on Registry)"]
+    DAO["DAO / Admin Timelock<br/>(ADMIN_ROLE on Registry)"]
+    CREQueue["CREQueueExecutor<br/>(KEEPER_ROLE)"]
+    CREStrategy["CREStrategyExecutor<br/>(KEEPER_ROLE)"]
+    BreakGlass["Break-glass multisig<br/>OPT-IN, off by default<br/>(FREEZE_RUNBOOK §0.1)"]
+    Security["Security multisig<br/>(SECURITY_ROLE)"]
     Deployer["Deployer<br/>(temporary ADMIN at init)"]
+    Keystone["KeystoneForwarder<br/>(no protocol role)"]
     
-    Registry["Registry<br/>UUPS Proxy"]
+    Registry["Registry<br/>Static"]
     
     EVE["EVE"]
     AMM["AMM"]
@@ -22,8 +26,13 @@ graph TB
     UniCLStrat["UniCLStrat"]
     
     DAO --> Registry
-    Keeper --> Registry
+    CREQueue --> Registry
+    CREStrategy --> Registry
+    BreakGlass -.->|"KEEPER_ROLE only if DAO opts in"| Registry
+    Security --> Registry
     Deployer -.->|"renounce after deploy"| Registry
+    Keystone -.->|"onReport only"| CREQueue
+    Keystone -.->|"onReport only"| CREStrategy
     
     Registry -.->|"MINTER_ROLE check"| EVE
     Registry -.->|"ADMIN / peer keys"| AMM
@@ -32,14 +41,22 @@ graph TB
     Registry -.->|"ADMIN / CONTROLLER caller"| StrategyManager
     Registry -.->|"ADMIN"| Oracle
     Registry -.->|"ADMIN; SM caller"| UniCLStrat
+    CREQueue -.->|"priceBatch / processRequests"| Controller
+    CREStrategy -.->|"deposit / withdraw / rebalance / sync / harvest / exitLiquidity"| Controller
+    BreakGlass -.->|"same surface, manually"| Controller
+    Security -->|"pause() — instant keeper stop"| Controller
     
     classDef role fill:#FFB6C1,stroke:#DC143C
+    classDef optin fill:#FFF0F5,stroke:#DC143C,stroke-dasharray: 6 4
     classDef hub fill:#F0E68C,stroke:#B8860B,stroke-width:4px
     classDef contract fill:#90EE90,stroke:#006400
+    classDef external fill:#D3D3D3,stroke:#696969
     
-    class DAO,Keeper,Deployer role
+    class DAO,CREQueue,CREStrategy,Security,Deployer role
+    class BreakGlass optin
     class Registry hub
     class EVE,AMM,Controller,ExitQueue,StrategyManager,Oracle,UniCLStrat contract
+    class Keystone external
 ```
 
 ## Access Control Matrix (via Registry)
@@ -69,7 +86,8 @@ graph TB
 | Role | Typical grantee | Purpose |
 |------|-----------------|----------|
 | `ADMIN_ROLE` | DAO | Register contracts, grant/revoke roles, Oracle feed configuration, pause/upgrade modules |
-| `KEEPER_ROLE` | Keeper bot / multisig | Controller automation |
+| `KEEPER_ROLE` | CREQueueExecutor + CREStrategyExecutor. A manual break-glass multisig is **opt-in and off by default** — see [FREEZE_RUNBOOK §0.1](../docs/FREEZE_RUNBOOK.md) | Controller automation via CRE `onReport` → recomputed keeper calls |
+| `SECURITY_ROLE` | Security multisig | Instant `pause()` everywhere (which is also the containment path for a compromised keeper — every Controller keeper function is `whenNotPaused`), emergency capital recovery, timelock `CANCELLER_ROLE`. Cannot unpause, configure, or upgrade |
 | `MINTER_ROLE` | AMM, StrategyManager | EVE mint/burn (AMM enter/exit; SM performance-fee harvest) |
 
 ## Deployer Admin Lifecycle

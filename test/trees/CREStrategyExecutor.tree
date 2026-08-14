@@ -1,0 +1,128 @@
+Shared CRE entrypoint / identity / Envelope branches live in CREReceiverBase.tree.
+This tree covers only the strategy-specific report handling, views, and policy knobs.
+
+CREStrategyExecutor::constructor(address registry_, address forwarder_, uint64 chainSelector_, uint64 maxReportAge_)
+└── Given the base constructor succeeds
+    ├── It should set minDepositETH = 0.1 ether
+    ├── It should set minWithdrawETH = 0.01 ether
+    ├── It should set minHarvestETH = 0.01 ether
+    ├── It should set syncInterval = 1 days and lastSyncAt = block.timestamp
+    ├── It should set minExitLiquidityTopUpETH = 0.01 ether
+    ├── It should leave controllerReserveETH and exitLiquidityTargetETH at 0 (explicit
+    │   deploy-time policy knobs — 0 disables the exit-liquidity action entirely)
+    └── It should report version() == "1.0.0-cre"
+
+CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
+├── It should ignore params entirely: every ETH amount is recomputed from live
+│   Controller / StrategyManager / ExitQueue / AMM state before any call
+├── Given action decodes to an out-of-range StrategyAction value
+│   └── It should revert (enum conversion panic before any protocol call)
+├── Given action is StrategyAction.None
+│   └── It should revert with KeeperExecutorUnknownAction
+├── Given action is StrategyAction.Rebalance
+│   ├── When no registered strategy is both unpaused and unhealthy
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
+│   └── When at least one unpaused strategy reports isHealthy() == false
+│       ├── It should call Controller.checkAndRebalanceStrategies()
+│       └── It should emit StrategyUpkeepPerformed(Rebalance, 0)
+├── Given action is StrategyAction.WithdrawShortfall
+│   ├── When pending redemption needs are already covered by the Controller balance
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
+│   ├── When the shortfall is below minWithdrawETH
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (dust guard)
+│   └── When the shortfall is at least minWithdrawETH
+│       ├── It should call Controller.withdrawFromStrategies(shortfall) with the recomputed
+│       │   amount, not any amount from the report
+│       └── It should emit StrategyUpkeepPerformed(WithdrawShortfall, shortfall)
+├── Given action is StrategyAction.ProvideExitLiquidity
+│   ├── When exitLiquidityTargetETH is 0
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (action disabled by policy)
+│   ├── When AMM.freeBalance() already meets the target
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
+│   ├── When the computed top-up is below minExitLiquidityTopUpETH
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
+│   └── When the top-up is at least minExitLiquidityTopUpETH
+│       ├── It should top up by min(target shortfall, idle Controller excess) — never
+│       │   spending the controllerReserveETH or the ETH earmarked for pending redemptions
+│       ├── It should call Controller.provideExitLiquidity(topUp)
+│       └── It should emit StrategyUpkeepPerformed(ProvideExitLiquidity, topUp)
+├── Given action is StrategyAction.DepositExcess
+│   ├── When idle excess is below minDepositETH
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
+│   ├── When no strategy can currently take a deposit (all paused, unhealthy, in deposit
+│   │   cooldown, or at maxDeposit == 0)
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
+│   └── When excess >= minDepositETH and some strategy has capacity
+│       ├── It should deposit only the excess over controllerReserveETH + pending needs
+│       ├── It should call Controller.depositToStrategies(excess)
+│       └── It should emit StrategyUpkeepPerformed(DepositExcess, excess)
+├── Given action is StrategyAction.HarvestPerformanceFees
+│   ├── When StrategyManager.performanceFeeBps() == 0
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (fees disabled ⇒ pending is 0)
+│   ├── When total pending fee ETH is below minHarvestETH
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (harvest not worth the gas)
+│   └── When total pending fee ETH is at least minHarvestETH
+│       ├── It should call Controller.harvestPerformanceFeeFromStrategies()
+│       └── It should emit StrategyUpkeepPerformed(HarvestPerformanceFees, feeETH)
+└── Given action is StrategyAction.Sync
+    ├── When syncInterval is 0
+    │   └── It should revert with KeeperExecutorNoUpkeepNeeded (sync disabled)
+    ├── When block.timestamp - lastSyncAt < syncInterval
+    │   └── It should revert with KeeperExecutorNoUpkeepNeeded (rate limit)
+    └── When the interval has elapsed
+        ├── It should set lastSyncAt = block.timestamp BEFORE calling out
+        ├── It should call Controller.syncStrategies()
+        └── It should emit StrategyUpkeepPerformed(Sync, 0)
+
+CREStrategyExecutor::strategyUpkeepStatus()
+├── Given the executor itself is paused
+│   └── It should return (None, 0)
+├── Given Controller or StrategyManager is paused
+│   └── It should return (None, 0)
+└── Given nothing is paused, it should return the FIRST applicable action in priority order
+    ├── Rebalance (an unhealthy unpaused strategy outranks everything — it is the only
+    │   action that repairs the NAV source)
+    ├── WithdrawShortfall — additionally requires total maxWithdrawal() > 0, so it is never
+    │   recommended when no strategy can actually pay out
+    ├── ProvideExitLiquidity
+    ├── DepositExcess
+    ├── HarvestPerformanceFees
+    ├── Sync — additionally requires strategyCount() > 0
+    └── None when no threshold is met
+    └── It should agree with _processReport: any action this view returns must not revert
+        with KeeperExecutorNoUpkeepNeeded in the same block
+
+CREStrategyExecutor::pendingRedemptionNeedsETH()
+├── It should anchor the scan at CREQueueExecutor.nextLiveBatchIdToProcess() (the two
+│   executors share one cursor; the queue executor owns it)
+├── It should scan at most MAX_BATCH_SCAN (25) batches — gas-bounded
+├── Given a scanned batch is not priced
+│   └── It should contribute 0
+├── Given a scanned batch is past MAX_BATCH_PROCESSING_TIME
+│   └── It should contribute 0 (users self-serve via the escape hatch; do not reserve ETH)
+├── Given a request is slippage-protected out
+│   └── It should contribute 0 for that request
+├── Given a batch has more unprocessed users than MAX_USERS_COST_SCAN (50)
+│   └── It should cost at most the first 50 (may under-report; the shortfall is topped up on
+│       the next upkeep rather than reverting)
+└── It should always add the current batch's totalTokensToBurn priced at
+    AMM.eveBasePriceInETH() — the batch not yet priced but already committed
+
+CREStrategyExecutor::setControllerReserveETH / setExitLiquidityTargetETH / setSyncInterval / setMinWithdrawETH
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+└── Given caller has ADMIN_ROLE
+    ├── It should accept 0 as an explicit, meaningful choice (no reserve / action disabled /
+    │   sync disabled / no dust floor)
+    ├── It should emit the matching *Changed(old, new) event
+    └── It should store the new value
+
+CREStrategyExecutor::setMinDepositETH / setMinHarvestETH / setMinExitLiquidityTopUpETH
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given the new value is 0
+│   └── It should revert with KeeperExecutorInvalidConfig — these are dust floors; zeroing
+│       them would let a workflow burn gas on economically pointless upkeeps
+└── Given caller has ADMIN_ROLE and the value is non-zero
+    ├── It should emit the matching *Changed(old, new) event
+    └── It should store the new value

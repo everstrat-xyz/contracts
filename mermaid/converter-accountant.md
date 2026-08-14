@@ -66,7 +66,7 @@ The important architectural change is that common validation should not be imple
 %%{init: {'theme':'base', 'themeVariables': { 'fontSize': '24px', 'primaryTextColor': '#000000'}, 'flowchart': {'nodeSpacing': 110, 'rankSpacing': 110, 'padding': 30}}}%%
 graph TB
     User["User"]
-    Keeper["Keeper"]
+    Keeper["CREStrategyExecutor<br/>(KEEPER_ROLE)"]
     AMM["AMM<br/>ETH Entry/Exit"]
     Controller["Controller<br/>Keeper Gateway"]
     StrategyManager["StrategyManager<br/>Registry + Shared Validation"]

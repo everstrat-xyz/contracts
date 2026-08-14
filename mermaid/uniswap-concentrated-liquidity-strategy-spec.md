@@ -387,7 +387,7 @@ graph TB
     Router["Uniswap V3 Router<br/>Swaps"]
     Quoter["Uniswap V3 Quoter<br/>Slippage Minimums"]
     Oracle["Oracle<br/>ETH + Token USD Feeds"]
-    Keeper["Keeper"]
+    Keeper["CREStrategyExecutor<br/>(KEEPER_ROLE)"]
 
     User -->|"deposit ETH"| AMM
     AMM -->|"forwards ETH"| Controller

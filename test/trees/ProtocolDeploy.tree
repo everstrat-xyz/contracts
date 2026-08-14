@@ -3,7 +3,7 @@ ProtocolDeploy::Deployment Flow
 │   ├── Given DAO_ADDRESS, SECURITY_ADDRESS, or DAO_TREASURY_ADDRESS is unset
 │   │   └── It should revert (required env — critical addresses never default to the deployer)
 │   ├── Given EXIT_LIQUIDITY_TARGET_ETH or CONTROLLER_RESERVE_ETH is unset
-│   │   └── It should revert (required env — StrategyKeeperExecutor policy knobs; 0 is a valid explicit choice)
+│   │   └── It should revert (required env — CREStrategyExecutor policy knobs; 0 is a valid explicit choice)
 │   ├── Given TIMELOCK_ADMIN_DELAY is unset
 │   │   └── It should default to the production 48h delay (sole deploy-script envOr exception)
 │   ├── Given PERFORMANCE_FEE_BPS is unset
@@ -47,16 +47,16 @@ ProtocolDeploy::Deployment Flow
 │   ├── It should initialize StrategyManager with FeeConfig (required DAO_TREASURY_ADDRESS + PERFORMANCE_FEE_BPS)
 │   ├── It should grant SECURITY, MINTER (AMM + StrategyManager), CONVERTER_CALLER_MANAGER on Registry
 │   ├── It should deploy both keeper executors and grant them KEEPER_ROLE
-│   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH / CONTROLLER_RESERVE_ETH to StrategyKeeperExecutor
+│   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH / CONTROLLER_RESERVE_ETH to CREStrategyExecutor
 │   ├── It should verify timelock wiring (ADMIN exclusivity + timelock governance roles) separately from SECURITY_ROLE
 │   ├── It should verify SECURITY / MINTER / CONVERTER_CALLER_MANAGER grants inline (Finalize uses _verifyCriticalRoleGrants)
 │   ├── It should NOT deploy DEX adapters or strategies (core-only; see DeployUniswapV3ConverterAdapter / DeployUniCLStrat)
 │   ├── It should NOT whitelist DEX adapters (setAllowedAdapter is always timelocked)
 │   └── It should renounce the deployer's bootstrap ADMIN_ROLE after setup (ADMIN_ROLE ends held only by the timelock)
 ├── DeployKeeperExecutors
-│   ├── It should deploy QueueKeeperExecutor and StrategyKeeperExecutor
+│   ├── It should deploy CREQueueExecutor and CREStrategyExecutor
 │   ├── It should register QUEUE_KEEPER_EXECUTOR and STRATEGY_KEEPER_EXECUTOR
-│   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH and CONTROLLER_RESERVE_ETH (required wei env) to StrategyKeeperExecutor
+│   ├── It should apply EXIT_LIQUIDITY_TARGET_ETH and CONTROLLER_RESERVE_ETH (required wei env) to CREStrategyExecutor
 │   └── When GRANT_KEEPER_ROLE is true (required env)
 │       └── It should grant KEEPER_ROLE to both executors
 │   └── When GRANT_KEEPER_ROLE is false
