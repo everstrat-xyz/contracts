@@ -203,6 +203,14 @@ contract ConverterTestBase is Test {
         vm.expectRevert(abi.encodeWithSelector(REGISTRY_CLIENT_MISSING_ROLE_SELECTOR, _role));
     }
 
+    function _expectCallerHasNoneOfRoles(bytes32 _primaryRole, bytes32 _secondaryRole) internal {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IRegistryClient.RegistryClientCallerHasNoneOfRoles.selector, _primaryRole, _secondaryRole
+            )
+        );
+    }
+
     function _expectRegistryInvalidCallerRevert(bytes32 _contractKey) internal virtual {
         vm.expectRevert(abi.encodeWithSelector(REGISTRY_CLIENT_INVALID_CALLER_SELECTOR, _contractKey));
     }
@@ -1177,10 +1185,18 @@ contract ConverterViewTest is ConverterTestBase {
 // ================================
 
 contract ConverterPauseTest is ConverterTestBase {
-    function test_Pause_RevertsWhenCallerNotAdmin() public {
-        _expectRegistryMissingRoleRevert(Auth.ADMIN_ROLE);
+    function test_Pause_RevertsWhenCallerHasNeitherRole() public {
+        _expectCallerHasNoneOfRoles(Auth.ADMIN_ROLE, Auth.SECURITY_ROLE);
         vm.prank(unauthorized);
         converter.pause();
+    }
+
+    function test_Pause_SecurityCanPauseImmediately() public {
+        address security = makeAddr("security");
+        registry.grantRole(Auth.SECURITY_ROLE, security);
+        vm.prank(security);
+        converter.pause();
+        assertTrue(converter.paused());
     }
 
     function test_Pause_WhenNotPaused_Succeeds() public {
@@ -1198,6 +1214,15 @@ contract ConverterPauseTest is ConverterTestBase {
         converter.pause();
         _expectRegistryMissingRoleRevert(Auth.ADMIN_ROLE);
         vm.prank(unauthorized);
+        converter.unpause();
+    }
+
+    function test_Unpause_SecurityCannotUnpause() public {
+        address security = makeAddr("security");
+        registry.grantRole(Auth.SECURITY_ROLE, security);
+        converter.pause();
+        _expectRegistryMissingRoleRevert(Auth.ADMIN_ROLE);
+        vm.prank(security);
         converter.unpause();
     }
 
@@ -1339,8 +1364,8 @@ contract ConverterAccessControlTest is ConverterTestBase {
         converter.setAllowedAdapter(address(adapter), true);
     }
 
-    function test_AccessControl_PauseRequiresAdminRole() public {
-        _expectRegistryMissingRoleRevert(Auth.ADMIN_ROLE);
+    function test_AccessControl_PauseRequiresAdminOrSecurityRole() public {
+        _expectCallerHasNoneOfRoles(Auth.ADMIN_ROLE, Auth.SECURITY_ROLE);
         vm.prank(unauthorized);
         converter.pause();
     }

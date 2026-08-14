@@ -24,6 +24,7 @@ import {IWETH} from "interfaces/integrations/IWETH.sol";
  *      protocol Registry. Strategies call through granted caller permissions managed by the
  *      registered StrategyManager contract, using `CONVERTER_CALLER_ROLE` on the Registry administered
  *      by `CONVERTER_CALLER_MANAGER_ROLE` (held by the Converter).
+ *      `pause()` is `ADMIN_ROLE` or `SECURITY_ROLE`; `unpause()` is `ADMIN_ROLE` only.
  */
 contract Converter is
     IConverter,
@@ -331,7 +332,7 @@ contract Converter is
     /**
      * @inheritdoc IConverter
      */
-    function pause() external override onlyAuthRole(Auth.ADMIN_ROLE) {
+    function pause() external override onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.SECURITY_ROLE) {
         _pause();
     }
 

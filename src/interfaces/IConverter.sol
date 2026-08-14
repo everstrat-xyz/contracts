@@ -11,7 +11,8 @@ pragma solidity ^0.8.30;
  *      by the Converter), caller-supplied slippage bounds, and deadlines.
  *
  *      Roles are resolved from the protocol Registry:
- *        - ADMIN_ROLE (Auth): pause/unpause, adapter management, upgrades
+ *        - ADMIN_ROLE (Auth): unpause, adapter management, upgrades
+ *        - ADMIN_ROLE or SECURITY_ROLE (Auth): pause
  *        - STRATEGY_MANAGER (Auth): grant/revoke caller permissions via grantCallerRole/revokeCallerRole
  *
  *      Routing is caller-owned: each strategy supplies the adapter and the
@@ -313,11 +314,14 @@ interface IConverter {
 
     /**
      * @notice Pauses the contract
+     * @dev Callable by Registry `ADMIN_ROLE` or `SECURITY_ROLE` (instant circuit breaker).
+     *      `unpause` remains `ADMIN_ROLE`-only (48h timelock in production).
      */
     function pause() external;
 
     /**
      * @notice Unpauses the contract
+     * @dev Registry `ADMIN_ROLE` only.
      */
     function unpause() external;
 }

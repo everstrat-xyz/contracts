@@ -19,8 +19,8 @@ enforced on-chain.
 
 | Actor | On-chain identity | Delay | Powers |
 |---|---|---|---|
-| **Security multisig** | holds `SECURITY_ROLE` on the Registry directly | none | `pause()` on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, and Registry; `Controller.emergencyExitToAMM()`; `StrategyManager.emergencyWithdrawToController()`; `UniCLStrat.emergencyExit()`; `StrategyManager.removeSupportedERC20()` (instant stale-feed / dust-NAV unfreeze; `addSupportedERC20` stays ADMIN-only); `CANCELLER_ROLE` on the admin timelock. **Cannot** unpause, configure, or upgrade. |
-| **ADMIN timelock** | 48h OpenZeppelin `TimelockController` holding `ADMIN_ROLE` on the Registry | 48h minimum | All configuration: Oracle feed/token setters, `unpause()` everywhere, strategy add/remove, Registry contract registration and role management, all `set*` functions, UUPS upgrades, Converter pause/unpause/adapter allowlist. |
+| **Security multisig** | holds `SECURITY_ROLE` on the Registry directly | none | `pause()` on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, Converter, and Registry; `Controller.emergencyExitToAMM()`; `StrategyManager.emergencyWithdrawToController()`; `UniCLStrat.emergencyExit()`; `StrategyManager.removeSupportedERC20()` (instant stale-feed / dust-NAV unfreeze; `addSupportedERC20` stays ADMIN-only); `CANCELLER_ROLE` on the admin timelock. **Cannot** unpause, configure, or upgrade. |
+| **ADMIN timelock** | 48h OpenZeppelin `TimelockController` holding `ADMIN_ROLE` on the Registry | 48h minimum | All configuration: Oracle feed/token setters, `unpause()` everywhere (including Converter), strategy add/remove, Registry contract registration and role management, all `set*` functions, UUPS upgrades, Converter adapter allowlist. ADMIN can also `pause()` (same gate as SECURITY). |
 | **DAO multisig** | `PROPOSER_ROLE` (and `CANCELLER_ROLE`) on the admin timelock | schedules ops | Holds **no direct protocol role**. Every ADMIN action below is: DAO proposes on the timelock → 48h elapses → anyone executes (executor is `address(0)`, open execution). |
 | **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `priceBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup KEEPER_ROLE is held only by the two Chainlink Automation executors; the StrategyKeeperExecutor funds the AMM immediate-exit float itself via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
 | **Anyone** | — | none | `AMM.claim()`, `AMM.cancelRedemption()`, timelock execution after delay, Uniswap `pool.increaseObservationCardinalityNext()`. |
@@ -30,11 +30,11 @@ Key asymmetries to remember under incident pressure:
 - **Pause is instant (SECURITY), unpause always costs 48h (ADMIN timelock).**
   Do not pause "just in case" — every pause commits the DAO to a 48h re-open
   path.
-- **The Converter's `pause()`/`unpause()` are `ADMIN_ROLE`-only** —
-  the security multisig **cannot** pause the Converter
-  (`Converter.pause() external onlyAuthRole(Auth.ADMIN_ROLE)`). Pausing a
-  strategy is the security-tier substitute: `UniCLStrat.pause()` revokes the
-  strategy's token allowances to the Converter.
+- **Converter `pause()` is `ADMIN_ROLE` or `SECURITY_ROLE`; `unpause()` is
+  `ADMIN_ROLE`-only** (`onlyEitherAuthRole` / `onlyAuthRole`). Pausing a
+  strategy remains useful in narrower incidents: `UniCLStrat.pause()` revokes
+  that strategy's token allowances to the Converter without stopping other
+  strategies' swaps.
 - **The Oracle has no pause function at all.** Its fail-closed behaviour is
   the staleness/round validation in `_getPriceWithStalenessCheck()`; a bad feed
   makes reads revert on their own.
@@ -378,7 +378,7 @@ StrategyManager.forceRemoveStrategy(strategy) (4) ADMIN timelock, 48h
      `Converter.revokeCallerRole()` — wrapped in try/catch; if the Registry is
      paused the revoke fails and `CallerRoleRevokeFailed(strategy)` is emitted
      (clean up later by re-`addStrategy` + `removeStrategy`, or pause the
-     Converter via ADMIN).
+     Converter via ADMIN or SECURITY).
    - **Note on strategy-local fee counters:** `removeStrategy` does not touch
      the strategy's own `_cumulativeLpFeesEarned*` / `_cumulativeLpFeesCharged*`
      counters — those live on the strategy contract. If you later re-`add()`
@@ -513,7 +513,7 @@ bricked. Recovery path:
 | ExitQueue | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | |
 | StrategyManager | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | |
 | UniCLStrat | `ADMIN_ROLE` or `SECURITY_ROLE` (unwinds LP + revokes Converter allowances) | `ADMIN_ROLE` only (re-grants allowances) | |
-| **Converter** | **`ADMIN_ROLE` only** | `ADMIN_ROLE` only | SECURITY cannot pause it; pausing a strategy revokes that strategy's allowances instead |
+| **Converter** | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | Instant circuit breaker for wrap/unwrap/swap; strategy pause still revokes that strategy's allowances |
 | Oracle | — no pause exists | — | fail-closed via staleness checks |
 | EVE | — no pause exists | — | mint/burn gated by `MINTER_ROLE` only |
 
@@ -615,11 +615,9 @@ freeze privilege escalation first, then user flows, then capital movement:
 6. `UniCLStrat.pause()` for **each** registered strategy — unwinds LP to the
    strategy contract and revokes its Converter allowances. (Enumerate via
    `StrategyManager.strategies()`.)
-7. Converter: SECURITY **cannot** pause it. If the Converter itself is the
-   suspect component, have the DAO schedule `Converter.pause()` on the
-   timelock immediately (48h) — in the meantime step 6 has removed every
-   strategy's allowances, which neutralises the Converter's access to
-   strategy funds.
+7. `Converter.pause()` — stops wrap/unwrap/swap for every strategy at once
+   (redundant with step 6's allowance revokes, but closes any remaining
+   `CONVERTER_CALLER_ROLE` path immediately).
 8. If capital must be pulled back: run the recovery chain of §3.5 steps 1–3
    (`emergencyExit()` per strategy → `emergencyWithdrawToController()` →
    `emergencyExitToAMM()`). Funds parked on the AMM are the safest resting
