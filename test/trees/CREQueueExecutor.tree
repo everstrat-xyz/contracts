@@ -1,0 +1,126 @@
+Shared CRE entrypoint / identity / Envelope branches live in CREReceiverBase.tree.
+This tree covers only the queue-specific report handling, views, and admin knobs.
+
+CREQueueExecutor::constructor(address registry_, address forwarder_, uint64 chainSelector_, uint64 maxReportAge_)
+└── Given the base constructor succeeds
+    ├── It should set nextBatchIdToProcess = 1 (batch ids are 1-based in ExitQueue)
+    ├── It should set maxUsersPerUpkeep = 20
+    ├── It should set minBatchAge = 1 days
+    └── It should report version() == "1.0.0-cre"
+
+CREQueueExecutor::_processReport(uint8 action, bytes params) — via onReport
+├── Given action decodes to an out-of-range QueueAction value
+│   └── It should revert (enum conversion panic before any protocol call)
+├── Given action is QueueAction.None
+│   └── It should revert with KeeperExecutorUnknownAction (None is a status sentinel, not work)
+├── Given action is QueueAction.PriceBatch, params = abi.encode(batchId)
+│   ├── When batchId != queue.currentBatchId()
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (report hint is stale)
+│   ├── When batchId is current but block.timestamp - createdAt < minBatchAge
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (batch not aged enough)
+│   └── When batchId is current and the batch is old enough
+│       ├── It should call Controller.priceBatch()
+│       ├── It should advance nextBatchIdToProcess past every now-skippable batch
+│       └── It should emit QueueUpkeepPerformed(PriceBatch, batchId, 0)
+├── Given action is QueueAction.ProcessRequests, params = abi.encode(batchId, startIndex, endIndex)
+│   ├── When endIndex <= startIndex
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (empty or inverted range)
+│   ├── When startIndex != 0
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded — only a prefix of the
+│   │       affordable set is accepted, so a workflow cannot skip cheap requests
+│   ├── When endIndex > the live affordable count
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (over-claim against live state;
+│   │       the report is a hint and is never trusted for amounts)
+│   └── When [0, endIndex) is a prefix of the affordable set
+│       ├── It should call Controller.processRequests(batchId, 0, endIndex)
+│       ├── It should credit AMM.claimableBalances (pull-over-push, no direct ETH push)
+│       ├── It should advance the batch cursor
+│       └── It should emit QueueUpkeepPerformed(ProcessRequests, batchId, endIndex - startIndex)
+└── Given action is QueueAction.AdvanceCursor, params = abi.encode(batchId)
+    ├── When the recomputed cursor does not move
+    │   └── It should revert with KeeperExecutorNoUpkeepNeeded
+    ├── When the cursor moves but lands below the claimed batchId
+    │   └── It should revert with KeeperExecutorNoUpkeepNeeded (claim overshoots live state)
+    └── When the cursor moves to at least the claimed batchId
+        ├── It should persist the new nextBatchIdToProcess
+        └── It should emit QueueUpkeepPerformed(AdvanceCursor, newCursor, 0)
+
+CREQueueExecutor::queueUpkeepStatus()
+├── Given the executor itself is paused
+│   └── It should return (None, 0, 0)
+├── Given Controller, ExitQueue, or AMM is paused
+│   └── It should return (None, 0, 0) — no point reporting work that would revert
+└── Given nothing is paused
+    ├── It should scan at most MAX_BATCH_SCAN (25) batches from the live cursor — gas-bounded
+    ├── When a scanned batch has affordable requests
+    │   └── It should return (ProcessRequests, batchId, affordableCount) — highest priority
+    ├── When no batch is processable but the current batch has unprocessed users and has
+    │   aged past minBatchAge
+    │   └── It should return (PriceBatch, currentBatchId, 0)
+    ├── When the live cursor is ahead of the stored nextBatchIdToProcess
+    │   └── It should return (AdvanceCursor, liveCursor, 0)
+    └── When there is nothing to do
+        └── It should return (None, 0, 0)
+
+CREQueueExecutor::_isBatchSkippable(IExitQueue queue, uint256 batchId) — via nextLiveBatchIdToProcess / queueUpkeepStatus
+├── Given the batch is not priced (canBeProcessed == false)
+│   └── It should NOT be skippable, checked FIRST and regardless of how many users it holds
+│       ├── ExitQueue.priceBatch sets canBeProcessed and pricedAt in one write, so
+│       │   canBeProcessed is the whole "is priced" predicate — pricedAt == 0 is the same
+│       │   check and is not repeated
+│       └── Ordering matters for correctness outside the callers' range: an empty *current*
+│           batch, or any future batch id, must not be skipped — it can still receive
+│           requests and must be priced first
+├── Given the batch is priced and has no unprocessed users
+│   └── It should be skippable (fully settled)
+├── Given the batch is priced, has unprocessed users, and is within MAX_BATCH_PROCESSING_TIME
+│   └── It should NOT be skippable (this is real keeper work)
+└── Given the batch is priced, has unprocessed users, and is past MAX_BATCH_PROCESSING_TIME
+    └── It should be skippable — users can self-serve via AMM.cancelRedemption, so the
+        keeper stops blocking the cursor on it
+
+CREQueueExecutor::nextLiveBatchIdToProcess()
+├── It should return the cursor advanced over skippable batches without writing storage
+└── It should stop after MAX_BATCH_SCAN batches even if more are skippable
+
+CREQueueExecutor::affordableRequests(uint256 _batchId)
+├── Given the batch is not priced
+│   └── It should return 0
+├── Given the batch has no unprocessed users
+│   └── It should return 0
+├── Given a user's request is slippage-protected out (finalEvePrice relatively below the
+│   requested price beyond priceTolerance)
+│   └── It should count that request at zero cost (it settles without ETH)
+├── Given the cumulative cost would exceed the Controller's ETH balance
+│   └── It should stop at the last affordable request (never over-report)
+└── Given more unprocessed users than maxUsersPerUpkeep
+    └── It should scan at most maxUsersPerUpkeep users
+
+CREQueueExecutor::setMinBatchAge(uint256 _minBatchAge)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given _minBatchAge < MIN_BATCH_AGE_LOWER_BOUND (1 day) or > MIN_BATCH_AGE_UPPER_BOUND (7 days)
+│   └── It should revert with KeeperExecutorInvalidConfig
+└── Given _minBatchAge is within bounds
+    ├── It should emit MinBatchAgeChanged(old, new)
+    └── It should store the new value
+
+CREQueueExecutor::setMaxUsersPerUpkeep(uint256 _maxUsersPerUpkeep)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given _maxUsersPerUpkeep is 0 or > MAX_USERS_PER_UPKEEP_UPPER_BOUND (100)
+│   └── It should revert with KeeperExecutorInvalidConfig
+└── Given _maxUsersPerUpkeep is within bounds
+    ├── It should emit MaxUsersPerUpkeepChanged(old, new)
+    └── It should store the new value
+
+CREQueueExecutor::advanceBatchCursor(uint256 _toBatchId)
+├── Given caller does not have ADMIN_ROLE
+│   └── It should revert with RegistryClientMissingRole
+├── Given _toBatchId <= nextBatchIdToProcess
+│   └── It should revert with CREQueueExecutorBatchCursorPrecedesCurrent (never rewind)
+├── Given _toBatchId > ExitQueue.currentBatchId()
+│   └── It should revert with CREQueueExecutorBatchCursorPastCurrent (never skip live batches)
+└── Given _toBatchId is ahead of the cursor and at most currentBatchId
+    ├── It should store the new cursor
+    └── It should emit BatchCursorAdvanced(old, new)

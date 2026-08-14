@@ -1,0 +1,107 @@
+CREReceiverBase::constructor(address registry_, address forwarder_, uint64 chainSelector_, uint64 maxReportAge_)
+├── Given forwarder_ is the zero address
+│   └── It should revert with CREReceiverZeroAddress (ReceiverTemplate rule: the forwarder gate is mandatory)
+├── Given maxReportAge_ is zero
+│   └── It should revert with CREReceiverInvalidConfig (a zero window would reject every report)
+└── Given forwarder_ is non-zero and maxReportAge_ > 0
+    ├── It should set FORWARDER, CHAIN_SELECTOR, and MAX_REPORT_AGE immutably
+    ├── It should leave expectedWorkflowId / expectedAuthor / expectedWorkflowName unset
+    └── It should start unbound-inert: onReport reverts until an identity is bound
+
+CREReceiverBase::onReport(bytes calldata metadata, bytes calldata report)
+├── Given the receiver is paused
+│   └── It should revert with EnforcedPause (checked before any decoding)
+├── Given msg.sender is not FORWARDER
+│   └── It should revert with InvalidSender(msg.sender, FORWARDER) — ReceiverTemplate check 1
+└── Given msg.sender is FORWARDER
+    ├── When no identity field is configured (id, author, and name all unset)
+    │   └── It should skip metadata validation and then revert with CREReceiverWorkflowUnbound
+    │       (EverStrat addition: a receiver with no binding accepts no work)
+    ├── When any identity field is configured and metadata is shorter than 62 bytes
+    │   └── It should revert with CREReceiverInvalidMetadata (truncated identity slice)
+    ├── When metadata is 62 bytes or longer (production delivers 64: identity + reportId)
+    │   ├── It should decode workflowId / workflowName / workflowOwner at the ReceiverTemplate offsets
+    │   ├── It should ignore the trailing reportId bytes (never require length == 62)
+    │   ├── Given expectedWorkflowId is set and the decoded id differs
+    │   │   └── It should revert with InvalidWorkflowId(received, expected)
+    │   ├── Given expectedAuthor is set and the decoded owner differs
+    │   │   └── It should revert with InvalidAuthor(received, expected)
+    │   ├── Given expectedWorkflowName is set and expectedAuthor is NOT set
+    │   │   └── It should revert with WorkflowNameRequiresAuthorValidation
+    │   │       (40-bit name space collides — name alone is never sufficient)
+    │   └── Given expectedWorkflowName is set, expectedAuthor is set, and the decoded name differs
+    │       └── It should revert with InvalidWorkflowName(received, expected)
+    └── When workflow identity passes and the receiver is bound (Envelope layer)
+        ├── Given Envelope.chainSelector != CHAIN_SELECTOR
+        │   └── It should revert with CREReceiverWrongChain (cross-chain replay guard)
+        ├── Given Envelope.sequence <= lastSequence
+        │   └── It should revert with CREReceiverReplayedSequence (strictly increasing, so a
+        │       re-delivered report can never re-execute)
+        ├── Given Envelope.observedAt > block.timestamp
+        │   └── It should revert with CREReceiverFutureTimestamp
+        │       (a future observation is malformed / clock-skewed, NOT staleness — the two
+        │       failure modes carry distinct errors so alerting can tell them apart)
+        ├── Given block.timestamp - Envelope.observedAt > MAX_REPORT_AGE
+        │   └── It should revert with CREReceiverStaleReport
+        ├── Given Envelope.observedAt == block.timestamp (boundary)
+        │   └── It should accept (neither future nor stale)
+        ├── Given block.timestamp - Envelope.observedAt == MAX_REPORT_AGE (boundary)
+        │   └── It should accept (the window is inclusive)
+        └── Given every guard passes
+            ├── It should set lastSequence = Envelope.sequence BEFORE dispatching
+            ├── It should call _processReport(Envelope.action, Envelope.params)
+            ├── It should be non-reentrant (nonReentrant on the entrypoint)
+            └── Given _processReport reverts (e.g. KeeperExecutorNoUpkeepNeeded)
+                └── It should revert the whole call, leaving lastSequence unchanged
+
+CREReceiverBase::setExpectedWorkflowId(bytes32 _id)
+├── Given caller does not have ADMIN_ROLE on the Registry
+│   └── It should revert with RegistryClientMissingRole
+└── Given caller has ADMIN_ROLE
+    ├── It should emit ExpectedWorkflowIdUpdated(previous, new)
+    ├── It should store the new id
+    └── Given _id is bytes32(0) and expectedAuthor is also unset
+        └── It should return the receiver to the unbound-inert state (onReport reverts)
+
+CREReceiverBase::setExpectedAuthor(address _author)
+├── Given caller does not have ADMIN_ROLE on the Registry
+│   └── It should revert with RegistryClientMissingRole
+└── Given caller has ADMIN_ROLE
+    ├── It should emit ExpectedAuthorUpdated(previous, new)
+    └── It should store the new author
+
+CREReceiverBase::setExpectedWorkflowName(string calldata _name)
+├── Given caller does not have ADMIN_ROLE on the Registry
+│   └── It should revert with RegistryClientMissingRole
+└── Given caller has ADMIN_ROLE
+    ├── When _name is empty
+    │   └── It should clear expectedWorkflowName to bytes10(0) and emit the update
+    └── When _name is non-empty
+        ├── It should encode SHA256(name) → lowercase hex string → first 10 chars → bytes10
+        │   (must match the CRE engine encoding exactly, or every report is rejected)
+        └── It should emit ExpectedWorkflowNameUpdated(previous, encoded)
+
+CREReceiverBase::setExpectedWorkflowName(bytes10 _name)
+├── Given caller does not have ADMIN_ROLE on the Registry
+│   └── It should revert with RegistryClientMissingRole
+└── Given caller has ADMIN_ROLE
+    ├── It should store the pre-encoded name verbatim (no hashing)
+    └── It should emit ExpectedWorkflowNameUpdated(previous, new)
+
+CREReceiverBase::pause() / unpause()
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE
+│   └── pause() should revert with RegistryClientMissingRole
+├── Given caller has SECURITY_ROLE
+│   ├── pause() should succeed (instant circuit breaker, no timelock)
+│   └── unpause() should revert — re-opening is ADMIN-only, so it routes through the 48h timelock
+└── Given caller has ADMIN_ROLE
+    ├── pause() should succeed
+    └── unpause() should succeed
+
+CREReceiverBase::supportsInterface(bytes4 interfaceId)
+├── Given interfaceId is type(IReceiver).interfaceId
+│   └── It should return true (the KeystoneForwarder ERC-165 probe must pass)
+├── Given interfaceId is type(IERC165).interfaceId
+│   └── It should return true
+└── Given interfaceId is unknown
+    └── It should return false

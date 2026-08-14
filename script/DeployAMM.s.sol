@@ -56,7 +56,7 @@ contract DeployAMM is ProtocolDeployBase {
         registry.grantRoles(roles, accounts);
 
         // Deployer keeps its bootstrap Registry ADMIN_ROLE for any remaining modular steps
-        // (e.g. DeployKeeperExecutors). Strategy bytecode (`DeployUniCLStrat`) needs no ADMIN;
+        // (e.g. DeployCREExecutors). Strategy bytecode (`DeployUniCLStrat`) needs no ADMIN;
         // `addStrategy` is always scheduled on the admin timelock after finalize. Renounce
         // explicitly at the end via FinalizeProtocolDeploy — the single, unconditional
         // PL-003 finalization step.

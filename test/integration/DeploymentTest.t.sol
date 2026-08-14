@@ -28,7 +28,7 @@ import {DeployEVE} from "../../script/DeployEVE.sol";
 import {DeployAMM} from "../../script/DeployAMM.s.sol";
 import {DeployConverter} from "../../script/DeployConverter.s.sol";
 import {DeployWhitelist} from "../../script/DeployWhitelist.s.sol";
-import {DeployKeeperExecutors} from "../../script/DeployKeeperExecutors.s.sol";
+import {DeployCREExecutors} from "../../script/DeployCREExecutors.s.sol";
 import {FinalizeProtocolDeploy} from "../../script/FinalizeProtocolDeploy.s.sol";
 
 /**
@@ -214,7 +214,7 @@ contract DeployScriptsTest is Test {
         (address converterProxy,) = new DeployConverter().run();
         new DeployWhitelist().run();
         (address strategyManagerProxy,) = new DeployAMM().run();
-        (, CREStrategyExecutor strategyExecutor) = new DeployKeeperExecutors().run();
+        (, CREStrategyExecutor strategyExecutor) = new DeployCREExecutors().run();
         assertEq(strategyExecutor.exitLiquidityTargetETH(), 0);
         assertEq(strategyExecutor.controllerReserveETH(), 0);
 
@@ -254,20 +254,20 @@ contract DeployScriptsTest is Test {
         _runCoreModuleSteps();
         new DeployWhitelist().run();
         new DeployAMM().run();
-        new DeployKeeperExecutors().run();
+        new DeployCREExecutors().run();
         // DeployConverter intentionally skipped.
 
         FinalizeProtocolDeploy finalize = new FinalizeProtocolDeploy();
         vm.expectRevert(abi.encodeWithSelector(IRegistry.RegistryContractNotRegistered.selector, Auth.CONVERTER));
         finalize.run();
 
-        // ============ A skipped DeployKeeperExecutors step fails finalization loudly ============
+        // ============ A skipped DeployCREExecutors step fails finalization loudly ============
         _deployFreshRegistry();
         _runCoreModuleSteps();
         new DeployConverter().run();
         new DeployWhitelist().run();
         new DeployAMM().run();
-        // DeployKeeperExecutors intentionally skipped.
+        // DeployCREExecutors intentionally skipped.
 
         finalize = new FinalizeProtocolDeploy();
         vm.expectRevert(
@@ -283,7 +283,7 @@ contract DeployScriptsTest is Test {
         new DeployConverter().run();
         new DeployWhitelist().run();
         (strategyManagerProxy,) = new DeployAMM().run();
-        new DeployKeeperExecutors().run();
+        new DeployCREExecutors().run();
 
         // Simulate the pre-fix modular flow: the deployer (still bootstrap ADMIN) revokes
         // the StrategyManager's MINTER_ROLE before finalizing.

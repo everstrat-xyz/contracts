@@ -54,7 +54,7 @@ abstract contract ProtocolDeployBase is Script {
         TimelockController adminTimelock; // 48h — holds ADMIN_ROLE (incl. oracle feeds and UUPS upgrades)
     }
 
-    struct KeeperExecutors {
+    struct CREExecutors {
         CREQueueExecutor queueExecutor;
         CREStrategyExecutor strategyExecutor;
     }
@@ -308,32 +308,32 @@ abstract contract ProtocolDeployBase is Script {
      * @param _grantKeeperRole Whether to grant KEEPER_ROLE to both executors (false in
      *        production when the grant must be scheduled through the 48h admin timelock)
      */
-    function _deployKeeperExecutors(Registry _registry, bool _grantKeeperRole)
+    function _deployCREExecutors(Registry _registry, bool _grantKeeperRole)
         internal
-        returns (KeeperExecutors memory keepers)
+        returns (CREExecutors memory executors)
     {
         address forwarder = vm.envAddress("KEYSTONE_FORWARDER");
         uint64 chainSelector = uint64(vm.envUint("CHAIN_SELECTOR"));
         uint64 maxReportAge = uint64(vm.envUint("MAX_REPORT_AGE"));
 
-        keepers.queueExecutor = new CREQueueExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
-        keepers.strategyExecutor = new CREStrategyExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
+        executors.queueExecutor = new CREQueueExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
+        executors.strategyExecutor = new CREStrategyExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
 
         bytes32[] memory keys = new bytes32[](2);
         address[] memory addresses = new address[](2);
         keys[0] = Auth.QUEUE_KEEPER_EXECUTOR;
-        addresses[0] = address(keepers.queueExecutor);
+        addresses[0] = address(executors.queueExecutor);
         keys[1] = Auth.STRATEGY_KEEPER_EXECUTOR;
-        addresses[1] = address(keepers.strategyExecutor);
+        addresses[1] = address(executors.strategyExecutor);
         _registry.registerContracts(keys, addresses);
 
         if (_grantKeeperRole) {
             bytes32[] memory roles = new bytes32[](2);
             address[] memory accounts = new address[](2);
             roles[0] = Auth.KEEPER_ROLE;
-            accounts[0] = address(keepers.queueExecutor);
+            accounts[0] = address(executors.queueExecutor);
             roles[1] = Auth.KEEPER_ROLE;
-            accounts[1] = address(keepers.strategyExecutor);
+            accounts[1] = address(executors.strategyExecutor);
             _registry.grantRoles(roles, accounts);
         }
 
@@ -341,8 +341,8 @@ abstract contract ProtocolDeployBase is Script {
         // still holds bootstrap ADMIN_ROLE (last free config window before the 48h timelock).
         uint256 exitLiquidityTarget = vm.envUint("EXIT_LIQUIDITY_TARGET_ETH");
         uint256 controllerReserve = vm.envUint("CONTROLLER_RESERVE_ETH");
-        keepers.strategyExecutor.setExitLiquidityTargetETH(exitLiquidityTarget);
-        keepers.strategyExecutor.setControllerReserveETH(controllerReserve);
+        executors.strategyExecutor.setExitLiquidityTargetETH(exitLiquidityTarget);
+        executors.strategyExecutor.setControllerReserveETH(controllerReserve);
     }
 
     // ============ Timelock Deployment (PL-003) ============
@@ -391,7 +391,7 @@ abstract contract ProtocolDeployBase is Script {
      * @notice Grants the tiered protocol roles: every privileged role goes to its
      *         timelock, never to an EOA/multisig directly. The security gets the
      *         (pause-only) SECURITY_ROLE. KEEPER_ROLE is granted separately to the
-     *         keeper executors via {_deployKeeperExecutors}. The deployer retains its
+     *         keeper executors via {_deployCREExecutors}. The deployer retains its
      *         bootstrap ADMIN_ROLE (from the Registry constructor) to register the
      *         initial Oracle feeds in the same deployment batch — renounced in
      *         {_finalizeDeployerTieredAccess}.
@@ -488,9 +488,9 @@ abstract contract ProtocolDeployBase is Script {
      *         wiring — see {_verifyTimelockWiring}). DeployAll verifies the same grants
      *         inline rather than calling this helper (no skipped-step surface to catch).
      * @dev Resolving each Registry key reverts when the module was never registered, so a
-     *      skipped modular step (e.g. DeployConverter or DeployKeeperExecutors) fails here
+     *      skipped modular step (e.g. DeployConverter or DeployCREExecutors) fails here
      *      with a clear `RegistryContractNotRegistered` before the deployer renounces ADMIN.
-     *      KEEPER_ROLE is verified strictly: when DeployKeeperExecutors runs with
+     *      KEEPER_ROLE is verified strictly: when DeployCREExecutors runs with
      *      GRANT_KEEPER_ROLE=false the grants must land (via the admin timelock) BEFORE
      *      FinalizeProtocolDeploy runs.
      */
@@ -547,39 +547,39 @@ abstract contract ProtocolDeployBase is Script {
         );
     }
 
-    function _verifyKeeperExecutors(Registry _registry, KeeperExecutors memory _keepers, bool _expectKeeperRole)
+    function _verifyCREExecutors(Registry _registry, CREExecutors memory _executors, bool _expectKeeperRole)
         internal
         view
     {
         require(
-            _registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR) == address(_keepers.queueExecutor),
+            _registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR) == address(_executors.queueExecutor),
             "CRITICAL: Registry QUEUE_KEEPER_EXECUTOR mismatch"
         );
         require(
-            _registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR) == address(_keepers.strategyExecutor),
+            _registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR) == address(_executors.strategyExecutor),
             "CRITICAL: Registry STRATEGY_KEEPER_EXECUTOR mismatch"
         );
         require(
-            address(_keepers.queueExecutor.registry()) == address(_registry),
+            address(_executors.queueExecutor.registry()) == address(_registry),
             "CRITICAL: CREQueueExecutor registry() mismatch"
         );
         require(
-            address(_keepers.strategyExecutor.registry()) == address(_registry),
+            address(_executors.strategyExecutor.registry()) == address(_registry),
             "CRITICAL: CREStrategyExecutor registry() mismatch"
         );
         if (_expectKeeperRole) {
             require(
-                _registry.hasRole(Auth.KEEPER_ROLE, address(_keepers.queueExecutor)),
+                _registry.hasRole(Auth.KEEPER_ROLE, address(_executors.queueExecutor)),
                 "CRITICAL: CREQueueExecutor missing KEEPER_ROLE"
             );
             require(
-                _registry.hasRole(Auth.KEEPER_ROLE, address(_keepers.strategyExecutor)),
+                _registry.hasRole(Auth.KEEPER_ROLE, address(_executors.strategyExecutor)),
                 "CRITICAL: CREStrategyExecutor missing KEEPER_ROLE"
             );
         }
 
-        uint256 exitLiquidityTarget = _keepers.strategyExecutor.exitLiquidityTargetETH();
-        uint256 controllerReserve = _keepers.strategyExecutor.controllerReserveETH();
+        uint256 exitLiquidityTarget = _executors.strategyExecutor.exitLiquidityTargetETH();
+        uint256 controllerReserve = _executors.strategyExecutor.controllerReserveETH();
         console.log("exitLiquidityTargetETH (wei):", exitLiquidityTarget);
         console.log("controllerReserveETH (wei):", controllerReserve);
         if (exitLiquidityTarget == 0) {

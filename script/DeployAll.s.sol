@@ -98,7 +98,7 @@ contract DeployAll is ProtocolDeployBase {
         // Keepers are a dedicated step: deploy CRE receivers, register on the Registry
         // address book, and grant KEEPER_ROLE. Executors reject reports until workflow
         // identity is ADMIN-bound.
-        KeeperExecutors memory keepers = _deployKeeperExecutors(protocol.registry, true);
+        CREExecutors memory executors = _deployCREExecutors(protocol.registry, true);
 
         Oracle(protocol.oracle).updateUsdFeedInfo(address(0), priceFeed, STALENESS_INTERVAL);
 
@@ -115,8 +115,8 @@ contract DeployAll is ProtocolDeployBase {
 
         vm.stopBroadcast();
 
-        result = _toDeploymentResult(protocol, timelocks, keepers);
-        _verifyDeployment(result, protocol, timelocks, keepers, deployer, dao, security, priceFeed);
+        result = _toDeploymentResult(protocol, timelocks, executors);
+        _verifyDeployment(result, protocol, timelocks, executors, deployer, dao, security, priceFeed);
 
         return result;
     }
@@ -124,7 +124,7 @@ contract DeployAll is ProtocolDeployBase {
     function _toDeploymentResult(
         ProtocolContracts memory _protocol,
         ProtocolTimelocks memory _timelocks,
-        KeeperExecutors memory _keepers
+        CREExecutors memory _executors
     ) internal view returns (DeploymentResult memory result) {
         // The Registry is static (deployed directly, never behind an ERC1967 proxy), so it
         // has no implementation slot to read — see ProtocolDeployBase._deployRegistry().
@@ -142,8 +142,8 @@ contract DeployAll is ProtocolDeployBase {
         result.converterProxy = address(_protocol.converter);
         result.converterImplementation = _implementationAddress(result.converterProxy);
         result.adminTimelock = address(_timelocks.adminTimelock);
-        result.queueKeeperExecutor = address(_keepers.queueExecutor);
-        result.strategyKeeperExecutor = address(_keepers.strategyExecutor);
+        result.queueKeeperExecutor = address(_executors.queueExecutor);
+        result.strategyKeeperExecutor = address(_executors.strategyExecutor);
         result.whitelist = address(_protocol.whitelist);
     }
 
@@ -151,7 +151,7 @@ contract DeployAll is ProtocolDeployBase {
         DeploymentResult memory result,
         ProtocolContracts memory protocol,
         ProtocolTimelocks memory timelocks,
-        KeeperExecutors memory keepers,
+        CREExecutors memory executors,
         address deployer,
         address dao,
         address security,
@@ -174,7 +174,7 @@ contract DeployAll is ProtocolDeployBase {
         _verifyRegistryWiring(protocol.registry, protocol);
         _verifyModuleRegistryBackpointers(protocol, result.registryProxy);
         _verifyTimelockWiring(protocol.registry, timelocks, deployer, dao, security);
-        _verifyKeeperExecutors(protocol.registry, keepers, true);
+        _verifyCREExecutors(protocol.registry, executors, true);
 
         // Protocol role grants (SECURITY is a direct multisig grant — not timelock wiring).
         // Modular Finalize uses _verifyCriticalRoleGrants for the full skipped-step surface;
@@ -198,7 +198,10 @@ contract DeployAll is ProtocolDeployBase {
         console.log("ETH price feed:", priceFeed);
         console.log("All deployment checks passed");
         console.log("Next steps: bind CRE workflow identity on each executor,");
-        console.log("then enable writeReport. Keep a manual multisig KEEPER_ROLE.");
+        console.log("then enable writeReport.");
+        console.log("KEEPER_ROLE is now held by the two CRE executors and nothing else.");
+        console.log("A manual break-glass keeper is OPT-IN: see docs/FREEZE_RUNBOOK.md 0.1");
+        console.log("before proposing that grant (risks, containment, signer policy).");
     }
 
     /// @dev Every module resolves the protocol Registry; verify each back-pointer so a

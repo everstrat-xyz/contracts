@@ -21,8 +21,9 @@ graph TB
     SwapRouter["Uniswap V3<br/>Swap Router"]
     UniswapFactory["Uniswap V3<br/>Factory"]
     WETH["WETH<br/>Native Wrapper"]
-    ChainlinkAutomation["Chainlink<br/>Automation"]
-    KeystoneForwarder["Chainlink<br/>Forwarder"]
+    CREDon["Chainlink CRE<br/>DON Workflows"]
+    KeystoneForwarder["KeystoneForwarder<br/>(Chainlink-managed)"]
+    IReceiver["IReceiver<br/>Interface"]
     
     %% Proxy Layer (Only for upgradeable contracts)
     ControllerProxy["Controller<br/>Proxy"]
@@ -202,10 +203,12 @@ graph TB
     UniCLStrat -.->|"emergency weth.withdraw"| WETH
     UniCLStrat -.->|"NAV valuation"| OracleProxy
 
-    %% Automation Subsystem
+    %% Automation Subsystem (Chainlink CRE)
+    ICREReceiverBase --> IReceiver
     ICREQueueExecutor --> ICREReceiverBase
     ICREStrategyExecutor --> ICREReceiverBase
     CREReceiverBase --> ICREReceiverBase
+    CREReceiverBase --> IReceiver
     CREReceiverBase --> RegistryClient
     CREReceiverBase --> Pausable
     CREReceiverBase --> ReentrancyGuard
@@ -213,14 +216,16 @@ graph TB
     CREQueueExecutor --> ICREQueueExecutor
     CREStrategyExecutor --> CREReceiverBase
     CREStrategyExecutor --> ICREStrategyExecutor
-    ChainlinkAutomation -.->|"Executes upkeeps via"| KeystoneForwarder
-    KeystoneForwarder -.->|"onReport (only forwarder)"| CREQueueExecutor
-    KeystoneForwarder -.->|"onReport (only forwarder)"| CREStrategyExecutor
+    CREDon -.->|"runtime.report + writeReport"| KeystoneForwarder
+    KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREQueueExecutor
+    KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREStrategyExecutor
+    CREDon -.->|"EVM read queueUpkeepStatus"| CREQueueExecutor
+    CREDon -.->|"EVM read strategyUpkeepStatus"| CREStrategyExecutor
     CREQueueExecutor -.->|"priceBatch / processRequests (KEEPER_ROLE)"| ControllerProxy
     CREQueueExecutor -.->|"Reads batches"| ExitQueueProxy
-    CREStrategyExecutor -.->|"deposit / withdraw / rebalance / sync / harvestFees (KEEPER_ROLE)"| ControllerProxy
+    CREStrategyExecutor -.->|"deposit / withdraw / rebalance / sync / harvestFees / exitLiquidity (KEEPER_ROLE)"| ControllerProxy
     CREStrategyExecutor -.->|"Reads strategies"| StrategyManagerProxy
-    CREStrategyExecutor -.->|"Reads nextBatchIdToProcess cursor"| CREQueueExecutor
+    CREStrategyExecutor -.->|"Reads nextLiveBatchIdToProcess cursor"| CREQueueExecutor
     CREQueueExecutor -.->|"Resolves peers & roles via"| Registry
     CREStrategyExecutor -.->|"Resolves peers & roles via"| Registry
     
@@ -255,8 +260,8 @@ graph TB
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
     class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,ChainlinkAutomation,KeystoneForwarder external
-    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,KeystoneForwarder external
+    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory,IReceiver interface
     class Tests,Mocks,Helpers,Trees test
     class Registry,RegistryClient,RegistryClientUpgradeable,RegistryClientBase static
     class CREReceiverBase,CREQueueExecutor,CREStrategyExecutor static
@@ -469,19 +474,19 @@ graph TB
     Pause -.->|"freezes"| AMMCore
 ```
 
-#### **Chainlink CRE (Keeper Executors)**
-- **Purpose**: `CREQueueExecutor` and `CREStrategyExecutor` (static contracts, `src/contracts/automation/`) replace the off-chain TypeScript keeper bot with Chainlink CRE
-- **Trust Chain**: `Chainlink CRE → Forwarder → KeeperExecutor (KEEPER_ROLE) → Controller` — Chainlink infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE`
-- **CREReceiverBase** (abstract mixin): RegistryClient + OZ Pausable + ReentrancyGuard + `IReceiver` / ERC-165. `onReport` is gated to the immutable KeystoneForwarder; workflow identity is ADMIN-bound. Unbound receivers reject reports. `pause()` ADMIN or SECURITY, `unpause()` ADMIN
-- **Untrusted report**: the envelope only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
-- **CREQueueExecutor**: scans priced batches from a processing cursor `nextBatchIdToProcess` (`MAX_BATCH_SCAN = 25`) for requests the Controller can afford (mirrors `Controller._processRequest` cost accounting; longest affordable prefix capped at `maxUsersPerUpkeep`, range `[1, MAX_USERS_PER_UPKEEP_UPPER_BOUND = 100]`) → `ProcessRequests`; otherwise prices the current batch once non-empty and `minBatchAge`-old (`minBatchAge` ∈ `[MIN_BATCH_AGE_LOWER_BOUND = 1 day, MIN_BATCH_AGE_UPPER_BOUND = 7 days]`) → `PriceBatch`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN_ROLE) force-advances the cursor past stuck batches; skipped requests remain in the ExitQueue for owners to close
-- **CREStrategyExecutor** (priority order): `Rebalance` (unhealthy unpaused strategy), `WithdrawShortfall` (pending redemption needs — scanned **forward from `CREQueueExecutor.nextBatchIdToProcess`** — exceed Controller balance by ≥ `minWithdrawETH`), `DepositExcess` (Controller ETH above `controllerReserveETH` + pending needs by ≥ `minDepositETH`; renamed from `DepositIdle` to avoid collision with `IStrategy.investIdleETH()`), `HarvestPerformanceFees` (sum of `pendingPerformanceFeeInETH` ≥ `minHarvestETH`; no-op when `performanceFeeBps == 0`), `Sync` (every `syncInterval`; 0 disables)
-- **Interfaces**: `src/interfaces/automation/` (`ICREReceiverBase`, `ICREQueueExecutor`, `ICREStrategyExecutor`)
-- **Deployment**: `script/DeployKeeperExecutors.s.sol` / `DeployAll` via shared `ProtocolDeployBase._deployKeeperExecutors` — deploy both with `KEYSTONE_FORWARDER` / `CHAIN_SELECTOR` / `MAX_REPORT_AGE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → apply `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH` (required wei env) → bind workflow identity → enable `writeReport`; production registration/role grants after finalize route through the 48h admin timelock
+#### **Chainlink CRE (Keeper Receivers)**
+- **Purpose**: `CREQueueExecutor` and `CREStrategyExecutor` (static contracts, `src/contracts/automation/`) drive protocol keepers via Chainlink Runtime Environment (CRE) — replacing retired Chainlink Automation
+- **Trust Chain**: `CRE DON workflows → KeystoneForwarder → CRE*Executor (KEEPER_ROLE) → Controller` — Chainlink infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE` by deployment (an opt-in manual break-glass keeper is a separate governance decision — see `docs/FREEZE_RUNBOOK.md` §0.1)
+- **CREReceiverBase** (abstract mixin): follows Chainlink `ReceiverTemplate` patterns — RegistryClient + OZ Pausable + ReentrancyGuard + `IReceiver` / ERC-165. `onReport` gated to immutable `FORWARDER`; workflow identity via `setExpectedAuthor` / `setExpectedWorkflowName` / `setExpectedWorkflowId` (ADMIN). Unbound receivers reject reports. Envelope adds `chainSelector` / `sequence` / `MAX_REPORT_AGE` replay guards. `pause()` ADMIN or SECURITY, `unpause()` ADMIN
+- **Untrusted report**: the Envelope only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
+- **CREQueueExecutor**: `queueUpkeepStatus()` is the gas-bounded fallback/cross-check (`MAX_BATCH_SCAN = 25`). Actions: `ProcessRequests` (affordable prefix; report params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`
+- **CREStrategyExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the report — recomputed at execution. Status view: `strategyUpkeepStatus()`
+- **Interfaces**: `src/interfaces/automation/` (`IReceiver`, `ICREReceiverBase`, `ICREQueueExecutor`, `ICREStrategyExecutor`)
+- **Deployment**: `script/DeployCREExecutors.s.sol` / `DeployAll` via `ProtocolDeployBase._deployCREExecutors` — requires `KEYSTONE_FORWARDER`, `CHAIN_SELECTOR`, `MAX_REPORT_AGE`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → bind workflow identity → enable `writeReport`. Set `strategyDepositCooldown` > 0 before granting keeper roles to new addresses
 
 #### **Testing Infrastructure**
 - **Unit Tests**: Individual contract testing with mocking (`test/unit/`)
-  - `AMM.t.sol`, `Controller.t.sol`, `EVE.t.sol`, `ExitQueue.t.sol`, `StrategyManager.t.sol`, `Oracle.t.sol`, `Converter.t.sol`, `UniCLStrat.t.sol`, `CREQueueExecutor.t.sol`, `CREStrategyExecutor.t.sol`
+  - `AMM.t.sol`, `Controller.t.sol`, `EVE.t.sol`, `ExitQueue.t.sol`, `StrategyManager.t.sol`, `Oracle.t.sol`, `Converter.t.sol`, `UniCLStrat.t.sol`, `CREQueueExecutor.t.sol`; fork: `CREKeystoneMetadata.t.sol`
 - **Integration Tests**: Cross-contract interaction testing (`test/integration/`)
   - `DeploymentTest.t.sol`, `ETHFlowTest.t.sol`, `UpgradeSimulation.t.sol`, `ConverterStrategyManagerIntegration.t.sol`
 - **Fuzzing**: Bounded input testing for edge cases (`test/fuzz/`)
@@ -516,7 +521,7 @@ graph TB
 | UniCLStrat | ✅ Complete | Static/Immutable Strategy | Uniswap V3 concentrated liquidity, TWAP NAV, Converter-delegated swaps with oracle-bounded quotes, exact-output WETH top-ups with balance fallback |
 | Oracle | ✅ Complete | Upgradeable | Price feeds, staleness checks, token management, direct token-to-token convert() cross-rate |
 | CREQueueExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for the redemption queue: affordable-prefix batch processing + guarded batch pricing, Keystone-gated onReport, untrusted report re-validation |
-| CREStrategyExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for strategies: rebalance / withdraw-shortfall / deposit-idle / sync with on-chain recomputed amounts, Keystone-gated onReport |
+| CREStrategyExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for strategies: rebalance / withdraw-shortfall / provide-exit-liquidity / deposit-excess / harvest / sync with on-chain recomputed amounts, Keystone-gated onReport |
 | Testing | ✅ Complete | Comprehensive | Unit, integration, fuzzing, mocking |
 
 ## Future Architecture Overview

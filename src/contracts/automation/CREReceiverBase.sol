@@ -103,9 +103,10 @@ abstract contract CREReceiverBase is ICREReceiverBase, RegistryClient, Pausable,
         Envelope memory e = abi.decode(report, (Envelope));
         if (e.chainSelector != CHAIN_SELECTOR) revert CREReceiverWrongChain();
         if (e.sequence <= lastSequence) revert CREReceiverReplayedSequence();
-        if (e.observedAt > block.timestamp || block.timestamp - e.observedAt > MAX_REPORT_AGE) {
-            revert CREReceiverStaleReport();
-        }
+        // Two distinct failure modes: a future observation is a malformed / clock-skewed
+        // report, a too-old one is genuine staleness. Keep them separately diagnosable.
+        if (e.observedAt > block.timestamp) revert CREReceiverFutureTimestamp();
+        if (block.timestamp - e.observedAt > MAX_REPORT_AGE) revert CREReceiverStaleReport();
         lastSequence = e.sequence;
 
         _processReport(e.action, e.params);

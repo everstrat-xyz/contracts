@@ -10,11 +10,11 @@ import {CREStrategyExecutor} from "../src/contracts/automation/CREStrategyExecut
 import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
 
 /**
- * @title DeployKeeperExecutors
+ * @title DeployCREExecutors
  * @notice Modular deploy step: deploys both CRE keeper executors, registers them on the
  *         Registry address book, and optionally grants KEEPER_ROLE.
  *
- * @dev Shared implementation lives in {ProtocolDeployBase-_deployKeeperExecutors}; DeployAll
+ * @dev Shared implementation lives in {ProtocolDeployBase-_deployCREExecutors}; DeployAll
  *      calls the same helper. Run this after core Registry wiring and before
  *      FinalizeProtocolDeploy (the deployer must still hold ADMIN_ROLE), or schedule
  *      registration / role grants through the 48h admin timelock in production.
@@ -41,13 +41,16 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *           `setExpectedWorkflowId`.
  *        3. Enable workflow `writeReport`.
  *        4. Before granting KEEPER_ROLE to anything new: set `strategyDepositCooldown` > 0.
- *        5. Keep a manual multisig KEEPER_ROLE as permanent break-glass.
  *
  *      SECURITY: never grant KEEPER_ROLE to Chainlink infra or a deployer EOA in
- *      production — only to the executor contracts (and optional break-glass multisig).
+ *      production. This script grants it to the two executor contracts and to nothing
+ *      else. A manual break-glass keeper multisig is NOT deployed here and is NOT a
+ *      default: it is an opt-in governance decision with its own timelocked proposal —
+ *      read `docs/FREEZE_RUNBOOK.md` §0.1 (rationale, risk surface, containment via
+ *      `Controller.pause()`, signer policy) before proposing it.
  *      Executors reject reports until workflow identity is bound.
  */
-contract DeployKeeperExecutors is ProtocolDeployBase {
+contract DeployCREExecutors is ProtocolDeployBase {
     function run() external returns (CREQueueExecutor queueExecutor, CREStrategyExecutor strategyExecutor) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerPrivateKey);
@@ -65,14 +68,14 @@ contract DeployKeeperExecutors is ProtocolDeployBase {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        KeeperExecutors memory keepers = _deployKeeperExecutors(registry, grantKeeperRole);
+        CREExecutors memory executors = _deployCREExecutors(registry, grantKeeperRole);
 
         vm.stopBroadcast();
 
-        _verifyKeeperExecutors(registry, keepers, grantKeeperRole);
+        _verifyCREExecutors(registry, executors, grantKeeperRole);
 
-        queueExecutor = keepers.queueExecutor;
-        strategyExecutor = keepers.strategyExecutor;
+        queueExecutor = executors.queueExecutor;
+        strategyExecutor = executors.strategyExecutor;
 
         console.log("CREQueueExecutor:", address(queueExecutor));
         console.log("CREStrategyExecutor:", address(strategyExecutor));

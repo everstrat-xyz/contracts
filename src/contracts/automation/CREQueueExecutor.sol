@@ -174,12 +174,23 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
 
     // ============ Internal ============
 
+    /**
+     * @notice Whether the cursor may advance past `_batchId` without work being lost.
+     * @dev `ExitQueue.priceBatch` sets `canBeProcessed` and `pricedAt` in the same write, so
+     * `canBeProcessed` alone is the "is priced" predicate (`pricedAt == 0` is the same check
+     * and is therefore not repeated). The unpriced guard comes FIRST so the helper is correct
+     * for any `_batchId`, not just the `_batchId < currentBatchId` range the callers use: an
+     * unpriced batch — the current one, or any future id — is never skippable, even when it
+     * is still empty, because it can still receive requests and must be priced first.
+     */
     function _isBatchSkippable(IExitQueue _queue, uint256 _batchId) internal view returns (bool) {
+        (bool canBeProcessed,,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
+        if (!canBeProcessed) return false;
+
         if (_queue.unprocessedUsersCount(_batchId) == 0) return true;
 
-        (bool canBeProcessed,,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
-        if (!canBeProcessed || pricedAt == 0) return false;
-
+        // Priced but past the processing window: users may self-serve via the ExitQueue
+        // escape hatch, so the keeper stops blocking on it.
         return block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME();
     }
 

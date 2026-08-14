@@ -198,8 +198,64 @@ contract CREQueueExecutorTest is ProtocolTestBase, CRETestUtils {
         executor.onReport(_metadata(), report);
     }
 
+    /// @dev A future `observedAt` is a malformed / clock-skewed report, not staleness. The two
+    ///      carry distinct errors so alerting can tell a bad workflow clock from a slow DON.
+    function test_OnReport_FutureTimestamp() public {
+        uint256 batchId = _queueExit(user, EXIT_ETH);
+        _warpPastMinBatchAge();
+        bytes memory report = _encodeReport(
+            TEST_CHAIN_SELECTOR,
+            1,
+            uint64(block.timestamp + 1),
+            uint8(ICREQueueExecutor.QueueAction.PriceBatch),
+            abi.encode(batchId)
+        );
+        vm.prank(forwarder);
+        vm.expectRevert(ICREReceiverBase.CREReceiverFutureTimestamp.selector);
+        executor.onReport(_metadata(), report);
+    }
+
     function test_SupportsIReceiverInterface() public view {
         assertTrue(executor.supportsInterface(type(IReceiver).interfaceId));
+    }
+
+    // ============ Cursor skippability ============
+
+    /// @dev `_isBatchSkippable` checks "is priced" FIRST. An unpriced batch — including an
+    ///      empty current batch — must never be skipped: it can still receive requests and
+    ///      has to be priced before the cursor may move past it.
+    function test_NextLiveBatchId_DoesNotSkipUnpricedCurrentBatch() public view {
+        // Nothing queued yet: batch 1 is current, unpriced, and empty.
+        assertEq(exitQueue.currentBatchId(), 1);
+        assertEq(exitQueue.unprocessedUsersCount(1), 0);
+        assertEq(executor.nextLiveBatchIdToProcess(), 1);
+        assertEq(executor.nextBatchIdToProcess(), 1);
+    }
+
+    /// @dev A priced batch with no unprocessed users is fully settled — the cursor advances.
+    function test_NextLiveBatchId_SkipsFullySettledBatch() public {
+        uint256 batchId = _queueExit(user, EXIT_ETH);
+        _warpPastMinBatchAge();
+        _onReport(uint8(ICREQueueExecutor.QueueAction.PriceBatch), abi.encode(batchId));
+        _onReport(uint8(ICREQueueExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
+
+        assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
+        assertGt(executor.nextLiveBatchIdToProcess(), batchId);
+    }
+
+    /// @dev A priced batch past MAX_BATCH_PROCESSING_TIME is skippable — users self-serve via
+    ///      the ExitQueue escape hatch, so the keeper stops blocking the cursor on it.
+    function test_NextLiveBatchId_SkipsExpiredBatch() public {
+        uint256 batchId = _queueExit(user, EXIT_ETH);
+        _warpPastMinBatchAge();
+        _onReport(uint8(ICREQueueExecutor.QueueAction.PriceBatch), abi.encode(batchId));
+
+        // Still inside the processing window: real work, cursor stays put.
+        assertEq(executor.nextLiveBatchIdToProcess(), batchId);
+        assertGt(exitQueue.unprocessedUsersCount(batchId), 0);
+
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+        assertGt(executor.nextLiveBatchIdToProcess(), batchId);
     }
 
     // ============ Actions ============

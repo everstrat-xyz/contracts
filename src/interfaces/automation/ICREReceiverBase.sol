@@ -45,7 +45,10 @@ interface ICREReceiverBase is IReceiver {
 
     // EverStrat Envelope / config errors
     error CREReceiverWrongChain();
+    /// @notice `Envelope.observedAt` is older than `MAX_REPORT_AGE`
     error CREReceiverStaleReport();
+    /// @notice `Envelope.observedAt` is in the future relative to `block.timestamp`
+    error CREReceiverFutureTimestamp();
     error CREReceiverReplayedSequence();
     error CREReceiverInvalidMetadata();
     error CREReceiverZeroAddress();

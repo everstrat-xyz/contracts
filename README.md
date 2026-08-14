@@ -693,7 +693,7 @@ smart-contracts/
 │   ├── DeployOracle.s.sol
 │   ├── DeployConverter.s.sol
 │   ├── DeployUniswapV3ConverterAdapter.s.sol  # Optional UniCL path (not in DeployAll)
-│   ├── DeployKeeperExecutors.s.sol
+│   ├── DeployCREExecutors.s.sol
 │   ├── DeployUniCLStrat.s.sol
 │   └── FinalizeProtocolDeploy.s.sol
 ├── lib/                          # Dependencies
@@ -848,9 +848,12 @@ Registry-centric deployment is documented in [`mermaid/deployment-architecture.m
 | `DAO_TREASURY_ADDRESS` | `DeployAll`, `DeployAMM` | **Required.** Performance-fee EVE recipient |
 | `PERFORMANCE_FEE_BPS` | `DeployAll`, `DeployAMM` | **Required.** Initial fee rate in bps; `0` disables fees |
 | `TIMELOCK_ADMIN_DELAY` | `DeployRegistry`, `DeployAll` | Optional. Admin timelock min delay in seconds; defaults to 48h (sole `envOr` exception) |
-| `EXIT_LIQUIDITY_TARGET_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
-| `CONTROLLER_RESERVE_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
-| `GRANT_KEEPER_ROLE` | `DeployKeeperExecutors` | **Required** bool. `true` grants KEEPER_ROLE in-script; `false` defers to timelock |
+| `EXIT_LIQUIDITY_TARGET_ETH` | `DeployAll`, `DeployCREExecutors` | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
+| `CONTROLLER_RESERVE_ETH` | `DeployAll`, `DeployCREExecutors` | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
+| `KEYSTONE_FORWARDER` | `DeployAll`, `DeployCREExecutors` | **Required.** Chainlink-managed KeystoneForwarder (immutable on CRE receivers) |
+| `CHAIN_SELECTOR` | `DeployAll`, `DeployCREExecutors` | **Required** (uint64). CCIP chain selector for the CRE Envelope |
+| `MAX_REPORT_AGE` | `DeployAll`, `DeployCREExecutors` | **Required** (uint64, > 0). Max Envelope `observedAt` age in seconds |
+| `GRANT_KEEPER_ROLE` | `DeployCREExecutors` | **Required** bool. `true` grants KEEPER_ROLE in-script; `false` defers to timelock |
 | `PRICE_FEED` | `DeployAll`, `DeployOracle` | Chainlink ETH/USD feed — must be USD-quoted; scripts assert `description()` ends with `" / USD"` |
 | `WHITELIST_SIGNER_ADDRESS` | `DeployAll`, `DeployWhitelist` | **Required.** Initial invite-signer key; explicit `address(0)` postpones seeding |
 | `WETH_ADDRESS` | `DeployAll`, `DeployConverter`, … | **Required.** WETH |
@@ -869,6 +872,9 @@ export PERFORMANCE_FEE_BPS=0         # 0 = fees disabled
 # optional: export TIMELOCK_ADMIN_DELAY=172800  # defaults to 48h
 export EXIT_LIQUIDITY_TARGET_ETH=0   # wei; 0 = immediate exits disabled
 export CONTROLLER_RESERVE_ETH=0      # wei; 0 = no Controller float
+export KEYSTONE_FORWARDER=<keystone_forwarder>
+export CHAIN_SELECTOR=<ccip_chain_selector>
+export MAX_REPORT_AGE=<max_report_age_seconds>
 export WHITELIST_SIGNER_ADDRESS=<invite_signer_or_zero>
 export WETH_ADDRESS=<weth>
 
@@ -884,7 +890,7 @@ Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter
 3. `DeployConverter.s.sol` — registers the Converter, grants `CONVERTER_CALLER_MANAGER_ROLE` (required by `StrategyManager.addStrategy`). Does **not** call `setAllowedAdapter`
 4. `DeployWhitelist.s.sol` — registers `WHITELIST`, optionally seeds `WHITELIST_SIGNER_ADDRESS` (required env; `address(0)` postpones seeding)
 5. `DeployAMM.s.sol` — registers StrategyManager + AMM, grants `MINTER_ROLE` to BOTH (deployer keeps ADMIN for remaining steps)
-6. `DeployKeeperExecutors.s.sol` — registers both keeper executors and applies `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH`; required `GRANT_KEEPER_ROLE` (`true` grants in-script, `false` defers grants to the admin timelock before finalize)
+6. `DeployCREExecutors.s.sol` — deploys CRE receivers with `KEYSTONE_FORWARDER` / `CHAIN_SELECTOR` / `MAX_REPORT_AGE`, registers both under `QUEUE_KEEPER_EXECUTOR` / `STRATEGY_KEEPER_EXECUTOR`, applies `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH`; required `GRANT_KEEPER_ROLE` (`true` grants in-script, `false` defers grants to the admin timelock before finalize)
 7. `FinalizeProtocolDeploy.s.sol` — required final step; unconditionally renounces the deployer's bootstrap Registry ADMIN and VERIFIES every critical grant (`SECURITY_ROLE` → security multisig, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors), failing loudly on any skipped or mis-granted step
 8. Optional UniCL path (same after `DeployAll`):
    - `DeployUniswapV3ConverterAdapter.s.sol` — adapter bytecode only (needs Oracle; no ADMIN); export `SWAP_ADAPTER_ADDRESS`
@@ -906,7 +912,7 @@ forge script script/DeployOracle.s.sol:DeployOracle --rpc-url $RPC_URL --broadca
 forge script script/DeployConverter.s.sol:DeployConverter --rpc-url $RPC_URL --broadcast
 forge script script/DeployWhitelist.s.sol:DeployWhitelist --rpc-url $RPC_URL --broadcast
 forge script script/DeployAMM.s.sol:DeployAMM --rpc-url $RPC_URL --broadcast
-forge script script/DeployKeeperExecutors.s.sol:DeployKeeperExecutors --rpc-url $RPC_URL --broadcast
+forge script script/DeployCREExecutors.s.sol:DeployCREExecutors --rpc-url $RPC_URL --broadcast
 forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-url $RPC_URL --broadcast
 # UniCL: DeployUniswapV3ConverterAdapter → timelock setAllowedAdapter (+ paired feed /
 # optional addSupportedERC20) → DeployUniCLStrat → timelock addStrategy
@@ -934,7 +940,7 @@ forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-ur
 
 - **Registry ADMIN_ROLE**: Register contracts (`Auth`), grant/revoke roles, Oracle feed configuration, Whitelist invite-period admin, pause/upgrade modules
 - **SECURITY_ROLE** (on Registry): Instant pause / emergency unwind / `Whitelist.removeSigner`
-- **KEEPER_ROLE** (on Registry): Controller keeper automation
+- **KEEPER_ROLE** (on Registry): Controller keeper automation. Deployment grants it to `CREQueueExecutor` and `CREStrategyExecutor` and to nothing else. A manual break-glass keeper multisig is **opt-in only** — its rationale, risk surface, containment path, and signer policy live in [`docs/FREEZE_RUNBOOK.md` §0.1](docs/FREEZE_RUNBOOK.md)
 - **MINTER_ROLE** (on Registry): EVE mint/burn (granted to AMM)
 - **Registered callers**: ExitQueue accepts registered AMM/Controller; StrategyManager accepts registered Controller; AMM resolves registered `WHITELIST` for entry gating
 - **Deployer cleanup**: Registry constructor grants temporary ADMIN to deployer; always renounced via `FinalizeProtocolDeploy` or `DeployAll` so ADMIN_ROLE ends held only by the admin timelock
