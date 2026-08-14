@@ -700,8 +700,6 @@ smart-contracts/
 │   ├── forge-std/               # Foundry testing utilities
 │   ├── openzeppelin-contracts-upgradeable/ # OpenZeppelin upgradeable contracts
 │   └── chainlink-evm/          # Chainlink oracle contracts
-├── format.sh                    # Format code using GitHub CI config
-├── check-format.sh              # Check formatting using GitHub CI config
 └── foundry.toml                 # Foundry configuration
 ```
 
@@ -801,26 +799,12 @@ forge test --match-test "testFuzz_"
 
 This project uses Foundry's `forge fmt` for code formatting, configured to match GitHub Actions CI.
 
-### Quick Formatting
-
 **Format all code:**
-```bash
-./format.sh
-```
-
-**Check formatting (like CI does):**
-```bash
-./check-format.sh
-```
-
-### Manual Formatting
-
-**Format code manually:**
 ```bash
 FOUNDRY_PROFILE=ci forge fmt src/ test/
 ```
 
-**Check formatting manually:**
+**Check formatting (like CI does):**
 ```bash
 FOUNDRY_PROFILE=ci forge fmt --check src/ test/
 ```
