@@ -86,7 +86,7 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
      * @notice Mapping from user to claimable ETH amount for implementing
      * pull-over-push pattern.
      */
-    mapping(address user => uint256) public claimableBalances;
+    mapping(address user => uint256 claimableETH) public claimableBalances;
 
     // ============ Constructor ============
 
