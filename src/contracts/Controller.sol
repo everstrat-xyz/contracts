@@ -330,9 +330,9 @@ contract Controller is
      */
     function priceBatch() external onlyAuthRole(Auth.KEEPER_ROLE) whenNotPaused nonReentrant {
         IRegistry registry_ = registry();
-        // Batches settle at the same price as immediate exit(): the base price
-        // (NAV / supply), so queued redemptions are paid out against the assets
-        // backing them.
+        // Batches settle at the same price as immediate exit(): the live base price
+        // (NAV−L) / (supply−escrow). This batch is still equity at the moment of the
+        // read; already-priced in-window batches are already deducted.
         ExitQueue(payable(registry_.exitQueue())).priceBatch(AMM(payable(registry_.amm())).eveBasePriceInETH());
     }
 

@@ -32,6 +32,7 @@ interface ICREStrategyExecutor is ICREReceiverBase {
     error KeeperExecutorUnknownAction();
     error KeeperExecutorInvalidConfig();
 
+    /// @notice Gas-bounded scan of priced batches. Matches `CREQueueExecutor.MAX_BATCH_SCAN`.
     function MAX_BATCH_SCAN() external pure returns (uint256);
     function MAX_USERS_COST_SCAN() external pure returns (uint256);
 

@@ -256,6 +256,19 @@ contract CREQueueExecutorTest is ProtocolTestBase, CRETestUtils {
 
         vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
         assertGt(executor.nextLiveBatchIdToProcess(), batchId);
+        assertEq(executor.affordableRequests(batchId), 0);
+
+        _seq += 1;
+        bytes memory report = _encodeReport(
+            TEST_CHAIN_SELECTOR,
+            _seq,
+            uint64(block.timestamp),
+            uint8(ICREQueueExecutor.QueueAction.ProcessRequests),
+            abi.encode(batchId, uint256(0), uint256(1))
+        );
+        vm.prank(forwarder);
+        vm.expectRevert(ICREQueueExecutor.KeeperExecutorNoUpkeepNeeded.selector);
+        executor.onReport(_metadata(), report);
     }
 
     // ============ Actions ============

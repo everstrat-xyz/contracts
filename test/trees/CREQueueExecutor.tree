@@ -86,6 +86,8 @@ CREQueueExecutor::nextLiveBatchIdToProcess()
 CREQueueExecutor::affordableRequests(uint256 _batchId)
 ├── Given the batch is not priced
 │   └── It should return 0
+├── Given the batch is priced but past MAX_BATCH_PROCESSING_TIME
+│   └── It should return 0 (pull is forbidden; live NAV has already dropped the liability)
 ├── Given the batch has no unprocessed users
 │   └── It should return 0
 ├── Given a user's request is slippage-protected out (finalEvePrice relatively below the

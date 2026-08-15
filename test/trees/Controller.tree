@@ -395,7 +395,7 @@ Controller::priceBatch()
 │   ├── When AMM key is not registered in Registry
 │   │   └── It should revert with RegistryContractNotRegistered
 │   ├── When contract is not paused
-│   │   ├── It should get the base EVE price from AMM (NAV / supply via amm.eveBasePriceInETH())
+│   │   ├── It should get the live base EVE price from AMM (eveBasePriceInETH(): live NAV / live supply; this batch is still equity)
 │   │   ├── It should call exitQueue.priceBatch() with the price
 │   │   └── It should price the current batch
 │   ├── When contract is paused
@@ -415,6 +415,8 @@ Controller::processRequest(uint256 _batchId, address _user)
 │   │   └── It should revert (ExitQueue will revert with ExitQueueRequestAlreadyProcessed)
 │   ├── When batch is not priced yet
 │   │   └── It should revert (ExitQueue will revert with ExitQueueBatchCannotBeProcessed)
+│   ├── When batch is priced but MAX_BATCH_PROCESSING_TIME exceeded
+│   │   └── It should revert (ExitQueue will revert with ExitQueueBatchExpired)
 │   ├── When contract has insufficient ETH balance (for ethToRedeem)
 │   │   └── It should revert with ControllerInsufficientBalance
 │   ├── When price slippage exceeds tolerance (finalPrice < requestPrice * (1 - tolerance))

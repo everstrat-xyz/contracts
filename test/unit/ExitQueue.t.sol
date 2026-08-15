@@ -74,6 +74,10 @@ contract ExitQueueTest is ProtocolTestBase {
         assertTrue(registry.hasRole(Auth.ADMIN_ROLE, admin));
         assertEq(address(exitQueue.registry()), address(registry));
         assertEq(exitQueue.version(), "1.0.0");
+        assertEq(exitQueue.liveScanFromBatchId(), INITIAL_BATCH_ID);
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
     }
 
     function test_Initialize_ZeroRegistry() public {
@@ -1050,5 +1054,134 @@ contract ExitQueueTest is ProtocolTestBase {
         (bool processed, bool closedDueToSlippage,,,) = exitQueue.requestInfo(batchId, user1);
         assertTrue(processed);
         assertTrue(closedDueToSlippage);
+    }
+
+    function test_LiveRedemptionOffsets_UnpricedIsZero() public {
+        vm.prank(amm);
+        exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
+    }
+
+    function test_LiveRedemptionOffsets_AfterPriceBatch() public {
+        vm.prank(amm);
+        exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+
+        vm.prank(controller);
+        exitQueue.priceBatch(EVE_PRICE_1);
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(escrowed, TOKENS_TO_BURN_1);
+        assertEq(liability, Math.convertAssets(TOKENS_TO_BURN_1, EVE_PRICE_1));
+        assertEq(exitQueue.liveScanFromBatchId(), INITIAL_BATCH_ID);
+    }
+
+    function test_LiveRedemptionOffsets_PullReducesOffsets() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+
+        vm.prank(controller);
+        exitQueue.priceBatch(EVE_PRICE_1);
+
+        vm.prank(amm);
+        exitQueue.pullRequest(batchId, user1);
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
+        assertEq(exitQueue.liveScanFromBatchId(), INITIAL_BATCH_ID + 1);
+    }
+
+    function test_LiveRedemptionOffsets_LapsesAfterExpiryWithoutWrite() public {
+        vm.prank(amm);
+        exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+
+        vm.prank(controller);
+        exitQueue.priceBatch(EVE_PRICE_1);
+
+        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
+        // lo is not advanced until a write
+        assertEq(exitQueue.liveScanFromBatchId(), INITIAL_BATCH_ID);
+    }
+
+    function test_PullRequest_RevertsAfterExpiry() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+
+        vm.prank(controller);
+        exitQueue.priceBatch(EVE_PRICE_1);
+
+        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
+
+        vm.prank(amm);
+        vm.expectRevert(IExitQueue.ExitQueueBatchExpired.selector);
+        exitQueue.pullRequest(batchId, user1);
+    }
+
+    function test_CloseRequest_AfterExpiryAdvancesLo() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+
+        vm.prank(controller);
+        exitQueue.priceBatch(EVE_PRICE_1);
+
+        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
+
+        vm.prank(amm);
+        exitQueue.closeRequest(batchId, user1);
+
+        assertEq(exitQueue.liveScanFromBatchId(), INITIAL_BATCH_ID + 1);
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
+    }
+
+    function test_PriceBatch_RevertsWhenLiveWindowFull() public {
+        uint256 cap = exitQueue.MAX_LIVE_PRICED_BATCHES();
+        for (uint256 i; i < cap; ++i) {
+            vm.prank(amm);
+            exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+            vm.prank(controller);
+            exitQueue.priceBatch(EVE_PRICE_1);
+        }
+
+        vm.prank(amm);
+        exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        vm.prank(controller);
+        vm.expectRevert(IExitQueue.ExitQueueTooManyLivePricedBatches.selector);
+        exitQueue.priceBatch(EVE_PRICE_1);
+    }
+
+    function test_PriceBatch_AfterExpiryFreesWidthCap() public {
+        uint256 cap = exitQueue.MAX_LIVE_PRICED_BATCHES();
+        for (uint256 i; i < cap; ++i) {
+            vm.prank(amm);
+            exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+            vm.prank(controller);
+            exitQueue.priceBatch(EVE_PRICE_1);
+        }
+
+        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
+
+        vm.prank(amm);
+        exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        vm.prank(controller);
+        exitQueue.priceBatch(EVE_PRICE_1);
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(escrowed, TOKENS_TO_BURN_1);
+        assertEq(liability, Math.convertAssets(TOKENS_TO_BURN_1, EVE_PRICE_1));
+    }
+
+    function test_PushRequest_TokensOverflow() public {
+        vm.prank(amm);
+        vm.expectRevert(IExitQueue.ExitQueueTokensOverflow.selector);
+        exitQueue.pushRequest(user1, EVE_PRICE_1, uint256(type(uint128).max) + 1, PRICE_TOLERANCE_1_PCT);
     }
 }

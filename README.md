@@ -72,11 +72,11 @@ A static (immutable) bonding curve contract that handles ETH deposits and EVE to
 - **Static Contract:** Immutable "code is law" implementation
 - **Native ETH Support:** Users deposit and redeem native ETH (no ERC20 tokens)
 - **Bonding Curve Pricing:** Dynamic pricing based on NAV and connector weight
-- **Dual Pricing:** Base price (NAV/supply) and Premium price (NAV/adjusted supply) - both calculated in ETH terms
+- **Dual Pricing:** Base price (`liveNAV / liveSupply`) and Premium price (`liveNAV / (liveSupply · cw)`) — live NAV excludes in-window priced ExitQueue liability; live supply excludes in-window escrowed EVE. Unpriced queued tokens stay in the denominator.
 - **Oracle Usage:** Oracle is NOT used in enter/exit operations (hot path). Oracle is only used for:
   - Bootstrap minimum deposit validation (converts ETH to USD to check MIN_INITIAL_DEPOSIT_USD)
   - USD price view functions (`eveBasePriceInUSD()`, `evePremiumPriceInUSD()`)
-- **Redemption Queue:** Queued redemption system via ExitQueue for insufficient liquidity
+- **Redemption Queue:** Queued redemption system via ExitQueue for insufficient liquidity. Unpriced queued EVE is still cancellable equity (NAV/supply unchanged). After `priceBatch`, live NAV deducts `liabilityETH` and live supply deducts escrowed tokens until pull, slippage close, or the 3-day window lapses
 - **Batch Exit Minimum:** `minBatchExitETH` (default 0.001 ETH) enforced on the queued exit path only; immediate exit has no minimum. Admin-configurable via `setMinBatchExitETH()` (0 disables the check; capped at `MIN_BATCH_EXIT_ETH_UPPER_BOUND` = 0.05 ETH).
 - **Pull-over-Push Redemption:** Processed redemptions credit ETH to `claimableBalances` rather than pushing directly to the user, preventing malicious recipients from blocking batch processing
 - **Free Balance Tracking:** `freeBalance()` returns `address(this).balance - lockedForClaims`, used for liquidity checks so locked claim funds are never double-counted
@@ -226,7 +226,7 @@ Peers (AMM, StrategyManager, ExitQueue, EVE) are resolved via Registry at call t
 - `provideExitLiquidity(uint256 _amount)`: Sends ETH from Controller to the AMM to fund immediate redemptions; reverts with `ControllerInsufficientBalance` when `_amount > controller.balance`. Driven automatically by the `CREStrategyExecutor`'s `ProvideExitLiquidity` action (AMM float below `exitLiquidityTargetETH` → top up from idle Controller ETH, minimum top-up `minExitLiquidityTopUpETH`)
 
 **Redemption Queue Operations:**
-- `priceBatch()`: Prices the current batch using AMM's base EVE price, making it processable
+- `priceBatch()`: Prices the current batch using AMM's live base EVE price (`eveBasePriceInETH()`, already net of previously priced in-window batches; this batch is still equity at the read), making it processable
 - `processRequest(uint256 _batchId, address _user)`: Processes a single redemption request, handling slippage protection
 - `processRequests(uint256 _batchId)`: Processes all unprocessed requests in a batch
 - `processRequests(uint256 _batchId, uint256 _startIndex, uint256 _endIndex)`: Processes requests in a specific range within a batch
@@ -273,6 +273,8 @@ An upgradeable contract that manages queued redemption requests, allowing users 
 - **Access:** `ADMIN_ROLE` on Registry for pause/unpause/upgrade
 - **Slippage Protection:** Price tolerance checks to protect users from unfavorable price movements
 - **Pausable:** Can be paused by ADMIN_ROLE or SECURITY_ROLE (`pushRequest`, `pullRequest`, and `priceBatch` are paused; `closeRequest` works when paused for emergency withdrawals)
+- **Live share-price offsets:** `liveRedemptionOffsets()` returns `(liabilityETH, escrowedSupply)` for in-window priced, unfinished batches. StrategyManager deducts liability from NAV; AMM and fee mint deduct escrowed supply. Unpriced requests and batches past `MAX_BATCH_PROCESSING_TIME` contribute `(0, 0)` — liability lapses on the clock with no reset tx. Scan window is `[liveScanFromBatchId, currentBatchId)` (equals `currentBatchId` when empty, including at init). Do not use the CRE batch cursor for NAV.
+- **Live-priced batch cap:** `MAX_LIVE_PRICED_BATCHES = 25` (matches `CREQueueExecutor.MAX_BATCH_SCAN`). `priceBatch` reverts `ExitQueueTooManyLivePricedBatches` if the live-scan width would exceed it. A DoS / `enter()` gas bound, not a cadence target — CRE `minBatchAge` vs the 3-day window implies ~3 overlapping batches.
 - **Version Tracking:** Returns "1.0.0"
 - **Upgrade Safety:** Includes storage gaps to prevent storage collisions
 
@@ -290,19 +292,22 @@ function priceBatch(uint256 _evePrice) external
 function batchInfo(uint256 _batchId) external view returns (bool canBeProcessed, uint256 finalEvePrice, uint256 totalTokensToBurn, uint256 createdAt, uint256 pricedAt)
 function requestInfo(uint256 _batchId, address _user) external view returns (bool processed, bool closedDueToSlippage, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance)
 function requestCanBeClosed(uint256 _batchId, address _user) external view returns (bool)
+function liveRedemptionOffsets() external view returns (uint256 liabilityETH, uint256 escrowedSupply)
+function liveScanFromBatchId() external view returns (uint256)
 function MAX_BATCH_PROCESSING_TIME() external pure returns (uint256)
+function MAX_LIVE_PRICED_BATCHES() external pure returns (uint256)
 function unprocessedUsersCount(uint256 _batchId) external view returns (uint256)
 function unprocessedUsers(uint256 _batchId) external view returns (address[] memory)
 function unprocessedUsers(uint256 _batchId, uint256 _startIndex, uint256 _endIndex) external view returns (address[] memory)
 ```
 
 **Batch Lifecycle:**
-1. **Request Creation:** AMM calls `pushRequest()` to queue a redemption request in the current batch
-2. **Batch Pricing:** Controller calls `priceBatch()` to set the final EVE price and `pricedAt` timestamp, and make the batch processable (not callable while ExitQueue or Controller is paused)
-3. **Request Processing:** AMM calls `pullRequest()` to process individual requests, with slippage checks
+1. **Request Creation:** AMM calls `pushRequest()` to queue a redemption request in the current batch (EVE is transferred to the AMM, not burned — still cancellable equity). Reverts `ExitQueueTokensOverflow` if `totalTokensToBurn` would exceed `uint128`.
+2. **Batch Pricing:** Controller calls `priceBatch()` to set the final EVE price and `pricedAt` timestamp, and make the batch processable (not callable while ExitQueue or Controller is paused). From this moment live NAV deducts `remainingTokens * finalEvePrice` and live supply deducts remaining escrowed EVE. Reverts `ExitQueueTooManyLivePricedBatches` if `[liveScanFromBatchId, currentBatchId)` already has `MAX_LIVE_PRICED_BATCHES` ids.
+3. **Request Processing (in-window only):** AMM calls `pullRequest()` to process individual requests, with slippage checks. After `MAX_BATCH_PROCESSING_TIME`, `pullRequest` reverts `ExitQueueBatchExpired` — live NAV has already dropped the liability.
 4. **Manual Cancellation:** AMM calls `closeRequest()` to allow users to cancel requests (works even when paused)
-   - **Request closure restriction:** After a batch is priced (`canBeProcessed == true`), requests cannot be closed **within** `MAX_BATCH_PROCESSING_TIME` of `pricedAt`. Within that window, all requests must be processed via `pullRequest()`. This ensures liquidity commitment and prevents users from gaming the system by canceling after seeing the final price.
-   - **Upper bound / escape hatch:** If more than `MAX_BATCH_PROCESSING_TIME` has passed since the batch was priced, users may close their requests via `closeRequest()`. This allows users to recover if the AMM/keeper does not process the batch in time. Use `batchInfo()` for `pricedAt` (timestamp when the batch was priced) and `requestCanBeClosed(batchId, user)` to check if a request can be closed before calling `cancelRedemption()`.
+   - **Request closure restriction:** After a batch is priced (`canBeProcessed == true`), requests cannot be closed **within** `MAX_BATCH_PROCESSING_TIME` of `pricedAt`. Within that window they must be settled via `pullRequest()` (or wait out the window). This prevents users from gaming the system by canceling after seeing the final price.
+   - **Upper bound / escape hatch:** If more than `MAX_BATCH_PROCESSING_TIME` has passed since the batch was priced, `pullRequest` is forbidden and users may close via `closeRequest()`. Liability has already lapsed in `liveRedemptionOffsets()` with no reset tx. Use `batchInfo()` for `pricedAt` and `requestCanBeClosed(batchId, user)` to check before calling `cancelRedemption()`.
 
 **Slippage Protection:**
 - When `pullRequest()` is called, the contract checks if the final price has dropped below the user's tolerance threshold
@@ -316,9 +321,12 @@ function unprocessedUsers(uint256 _batchId, uint256 _startIndex, uint256 _endInd
 - `ExitQueueBatchIsEmpty`: Thrown when batch is empty and cannot be priced
 - `ExitQueueRequestNotInBatch`: Thrown when request is not in batch
 - `ExitQueueRequestAlreadyProcessed`: Thrown when request is already processed
-- `ExitQueueRequestCannotBeClosed`: Thrown when request cannot be closed (batch is priced and still within `MAX_BATCH_PROCESSING_TIME` of `pricedAt`, so the request must be pulled by the AMM)
+- `ExitQueueRequestCannotBeClosed`: Thrown when request cannot be closed (batch is priced and still within `MAX_BATCH_PROCESSING_TIME` of `pricedAt`)
 - `ExitQueueRequestAlreadyInBatch`: Thrown when request is already in batch
 - `ExitQueueInvalidRange`: Thrown when invalid range is provided
+- `ExitQueueBatchExpired`: Thrown when `pullRequest` is called after `MAX_BATCH_PROCESSING_TIME` (live NAV has already dropped the liability)
+- `ExitQueueTooManyLivePricedBatches`: Thrown when pricing would leave more than `MAX_LIVE_PRICED_BATCHES` ids in the live-scan window
+- `ExitQueueTokensOverflow`: Thrown when adding to `totalTokensToBurn` would exceed `uint128`
 
 **Events:**
 - `BatchPriced(uint256 indexed batchId)`
@@ -344,12 +352,12 @@ An upgradeable contract that manages external investment strategies and NAV calc
 **Features:**
 - **Upgradeable Pattern:** Uses UUPS (Universal Upgradeable Proxy Standard)
 - **Registry-Centric Access:** `ADMIN_ROLE` on Registry for strategy management; registered `CONTROLLER` for fund operations
-- **ETH-First NAV Calculation:** NAV is calculated in ETH terms first (via `strategy.navInETH()`), then converted to USD when needed via Oracle. Total NAV includes NAV from all registered strategies (any reverting `navInETH()` freezes the protocol), StrategyManager's ETH balance (in-flight funds), the Controller's ETH balance (undistributed funds), the AMM's free balance (ETH available for immediate redemptions; excludes `lockedForClaims`), and the ETH value of every whitelisted supported-ERC-20 balance (priced via `Oracle.convert()` with decimals normalized through `IERC20Metadata.decimals()`)
+- **ETH-First NAV Calculation:** NAV is calculated in ETH terms first (via `strategy.navInETH()`), then converted to USD when needed via Oracle. Total NAV includes NAV from all registered strategies (any reverting `navInETH()` freezes the protocol), StrategyManager's ETH balance (in-flight funds), the Controller's ETH balance (undistributed funds), the AMM's free balance (ETH available for immediate redemptions; excludes `lockedForClaims`), and the ETH value of every whitelisted supported-ERC-20 balance (priced via `Oracle.convert()` with decimals normalized through `IERC20Metadata.decimals()`), **minus in-window priced ExitQueue liability** (`liveRedemptionOffsets().liabilityETH`). Unpriced queued EVE is still equity. Liability lapses after `MAX_BATCH_PROCESSING_TIME` with no reset tx. Reverts `StrategyManagerQueuedLiabilityExceedsNAV` if liability exceeds gross NAV.
 - **NAV Fail-Closed:** If any registered strategy's `navInETH()` reverts, `totalNAVInETH()` reverts and enter/exit/pricing halt until the strategy is fixed or force-removed via `forceRemoveStrategy()` (escape hatch for reverting or over-reporting `navInETH()`). Clean removal of an emptied strategy uses `removeStrategy()` (requires a successful dust-NAV read). Supported-ERC-20 pricing follows the same philosophy: a stale/invalid Oracle feed for a whitelisted token with a non-zero balance freezes NAV (escape hatch: `removeSupportedERC20()` by `ADMIN_ROLE` or `SECURITY_ROLE`); zero balances skip the Oracle entirely
 - **Supported-ERC-20 Whitelist:** EnumerableSet of ERC-20 tokens the StrategyManager may hold — e.g. the paired token `UniCLStrat.emergencyExit()` transfers here during an emergency unwind. Whitelisting keeps that value counted in NAV so users cannot enter/exit at prices that ignore recoverable assets. `addSupportedERC20()` is `ADMIN_ROLE`-only (validates non-zero address, code presence, and Oracle priceability); `removeSupportedERC20()` is `ADMIN_ROLE` or `SECURITY_ROLE` (instant stale-feed / dust-NAV escape hatch — allowed even with a non-zero balance; the value drops out of NAV immediately) and makes no external calls so a bricked token cannot block its own removal. Both work while paused. **Future work:** on-chain swap recovery of stranded supported ERC-20s back to native ETH via the shared Converter (`recoverTokenToETH`) is deferred to a follow-up PR — this release ships ERC-20 accounting only.
 - **Strategy Removal:** `removeStrategy()` requires a successful `navInETH()` read and reverts if `nav > MAX_NAV_RESIDUE` (10 wei). A reverting `navInETH()` bubbles up — use `forceRemoveStrategy()` instead. Emits `StrategyRemoved(strategy)`. Callable while paused (unlike `addStrategy()`). Both removal paths share `_deregisterStrategy()`: best-effort `revokeCallerRole` via the Converter (emits `CallerRoleRevokeFailed` on failure); does **not** clear `lastStrategyWithdrawal` (cooldown is wall-clock on the strategy address and must survive remove → re-add); strategy-local LP-fee accounting lives on the strategy, so there is no SM-side fee counter to clear. Strategies must include pending underlying withdrawals in `navInETH()` — see `IStrategy`
 - **Force Removal:** `forceRemoveStrategy()` (`ADMIN_ROLE`, 48h timelock in production) skips the NAV residue check — escape hatch for strategies whose `navInETH()` over-reports or reverts. Reads NAV via `try/catch` for observability only; emits `StrategyForceRemoved(strategy, reportedNAV, navReverted)`; capital recovery via `IStrategy.emergencyExit()`. Does not require the strategy to be paused. Callable while paused.
-- **Performance Fees:** Strategy-local LP-fee accounting (`IStrategy.pendingPerformanceFeeInETH` / `settlePerformanceFee`); StrategyManager orchestrates harvest and mints EVE to `daoTreasury` (bonding-curve dilution, no ETH extraction from strategies). **One EVE mint per harvest batch** at `totalFeeETH * supply / (totalNAV - totalFeeETH)`. Batch harvest wraps each `settlePerformanceFee()` in `try/catch` (`StrategyHarvestFailed` + continue; failed strategies omitted from the mint sum); single-strategy harvest is strict. Keeper/admin entry: `Controller.harvestPerformanceFeeFromStrategy(s)` (`ADMIN_ROLE` or `KEEPER_ROLE`); StrategyManager delegate is registered `CONTROLLER` only. Paginated overload `[startIndex, endIndex)`. Withdrawals batch-harvest accrued fees before withdrawal (same try/catch). Paused strategies report zero pending fees and skip settlement until unpaused; `emergencyExit()` writes off pending local fees (charged = earned after any best-effort accrue) after sweep. `pendingPerformanceFeeInETH` reverts for unregistered strategies. Fees accrue only when `performanceFeeBps > 0`; treasury must be non-zero at init and in `setDaoTreasury()`. Requires `MINTER_ROLE` on Registry.
+- **Performance Fees:** Strategy-local LP-fee accounting (`IStrategy.pendingPerformanceFeeInETH` / `settlePerformanceFee`); StrategyManager orchestrates harvest and mints EVE to `daoTreasury` (bonding-curve dilution, no ETH extraction from strategies). **One EVE mint per harvest batch** at `totalFeeETH * liveSupply / (totalNAV - totalFeeETH)` (`liveSupply = totalSupply - escrowedSupply`; reverts `StrategyManagerEscrowExceedsSupply` if escrow exceeds supply; `totalNAV` is already net of in-window priced liability). Batch harvest wraps each `settlePerformanceFee()` in `try/catch` (`StrategyHarvestFailed` + continue; failed strategies omitted from the mint sum); single-strategy harvest is strict. Keeper/admin entry: `Controller.harvestPerformanceFeeFromStrategy(s)` (`ADMIN_ROLE` or `KEEPER_ROLE`); StrategyManager delegate is registered `CONTROLLER` only. Paginated overload `[startIndex, endIndex)`. Withdrawals batch-harvest accrued fees before withdrawal (same try/catch). Paused strategies report zero pending fees and skip settlement until unpaused; `emergencyExit()` writes off pending local fees (charged = earned after any best-effort accrue) after sweep. `pendingPerformanceFeeInETH` reverts for unregistered strategies. Fees accrue only when `performanceFeeBps > 0`; treasury must be non-zero at init and in `setDaoTreasury()`. Requires `MINTER_ROLE` on Registry.
 - **Peer resolution:** AMM, Controller, Oracle addresses from Registry (`Auth`); `totalNAVInETH()` reverts if `AMM` key not registered
 - **Oracle Integration:** Uses Oracle contract for ETH/USD conversion (only when USD values are needed)
 - **Fund Deposit:** Deposits ETH to strategies proportionally based on safety levels (healthy strategies with `maxDeposit() > 0` only)
@@ -479,7 +487,7 @@ function strategyCount() external view returns (uint256)
 - `StrategyManagerStrategyAlreadyRegistered`, `StrategyManagerStrategyNotRegistered`, `StrategyManagerInvalidNAVValue`
 - `StrategyManagerZeroAddress`, `StrategyManagerNoCode`, `StrategyManagerStrategyNAVResidueTooHigh`
 - `StrategyManagerNoStrategiesRegistered`, `StrategyManagerInvalidRange`, `StrategyManagerInvalidDepositWeight`, `StrategyManagerInvalidWithdrawalWeight`, `StrategyManagerInvalidLength`
-- `StrategyManagerZeroDaoTreasury`, `StrategyManagerInvalidPerformanceFeeBps`, `StrategyManagerFeeMintOverflow`, `StrategyManagerStrategyInDepositCooldown`, `StrategyManagerInvalidStrategyDepositCooldown`
+- `StrategyManagerZeroDaoTreasury`, `StrategyManagerInvalidPerformanceFeeBps`, `StrategyManagerFeeMintOverflow`, `StrategyManagerQueuedLiabilityExceedsNAV`, `StrategyManagerEscrowExceedsSupply`, `StrategyManagerStrategyInDepositCooldown`, `StrategyManagerInvalidStrategyDepositCooldown`
 - `StrategyManagerNoBalanceToRecover`, `StrategyManagerERC20AlreadySupported`, `StrategyManagerERC20NotSupported`, `StrategyManagerERC20NotPriceable`
 - Unregistered `AMM` on Registry: `RegistryContractNotRegistered` when aggregating NAV
 
@@ -936,9 +944,11 @@ forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-ur
   - Sum of all registered strategy NAVs (`strategy.navInETH()`)
   - Controller balance (undistributed ETH awaiting strategy allocation)
   - AMM free balance (ETH available on AMM; excludes `lockedForClaims` committed to pending claims)
+  - ETH value of each whitelisted supported-ERC-20 balance
+  - **Minus** in-window priced ExitQueue liability (`liveRedemptionOffsets().liabilityETH`). Unpriced queued EVE is still equity; liability lapses after `MAX_BATCH_PROCESSING_TIME` with no reset tx. Reverts `StrategyManagerQueuedLiabilityExceedsNAV` if liability exceeds gross NAV.
 - **NAV During Enter**: AMM subtracts `msg.value` from the StrategyManager NAV before pricing. The incoming deposit is already counted in `amm.freeBalance()` at the time of the NAV read; subtracting it ensures the depositor is priced against pre-deposit NAV (i.e., their deposit moves the price for the *next* buyer, not themselves).
-- **Base Price in ETH**: `NAV_total_ETH / EVE_supply` (calculated in ETH terms)
-- **Premium Price in ETH**: `NAV_total_ETH / (EVE_supply * connector_weight)` (calculated in ETH terms)
+- **Base Price in ETH**: `liveNAV / liveSupply` where `liveSupply = totalSupply - escrowedSupply` (in-window priced escrow). Unpriced queued tokens stay in the denominator. Reverts `AMMEscrowExceedsSupply` if escrow exceeds supply.
+- **Premium Price in ETH**: `liveNAV / (liveSupply * connector_weight)` (same live NAV / live supply)
 - **Enter/Exit Operations**: Use ETH prices directly (`_evePremiumPriceInETH()` for enter, `_eveBasePriceInETH()` for exit) - **NO oracle calls in hot path**
 - **USD Prices**: Base and premium prices in USD are derived by converting ETH prices via Oracle (only for view functions)
 - **Oracle Usage**: Chainlink ETH/USD price feed is only used for:
@@ -962,12 +972,12 @@ forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-ur
    - AMM calculates tokens to burn based on base price in ETH (`_eveBasePriceInETH()`) - **no oracle call**
    - If sufficient free balance (`freeBalance() >= ethToRedeem`): immediate redemption (returns 0; no `minBatchExitETH` check)
    - If insufficient: reverts with `AMMTooLowBatchExitETH` when `ethToRedeem < minBatchExitETH` (default 0.001 ETH, admin-tunable up to 0.05 ETH); otherwise queues to ExitQueue (returns batchId)
-   - Keeper (KEEPER_ROLE) calls `Controller.priceBatch()` to price the current batch
-   - Keeper calls `Controller.processRequest()` or `Controller.processRequests()` to process queued redemptions
+   - Keeper (KEEPER_ROLE) calls `Controller.priceBatch()` to price the current batch (settles at live `eveBasePriceInETH()`, which is already net of previously priced in-window batches; this batch is still equity at the read)
+   - Keeper calls `Controller.processRequest()` or `Controller.processRequests()` to process queued redemptions **only while the batch is inside `MAX_BATCH_PROCESSING_TIME`**. After that window `pullRequest` reverts `ExitQueueBatchExpired` and live NAV has already dropped the liability.
    - AMM credits `claimableBalances[user]` with `ethToRedeem` (**pull-over-push**); excess `msg.value` is returned to Controller
    - User calls `AMM.claim()` to pull their ETH 
    - If price slippage exceeds tolerance, request is closed, tokens are refunded, and all `msg.value` is returned to Controller
-   - Users may cancel a queued redemption via `AMM.cancelRedemption(batchId)` before the batch is priced, or after `MAX_BATCH_PROCESSING_TIME` has passed since the batch was priced (escape hatch)
+   - Users may cancel a queued redemption via `AMM.cancelRedemption(batchId)` before the batch is priced, or after `MAX_BATCH_PROCESSING_TIME` has passed since the batch was priced (escape hatch — the only remaining path once pull is forbidden)
 
 ## Upgrading Contracts
 

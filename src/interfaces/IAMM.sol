@@ -162,6 +162,11 @@ interface IAMM {
     error AMMNAVUnderflow();
 
     /**
+     * @notice Escrowed EVE for in-window priced redemptions exceeds `totalSupply`.
+     */
+    error AMMEscrowExceedsSupply();
+
+    /**
      * @notice Caller is not whitelisted (see `Whitelist.isWhitelisted()`). Only gates
      * `enter()`/`enterWithInvite()` — `exit()` is never gated so users can always leave.
      */
@@ -182,24 +187,29 @@ interface IAMM {
 
     /**
      * @notice Gets the current base price per token in terms of ETH.
+     * @dev Uses live NAV / live supply: in-window priced ExitQueue liability and escrowed
+     *      EVE are excluded. Unpriced queued shares remain equity until `priceBatch`.
      * @return uint256 The base price of 1 EVE in ETH terms.
      */
     function eveBasePriceInETH() external view returns (uint256);
 
     /**
      * @notice Gets the current premium price per token in terms of ETH.
+     * @dev Same live NAV / live supply as `eveBasePriceInETH()`.
      * @return uint256 The premium price of 1 EVE in ETH terms.
      */
     function evePremiumPriceInETH() external view returns (uint256);
 
     /**
      * @notice Get the current EVE token base price in USD terms (18 decimals)
+     * @dev Same live NAV / live supply as `eveBasePriceInETH()`, converted via Oracle.
      * @return uint256 Current EVE token base price in USD
      */
     function eveBasePriceInUSD() external view returns (uint256);
 
     /**
      * @notice Get the current EVE token premium price in USD terms (18 decimals)
+     * @dev Same live NAV / live supply as `evePremiumPriceInETH()`, converted via Oracle.
      * @return uint256 Current EVE token premium price in USD
      */
     function evePremiumPriceInUSD() external view returns (uint256);
@@ -240,9 +250,10 @@ interface IAMM {
 
     /**
      * @notice Function to redeem ETH by burning protocol tokens.
-     * Burning is priced at the base price (NAV / supply), so EVE is always redeemed
+     * Burning is priced at the live base price (NAV−L) / liveSupply, so EVE is always redeemed
      * against the assets backing it and the base price grows with supply as the
-     * bonding-curve premium is retained by remaining holders.
+     * bonding-curve premium is retained by remaining holders. Unpriced queued EVE stays
+     * in the denominator (cancellable equity).
      *
      * Requirements:
      * - Amount of requested ETH is positive

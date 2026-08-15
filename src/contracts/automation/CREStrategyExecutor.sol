@@ -34,6 +34,9 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
     using Math for uint256;
     using Auth for IRegistry;
 
+    /// @dev Gas-bounded scan of priced batches. Matches `CREQueueExecutor.MAX_BATCH_SCAN`
+    ///      / `ExitQueue.MAX_LIVE_PRICED_BATCHES` (25). A DoS bound, not cadence —
+    ///      CRE `minBatchAge` vs `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping batches.
     uint256 public constant MAX_BATCH_SCAN = 25;
     uint256 public constant MAX_USERS_COST_SCAN = 50;
 
@@ -285,6 +288,8 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
 
         (,, uint256 totalTokensToBurn,,) = queue.batchInfo(currentBatchId);
         if (totalTokensToBurn > 0) {
+            // Current (unpriced) batch is still cancellable equity. Size residual need
+            // at the live base price, which is already net of in-window priced liability.
             needsETH += totalTokensToBurn.convertAssets(IAMM(_registry.amm()).eveBasePriceInETH());
         }
     }

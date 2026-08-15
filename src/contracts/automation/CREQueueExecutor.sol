@@ -29,6 +29,9 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     using Math for uint256;
     using Auth for IRegistry;
 
+    /// @dev Gas-bounded fallback scan. Must match `ExitQueue.MAX_LIVE_PRICED_BATCHES` (25).
+    ///      That figure is a DoS bound, not production cadence — CRE `minBatchAge` vs
+    ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping priced batches.
     uint256 public constant MAX_BATCH_SCAN = 25;
     uint256 public constant MIN_BATCH_AGE_UPPER_BOUND = 7 days;
     uint256 public constant MIN_BATCH_AGE_LOWER_BOUND = 1 days;
@@ -209,8 +212,9 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
         view
         returns (uint256 count)
     {
-        (bool canBeProcessed, uint256 finalEvePrice,,,) = _queue.batchInfo(_batchId);
+        (bool canBeProcessed, uint256 finalEvePrice,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
         if (!canBeProcessed) return 0;
+        if (pricedAt > 0 && block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
 
         uint256 unprocessedCount = _queue.unprocessedUsersCount(_batchId);
         if (unprocessedCount == 0) return 0;

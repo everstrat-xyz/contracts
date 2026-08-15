@@ -106,7 +106,8 @@ CREStrategyExecutor::pendingRedemptionNeedsETH()
 │   └── It should cost at most the first 50 (may under-report; the shortfall is topped up on
 │       the next upkeep rather than reverting)
 └── It should always add the current batch's totalTokensToBurn priced at
-    AMM.eveBasePriceInETH() — the batch not yet priced but already committed
+    AMM.eveBasePriceInETH() — the batch is not yet priced (cancellable equity);
+    the live base price is already net of in-window priced liability
 
 CREStrategyExecutor::setControllerReserveETH / setExitLiquidityTargetETH / setSyncInterval / setMinWithdrawETH
 ├── Given caller does not have ADMIN_ROLE
