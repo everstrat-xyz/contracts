@@ -9,8 +9,8 @@ import {PausableUpgradeable} from "@openzeppelin-upgradeable/utils/PausableUpgra
 import {RegistryClientUpgradeable} from "registry/client/RegistryClientUpgradeable.sol";
 
 import {Auth} from "../libraries/Auth.sol";
-
 import {Math} from "../libraries/Math.sol";
+import {ExitQueueLimits} from "../libraries/ExitQueueLimits.sol";
 
 import {IExitQueue} from "../interfaces/IExitQueue.sol";
 
@@ -29,7 +29,7 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     /**
      * @inheritdoc IExitQueue
      */
-    uint256 public constant MAX_LIVE_PRICED_BATCHES = 25;
+    uint256 public constant MAX_LIVE_PRICED_BATCHES = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
 
     // ============ State Variables ============
 

@@ -219,6 +219,10 @@ contract CREQueueExecutorTest is ProtocolTestBase, CRETestUtils {
         assertTrue(executor.supportsInterface(type(IReceiver).interfaceId));
     }
 
+    function test_MaxBatchScan_MatchesExitQueueLiveCap() public view {
+        assertEq(executor.MAX_BATCH_SCAN(), exitQueue.MAX_LIVE_PRICED_BATCHES());
+    }
+
     // ============ Cursor skippability ============
 
     /// @dev `_isBatchSkippable` checks "is priced" FIRST. An unpriced batch — including an

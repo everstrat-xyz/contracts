@@ -43,7 +43,7 @@ Standalone Foundry contracts repo for the EverStrat / "Everything Strategy" prot
     - `integrations/IWETH.sol`: WETH interface
     - `integrations/uniswap/IUniswapV3Router.sol`: Uniswap V3 SwapRouter interface
     - `integrations/IQuoter.sol`: Uniswap V3 quoter interface
-  - `libraries/`: Utility libraries (Math, Auth)
+  - `libraries/`: Utility libraries (Math, Auth, ExitQueueLimits)
     - `libraries/integrations/uniswap/`: Shared Uniswap V3 libraries (TickMath, FullMath, LiquidityAmounts, TickUtils, FixedPoint96, UniswapV3Path) used by UniCLStrat and the UniswapV3ConverterAdapter
 - `test/`: Contract tests using Forge
 - `script/`: Deployment and interaction scripts
@@ -196,7 +196,7 @@ The protocol implements the following core contracts:
    - **Pausable:** Can be paused by ADMIN_ROLE or SECURITY_ROLE (`pushRequest`, `pullRequest`, and `priceBatch` are paused; `closeRequest` works when paused for emergency withdrawals)
    - **Live share-price accounting:** Queued `AMM.exit()` transfers EVE to the AMM (not burned). Until `priceBatch`, that is still cancellable equity — `liveRedemptionOffsets()` returns `(0, 0)` and NAV/supply are unchanged. At `priceBatch` the claim is ironclad: StrategyManager NAV deducts `liabilityETH = remainingTokens * finalEvePrice` and AMM / fee-mint supply deducts `escrowedSupply`. `processRedemption` burns the tokens and adds `lockedForClaims` (offsets already dropped via `totalTokensToBurn -=`). Slippage close / `closeRequest` restore by returning tokens (offsets drop). After `MAX_BATCH_PROCESSING_TIME` (3 days) liability **lapses in the view** with no reset tx; `pullRequest` reverts `ExitQueueBatchExpired` so a keeper cannot pay a claim live NAV already dropped. Users recover via `closeRequest` / `AMM.cancelRedemption`. Multiple in-window priced batches are allowed. Do **not** use CRE's `nextBatchIdToProcess` / `advanceBatchCursor` for NAV — the cursor can skip live batches; NAV walks `liveScanFromBatchId`.
    - **`liveScanFromBatchId`:** Left cursor of `[liveScanFromBatchId, currentBatchId)`. Equals `currentBatchId` when empty, **including at initialize** (both `1`; batch 1 is unpriced). Ids in the range are priced by construction. Advanced on writes past empty or expired batches; the view still time-filters so liability lapses at expiry with no tx.
-   - **`MAX_LIVE_PRICED_BATCHES` = 25:** `priceBatch` reverts `ExitQueueTooManyLivePricedBatches` if the live-scan width would exceed this. Matches `CREQueueExecutor.MAX_BATCH_SCAN`. **Not a production cadence target** — CRE `minBatchAge` (1 day) vs the 3-day window implies ~3 overlapping batches. The cap is an `enter()` gas / DoS bound.
+   - **`MAX_LIVE_PRICED_BATCHES` = 25:** `priceBatch` reverts `ExitQueueTooManyLivePricedBatches` if the live-scan width would exceed this. CRE `MAX_BATCH_SCAN` is this value (both alias `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`). **Not a production cadence target** — CRE `minBatchAge` (1 day) vs the 3-day window implies ~3 overlapping batches. The cap is an `enter()` gas / DoS bound.
    - **Request Closure Restriction:** After a batch is priced (`canBeProcessed == true`), requests cannot be closed **within** `MAX_BATCH_PROCESSING_TIME` of `pricedAt` (`ExitQueueRequestCannotBeClosed`). Within that window they must be settled via `pullRequest()` (or wait out the window). This prevents users from gaming the system by canceling after seeing the final price.
    - **Upper Bound / Escape Hatch:** If more than `MAX_BATCH_PROCESSING_TIME` has passed since `pricedAt`, `pullRequest` is **forbidden** (`ExitQueueBatchExpired`) and users may close via `closeRequest()`. This allows recovery if the AMM/keeper does not process the batch in time; live NAV has already dropped the liability.
   - **batchInfo()** returns `canBeProcessed`, `finalEvePrice`, `totalTokensToBurn`, `createdAt`, and **`pricedAt`** (timestamp when the batch was priced; zero if not yet priced).
@@ -424,7 +424,7 @@ The protocol implements the following core contracts:
    - **Report is untrusted for amounts**: envelope carries action + hints only; conditions and amounts are re-validated/recomputed from live state in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale/wrong claims. Replay protected via `chainSelector`, strictly increasing `sequence`, and `MAX_REPORT_AGE`
    - **Pausable**: `pause()` (ADMIN or SECURITY), `unpause()` (ADMIN). Status views also report no work while involved protocol contracts are paused
    - **CREQueueExecutor** (`QueueAction`: PriceBatch, ProcessRequests, AdvanceCursor):
-     - `queueUpkeepStatus()`: gas-bounded fallback/cross-check (`MAX_BATCH_SCAN = 25`, **must match** `ExitQueue.MAX_LIVE_PRICED_BATCHES`; a DoS bound, not cadence — production overlap is ~3) — ProcessRequests / PriceBatch / AdvanceCursor priority matching the historical keeper design
+     - `queueUpkeepStatus()`: gas-bounded fallback/cross-check (`MAX_BATCH_SCAN` aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`; a DoS bound, not cadence — production overlap is ~3) — ProcessRequests / PriceBatch / AdvanceCursor priority matching the historical keeper design
      - ProcessRequests report params: `abi.encode(batchId, startIndex, endIndex)` (exclusive end); must be an affordable prefix from index 0
      - After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (expired batches are skippable; `pullRequest` would revert `ExitQueueBatchExpired`). Cursor / `minBatchAge` / `maxUsersPerUpkeep` otherwise unchanged from the prior CLA design. **Do not use the CRE cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`
    - **CREStrategyExecutor** (`StrategyAction`, priority: Rebalance, WithdrawShortfall, ProvideExitLiquidity, DepositExcess, HarvestPerformanceFees, Sync):
@@ -459,6 +459,7 @@ The protocol implements the following core contracts:
 13. **Supporting Libraries**
    - `Math.sol`: Decimal conversion, asset conversion utilities, and slippage protection (isRelativelyLessThan)
    - `Auth.sol`: Registry contract keys (including `WHITELIST`) and role identifiers
+   - `ExitQueueLimits.sol`: Shared `MAX_LIVE_PRICED_BATCHES` (25) aliased by ExitQueue and both CRE `MAX_BATCH_SCAN` constants
 
 ## Simple Architecture Checker
 

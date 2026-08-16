@@ -10,6 +10,8 @@ CREStrategyExecutor::constructor(address registry_, address forwarder_, uint64 c
     ├── It should set minExitLiquidityTopUpETH = 0.01 ether
     ├── It should leave controllerReserveETH and exitLiquidityTargetETH at 0 (explicit
     │   deploy-time policy knobs — 0 disables the exit-liquidity action entirely)
+    ├── It should bind MAX_BATCH_SCAN to ExitQueueLimits.MAX_LIVE_PRICED_BATCHES
+    │   (same public value as ExitQueue.MAX_LIVE_PRICED_BATCHES)
     └── It should report version() == "1.0.0-cre"
 
 CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport

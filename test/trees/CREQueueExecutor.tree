@@ -6,6 +6,8 @@ CREQueueExecutor::constructor(address registry_, address forwarder_, uint64 chai
     ├── It should set nextBatchIdToProcess = 1 (batch ids are 1-based in ExitQueue)
     ├── It should set maxUsersPerUpkeep = 20
     ├── It should set minBatchAge = 1 days
+    ├── It should bind MAX_BATCH_SCAN to ExitQueueLimits.MAX_LIVE_PRICED_BATCHES
+    │   (same public value as ExitQueue.MAX_LIVE_PRICED_BATCHES)
     └── It should report version() == "1.0.0-cre"
 
 CREQueueExecutor::_processReport(uint8 action, bytes params) — via onReport

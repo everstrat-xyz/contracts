@@ -274,7 +274,7 @@ An upgradeable contract that manages queued redemption requests, allowing users 
 - **Slippage Protection:** Price tolerance checks to protect users from unfavorable price movements
 - **Pausable:** Can be paused by ADMIN_ROLE or SECURITY_ROLE (`pushRequest`, `pullRequest`, and `priceBatch` are paused; `closeRequest` works when paused for emergency withdrawals)
 - **Live share-price offsets:** `liveRedemptionOffsets()` returns `(liabilityETH, escrowedSupply)` for in-window priced, unfinished batches. StrategyManager deducts liability from NAV; AMM and fee mint deduct escrowed supply. Unpriced requests and batches past `MAX_BATCH_PROCESSING_TIME` contribute `(0, 0)` — liability lapses on the clock with no reset tx. Scan window is `[liveScanFromBatchId, currentBatchId)` (equals `currentBatchId` when empty, including at init). Do not use the CRE batch cursor for NAV.
-- **Live-priced batch cap:** `MAX_LIVE_PRICED_BATCHES = 25` (matches `CREQueueExecutor.MAX_BATCH_SCAN`). `priceBatch` reverts `ExitQueueTooManyLivePricedBatches` if the live-scan width would exceed it. A DoS / `enter()` gas bound, not a cadence target — CRE `minBatchAge` vs the 3-day window implies ~3 overlapping batches.
+- **Live-priced batch cap:** `MAX_LIVE_PRICED_BATCHES = 25` from `ExitQueueLimits` (aliased by ExitQueue and both CRE `MAX_BATCH_SCAN` constants). `priceBatch` reverts `ExitQueueTooManyLivePricedBatches` if the live-scan width would exceed it. A DoS / `enter()` gas bound, not a cadence target — CRE `minBatchAge` vs the 3-day window implies ~3 overlapping batches.
 - **Version Tracking:** Returns "1.0.0"
 - **Upgrade Safety:** Includes storage gaps to prevent storage collisions
 
@@ -646,8 +646,8 @@ smart-contracts/
 │   │   └── integrations/       # IUniswapV3Pool, IUniswapV3Router, IQuoter, IWETH
 │   └── libraries/
 │       ├── Math.sol              # Protocol-wide math (decimals, slippage)
-│       ├── Auth.sol      # Registry contract keys
-│       ├── Auth.sol     # Registry role identifiers
+│       ├── Auth.sol              # Registry contract keys and role identifiers
+│       ├── ExitQueueLimits.sol   # Shared live-priced batch cap (ExitQueue + CRE scanners)
 │       └── strategies/
 │           └── uni-cl-strategy/  # UniCL-only V3 math (TickMath, LiquidityAmounts, …)
 ├── test/                          # Test files

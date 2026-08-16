@@ -5,6 +5,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {Math} from "../../libraries/Math.sol";
 import {Auth} from "../../libraries/Auth.sol";
+import {ExitQueueLimits} from "../../libraries/ExitQueueLimits.sol";
 
 import {IRegistry} from "interfaces/IRegistry.sol";
 import {IController} from "../../interfaces/IController.sol";
@@ -29,10 +30,11 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     using Math for uint256;
     using Auth for IRegistry;
 
-    /// @dev Gas-bounded fallback scan. Must match `ExitQueue.MAX_LIVE_PRICED_BATCHES` (25).
-    ///      That figure is a DoS bound, not production cadence — CRE `minBatchAge` vs
+    /// @dev Gas-bounded fallback scan. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
+    ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
+    ///      desync the keeper. A DoS bound, not cadence — CRE `minBatchAge` vs
     ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping priced batches.
-    uint256 public constant MAX_BATCH_SCAN = 25;
+    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
     uint256 public constant MIN_BATCH_AGE_UPPER_BOUND = 7 days;
     uint256 public constant MIN_BATCH_AGE_LOWER_BOUND = 1 days;
     uint256 public constant MAX_USERS_PER_UPKEEP_UPPER_BOUND = 100;

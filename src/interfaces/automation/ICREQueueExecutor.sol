@@ -26,7 +26,7 @@ interface ICREQueueExecutor is ICREReceiverBase {
     error CREQueueExecutorBatchCursorPrecedesCurrent();
     error CREQueueExecutorBatchCursorPastCurrent();
 
-    /// @notice Gas-bounded scan width. Must match `ExitQueue.MAX_LIVE_PRICED_BATCHES`.
+    /// @notice Gas-bounded scan width. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
     function MAX_BATCH_SCAN() external pure returns (uint256);
     function MIN_BATCH_AGE_UPPER_BOUND() external pure returns (uint256);
     function MIN_BATCH_AGE_LOWER_BOUND() external pure returns (uint256);

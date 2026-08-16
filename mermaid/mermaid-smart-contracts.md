@@ -14,6 +14,7 @@ graph TB
     Proxy["ERC1967<br/>Proxy"]
     OZLibs["OpenZeppelin<br/>Libraries"]
     Math["Math<br/>Library"]
+    ExitQueueLimits["ExitQueueLimits<br/>Library"]
     UniV3Math["Uniswap V3 Shared Libraries<br/>TickMath, FullMath,<br/>LiquidityAmounts, TickUtils<br/>(libraries/integrations/uniswap)"]
     UniswapV3Path["UniswapV3Path<br/>Path Encoding Library<br/>(libraries/integrations/uniswap)"]
     ChainlinkOracle["Chainlink<br/>Oracle"]
@@ -169,6 +170,7 @@ graph TB
     
     ExitQueueProxy --> Proxy
     ExitQueueProxy --> ExitQueue
+    ExitQueue --> ExitQueueLimits
     ExitQueueProxy -.->|"Managed by"| ControllerProxy
     
     StrategyManagerProxy --> Proxy
@@ -214,8 +216,10 @@ graph TB
     CREReceiverBase --> ReentrancyGuard
     CREQueueExecutor --> CREReceiverBase
     CREQueueExecutor --> ICREQueueExecutor
+    CREQueueExecutor --> ExitQueueLimits
     CREStrategyExecutor --> CREReceiverBase
     CREStrategyExecutor --> ICREStrategyExecutor
+    CREStrategyExecutor --> ExitQueueLimits
     CREDon -.->|"runtime.report + writeReport"| KeystoneForwarder
     KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREQueueExecutor
     KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREStrategyExecutor
@@ -260,7 +264,7 @@ graph TB
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
     class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,KeystoneForwarder external
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,KeystoneForwarder external
     class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory,IReceiver interface
     class Tests,Mocks,Helpers,Trees test
     class Registry,RegistryClient,RegistryClientUpgradeable,RegistryClientBase static
@@ -334,7 +338,7 @@ graph TB
 #### **ExitQueue** (Upgradeable)
 - **Purpose**: Manages queued redemption requests when AMM has insufficient liquidity
 - **Features**: Batch-based request management, slippage protection, pausable operations (`pushRequest`, `pullRequest`, and `priceBatch` gated by `whenNotPaused`; `closeRequest` works when paused for emergency withdrawals), **MAX_BATCH_PROCESSING_TIME** upper bound; implementation constructor calls `_disableInitializers()`
-- **Live share-price accounting**: Unpriced queued EVE is cancellable equity (`liveRedemptionOffsets()` = `(0, 0)`). After `priceBatch`, StrategyManager NAV deducts `liabilityETH` and AMM / fee-mint supply deducts `escrowedSupply` until pull, slippage close, or the 3-day window lapses in the view (no reset tx). `pullRequest` after expiry reverts `ExitQueueBatchExpired`. Scan window `[liveScanFromBatchId, currentBatchId)` (empty range: both equal, including at init). Cap `MAX_LIVE_PRICED_BATCHES = 25` (matches CRE `MAX_BATCH_SCAN`; DoS bound, not cadence). Do not use the CRE cursor for NAV.
+- **Live share-price accounting**: Unpriced queued EVE is cancellable equity (`liveRedemptionOffsets()` = `(0, 0)`). After `priceBatch`, StrategyManager NAV deducts `liabilityETH` and AMM / fee-mint supply deducts `escrowedSupply` until pull, slippage close, or the 3-day window lapses in the view (no reset tx). `pullRequest` after expiry reverts `ExitQueueBatchExpired`. Scan window `[liveScanFromBatchId, currentBatchId)` (empty range: both equal, including at init). Cap `MAX_LIVE_PRICED_BATCHES = 25` from `ExitQueueLimits` (aliased by CRE `MAX_BATCH_SCAN`; DoS bound, not cadence). Do not use the CRE cursor for NAV.
 - **batchInfo()** returns `canBeProcessed`, `finalEvePrice`, `totalTokensToBurn`, `createdAt`, and **`pricedAt`** (timestamp when the batch was priced; zero if not yet priced).
 - **requestCanBeClosed(batchId, user)** returns whether a user can close their request (true if batch not priced, or priced but past MAX_BATCH_PROCESSING_TIME; false if processed, not in batch, or within the processing window).
 - **Request Closure Restriction**: After a batch is priced (`canBeProcessed == true`), requests cannot be closed **within** MAX_BATCH_PROCESSING_TIME of `pricedAt`. Within that window they must be settled via `pullRequest()` (or wait out the window). This prevents users from gaming the system by canceling after seeing the final price.
@@ -544,7 +548,7 @@ graph TB
     class E1,E2,E3,E4,E5,E6,E7,E8 err
     class Commit,Execute ok
 ```
-- **CREQueueExecutor**: `queueUpkeepStatus()` is the gas-bounded fallback/cross-check (`MAX_BATCH_SCAN = 25`, **must match** `ExitQueue.MAX_LIVE_PRICED_BATCHES`; DoS bound, not cadence). Actions: `ProcessRequests` (affordable prefix; report params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`. After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (`pullRequest` would revert `ExitQueueBatchExpired`). **Do not use the CRE cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`.
+- **CREQueueExecutor**: `queueUpkeepStatus()` is the gas-bounded fallback/cross-check (`MAX_BATCH_SCAN` aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`; DoS bound, not cadence). Actions: `ProcessRequests` (affordable prefix; report params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`. After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (`pullRequest` would revert `ExitQueueBatchExpired`). **Do not use the CRE cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`.
   - **Cursor skippability rule**: a batch is skippable only if it is priced AND (fully settled OR past `MAX_BATCH_PROCESSING_TIME`, where users self-serve via `AMM.cancelRedemption` and `pullRequest` is forbidden). Unpriced batches — the current one and any future id — are never skipped, even when empty, since they can still receive requests. `ExitQueue.priceBatch` writes `canBeProcessed` and `pricedAt` together, so `canBeProcessed` alone is the "is priced" predicate
 - **CREStrategyExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the report — recomputed at execution. Status view: `strategyUpkeepStatus()`. Priced in-window batches cost `finalEvePrice`; expired contribute 0. The current **unpriced** batch is sized at residual `AMM.eveBasePriceInETH()` (cancellable equity; that live price is already net of in-window priced L).
 - **Interfaces**: `src/interfaces/automation/` (`IReceiver`, `ICREReceiverBase`, `ICREQueueExecutor`, `ICREStrategyExecutor`)
@@ -586,7 +590,7 @@ graph TB
 | UniswapV3ConverterAdapter | ✅ Complete | Static/Immutable | Shared UniswapV3Path encoding/validation, exactInput/exactOutput swaps via SwapRouter (delegatecalled from Converter; exact-output paths reversed internally), TWAP + Chainlink quoting via Oracle.convert (flash-loan resistant, gross-amount deviation check) |
 | UniCLStrat | ✅ Complete | Static/Immutable Strategy | Uniswap V3 concentrated liquidity, TWAP NAV, Converter-delegated swaps with oracle-bounded quotes, exact-output WETH top-ups with balance fallback |
 | Oracle | ✅ Complete | Upgradeable | Price feeds, staleness checks, token management, direct token-to-token convert() cross-rate |
-| CREQueueExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for the redemption queue: affordable-prefix batch processing (expired batches → 0) + guarded batch pricing, Keystone-gated onReport, untrusted report re-validation; MAX_BATCH_SCAN matches ExitQueue.MAX_LIVE_PRICED_BATCHES |
+| CREQueueExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for the redemption queue: affordable-prefix batch processing (expired batches → 0) + guarded batch pricing, Keystone-gated onReport, untrusted report re-validation; MAX_BATCH_SCAN aliased from ExitQueueLimits.MAX_LIVE_PRICED_BATCHES |
 | CREStrategyExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for strategies: rebalance / withdraw-shortfall / provide-exit-liquidity / deposit-excess / harvest / sync with on-chain recomputed amounts, Keystone-gated onReport |
 | Testing | ✅ Complete | Comprehensive | Unit, integration, fuzzing, mocking |
 
@@ -604,6 +608,7 @@ graph TB
     Proxy["ERC1967<br/>Proxy"]
     OZLibs["OpenZeppelin<br/>Libraries"]
     Math["Math<br/>Library"]
+    ExitQueueLimits["ExitQueueLimits<br/>Library"]
     UniV3Math["Uniswap V3 Shared Libraries<br/>TickMath, FullMath,<br/>LiquidityAmounts, TickUtils<br/>(libraries/integrations/uniswap)"]
     UniswapV3Path["UniswapV3Path<br/>Path Encoding Library<br/>(libraries/integrations/uniswap)"]
     ChainlinkOracle["Chainlink<br/>Oracle"]
@@ -701,6 +706,7 @@ graph TB
     ExitQueue --> AccessControl
     ExitQueue --> IExitQueue
     ExitQueue --> OZLibs
+    ExitQueue --> ExitQueueLimits
     
     StrategyManager --> UUPS
     StrategyManager --> AccessControl
@@ -855,7 +861,7 @@ graph TB
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
     class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH external
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH external
     class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
     class Tests,Mocks,Helpers,Trees test
     class Vault,FutureStrategy,FutureDEXAdapter,IVault,VaultProxy future
