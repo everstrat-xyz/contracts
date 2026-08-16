@@ -26,7 +26,8 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      bootstrap grant — those same calls are ADMIN_ROLE (48h timelock)-gated in production,
  *      and the grant is renounced before the script ends, so this is the intended bootstrap
  *      pattern.
- *      Env (required): PRIVATE_KEY, PRICE_FEED, WETH_ADDRESS, DAO_ADDRESS, SECURITY_ADDRESS,
+ *      Env (required): PRIVATE_KEY, PRICE_FEED, WETH_ADDRESS, DAO_ADDRESS (non-zero — the
+ *      sole timelock proposer; address(0) can never schedule), SECURITY_ADDRESS,
  *      DAO_TREASURY_ADDRESS, EXIT_LIQUIDITY_TARGET_ETH, CONTROLLER_RESERVE_ETH,
  *      WHITELIST_SIGNER_ADDRESS — critical addresses and CREStrategyExecutor policy knobs
  *      (wei) are never defaulted (in particular never to the deployer key / silent 0); a
@@ -34,7 +35,8 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      choice (immediate exits disabled / no Controller float). Set WHITELIST_SIGNER_ADDRESS
  *      to the zero address to postpone invite-signer seeding (add later via timelocked
  *      `addSigner()`). Required: PERFORMANCE_FEE_BPS (`0` disables fees). Optional:
- *      TIMELOCK_ADMIN_DELAY (defaults to 48h — sole deploy-script envOr exception).
+ *      TIMELOCK_ADMIN_DELAY (defaults to 48h, rejects values below 48h — sole
+ *      deploy-script envOr exception).
  *
  *      Core-only: does **not** deploy DEX adapters (e.g. UniswapV3ConverterAdapter) or
  *      strategies. Those are modular follow-ups — see `DeployUniswapV3ConverterAdapter` /

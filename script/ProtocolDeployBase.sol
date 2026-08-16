@@ -31,11 +31,14 @@ abstract contract ProtocolDeployBase is Script {
     // ============ Timelock Tier Delays (PL-003) ============
     // The privileged ADMIN_ROLE is held by a TimelockController so the reaction window
     // is enforced on-chain. TIMELOCK_ADMIN_DELAY may be omitted and falls back to the
-    // production policy below — the sole envOr exception in deploy scripts (never weaker).
+    // production 48h policy below — the sole envOr exception in deploy scripts. An
+    // explicit value below the floor reverts (never a weaker delay).
 
     /// @notice Production policy minimum for admin timelock delay (48h). Used as the
-    ///         `TIMELOCK_ADMIN_DELAY` envOr fallback. Upgrades should be scheduled with a
-    ///         longer delay (e.g. 72h) by policy — TimelockController enforces only the minimum.
+    ///         `TIMELOCK_ADMIN_DELAY` envOr fallback AND as a hard floor — values below
+    ///         this revert the deploy so ADMIN_ROLE cannot ship with a weaker delay.
+    ///         Upgrades should be scheduled with a longer delay (e.g. 72h) by policy —
+    ///         TimelockController enforces only the minimum.
     uint256 internal constant DEFAULT_ADMIN_TIMELOCK_DELAY = 48 hours;
 
     struct ProtocolContracts {
@@ -261,9 +264,16 @@ abstract contract ProtocolDeployBase is Script {
     // governance power.
 
     /// @notice DAO multisig (PL-003): proposer/canceller on the admin timelock. Holds no
-    ///         direct protocol role.
-    function _protocolDao() internal view returns (address) {
-        return vm.envAddress("DAO_ADDRESS");
+    ///         direct protocol role. Rejects address(0): OZ grants PROPOSER_ROLE to it
+    ///         (so membership checks pass) but no account can ever `schedule()`.
+    function _protocolDao() internal view returns (address dao) {
+        dao = vm.envAddress("DAO_ADDRESS");
+        _requireNonZeroDao(dao);
+    }
+
+    /// @notice Fail-closed non-zero check for the sole timelock proposer (PL-003).
+    function _requireNonZeroDao(address _dao) internal pure {
+        require(_dao != address(0), "CRITICAL: DAO_ADDRESS is zero");
     }
 
     /// @notice Emergency security multisig (SECURITY_ROLE: immediate pause + timelock canceller).
@@ -351,20 +361,32 @@ abstract contract ProtocolDeployBase is Script {
      * @notice Deploys the admin TimelockController.
      * @param _deployer Temporary timelock admin used only to grant the security
      *        CANCELLER_ROLE; renounced before this function returns.
-     * @param _proposer The DAO multisig — sole proposer (and canceller).
+     * @param _proposer The DAO multisig — sole proposer (and canceller). Callers
+     *        must pass {_protocolDao} (rejects address(0): it can hold PROPOSER_ROLE
+     *        on-chain but can never `schedule()`).
      * @param _security Emergency security — canceller (can kill malicious queued
      *        operations but can never propose or execute).
      * @dev TIMELOCK_ADMIN_DELAY may be omitted: envOr falls back to
-     *      {DEFAULT_ADMIN_TIMELOCK_DELAY} (48h) — never a weaker value. This is the only
+     *      {DEFAULT_ADMIN_TIMELOCK_DELAY} (48h). An explicit value below 48h reverts —
+     *      the ADMIN_ROLE trust model cannot ship with a weaker delay. This is the only
      *      deploy-script envOr exception; other knobs must be set explicitly.
      */
     function _deployTimelocks(address _deployer, address _proposer, address _security)
         internal
         returns (ProtocolTimelocks memory timelocks)
     {
-        timelocks.adminTimelock = _deployTimelock(
-            vm.envOr("TIMELOCK_ADMIN_DELAY", DEFAULT_ADMIN_TIMELOCK_DELAY), _deployer, _proposer, _security
-        );
+        timelocks.adminTimelock = _deployTimelock(_adminTimelockDelay(), _deployer, _proposer, _security);
+    }
+
+    /// @notice Reads TIMELOCK_ADMIN_DELAY (envOr 48h) and rejects anything below the floor.
+    function _adminTimelockDelay() internal view returns (uint256 delay) {
+        delay = vm.envOr("TIMELOCK_ADMIN_DELAY", DEFAULT_ADMIN_TIMELOCK_DELAY);
+        _requireAdminTimelockDelay(delay);
+    }
+
+    /// @notice Fail-closed 48h floor for the admin timelock min delay (PL-003).
+    function _requireAdminTimelockDelay(uint256 _minDelay) internal pure {
+        require(_minDelay >= DEFAULT_ADMIN_TIMELOCK_DELAY, "CRITICAL: TIMELOCK_ADMIN_DELAY below 48h floor");
     }
 
     function _deployTimelock(uint256 _minDelay, address _deployer, address _proposer, address _security)
@@ -460,6 +482,9 @@ abstract contract ProtocolDeployBase is Script {
         internal
         view
     {
+        require(
+            _timelock.getMinDelay() >= DEFAULT_ADMIN_TIMELOCK_DELAY, "CRITICAL: TIMELOCK_ADMIN_DELAY below 48h floor"
+        );
         require(_timelock.hasRole(_timelock.PROPOSER_ROLE(), _proposer), "CRITICAL: DAO missing PROPOSER_ROLE");
         require(_timelock.hasRole(_timelock.CANCELLER_ROLE(), _security), "CRITICAL: security missing CANCELLER_ROLE");
         require(_timelock.hasRole(_timelock.EXECUTOR_ROLE(), address(0)), "CRITICAL: timelock execution not open");
@@ -488,11 +513,11 @@ abstract contract ProtocolDeployBase is Script {
      *         wiring — see {_verifyTimelockWiring}). DeployAll verifies the same grants
      *         inline rather than calling this helper (no skipped-step surface to catch).
      * @dev Resolving each Registry key reverts when the module was never registered, so a
-     *      skipped modular step (e.g. DeployConverter or DeployCREExecutors) fails here
-     *      with a clear `RegistryContractNotRegistered` before the deployer renounces ADMIN.
-     *      KEEPER_ROLE is verified strictly: when DeployCREExecutors runs with
-     *      GRANT_KEEPER_ROLE=false the grants must land (via the admin timelock) BEFORE
-     *      FinalizeProtocolDeploy runs.
+     *      skipped modular step (e.g. DeployWhitelist, DeployConverter, or DeployCREExecutors)
+     *      fails here with a clear `RegistryContractNotRegistered` and the finalize script
+     *      reverts (the ADMIN renounce does not land). KEEPER_ROLE is verified strictly: when
+     *      DeployCREExecutors runs with GRANT_KEEPER_ROLE=false the grants must land (via the
+     *      admin timelock) BEFORE FinalizeProtocolDeploy runs.
      */
     function _verifyCriticalRoleGrants(Registry _registry, address _security) internal view {
         // Core module registrations (revert loudly when a modular step was skipped).
@@ -500,6 +525,7 @@ abstract contract ProtocolDeployBase is Script {
         _registry.getContractByKey(Auth.EXIT_QUEUE);
         _registry.getContractByKey(Auth.ORACLE);
         _registry.getContractByKey(Auth.EVE);
+        _registry.getContractByKey(Auth.WHITELIST);
         address amm = _registry.getContractByKey(Auth.AMM);
         address strategyManager = _registry.getContractByKey(Auth.STRATEGY_MANAGER);
         address converter = _registry.getContractByKey(Auth.CONVERTER);

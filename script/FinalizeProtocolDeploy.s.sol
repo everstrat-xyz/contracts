@@ -16,9 +16,9 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      are granted. Beyond the ADMIN checks, this script VERIFIES every critical protocol
  *      grant ({ProtocolDeployBase-_verifyCriticalRoleGrants}): SECURITY_ROLE on the security
  *      multisig, MINTER_ROLE on the AMM and StrategyManager, CONVERTER_CALLER_MANAGER_ROLE on
- *      the Converter, KEEPER_ROLE on both keeper executors — so a skipped or mis-granted
- *      modular step fails the deployment loudly instead of surfacing as a runtime revert that
- *      needs a 48h-timelocked repair.
+ *      the Converter, KEEPER_ROLE on both keeper executors, and every core Registry key
+ *      including `WHITELIST` — so a skipped or mis-granted modular step fails the deployment
+ *      loudly instead of surfacing as a runtime revert that needs a 48h-timelocked repair.
  *      Env (required): PRIVATE_KEY, REGISTRY_ADDRESS, TIMELOCK_ADDRESS (the admin
  *      TimelockController deployed by DeployRegistry), SECURITY_ADDRESS (the security
  *      multisig that must hold SECURITY_ROLE).

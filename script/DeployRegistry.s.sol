@@ -23,9 +23,11 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      constructor to msg.sender) to run the remaining modular deploy steps; run
  *      FinalizeProtocolDeploy as the last step to renounce it.
  *
- *      Env (required): PRIVATE_KEY, DAO_ADDRESS, SECURITY_ADDRESS — no deployer fallbacks;
+ *      Env (required): PRIVATE_KEY, DAO_ADDRESS (non-zero — sole timelock proposer;
+ *      address(0) can never schedule), SECURITY_ADDRESS — no deployer fallbacks;
  *      a missing value reverts the deploy. Optional: TIMELOCK_ADMIN_DELAY (defaults to
- *      {DEFAULT_ADMIN_TIMELOCK_DELAY} = 48h — sole deploy-script envOr exception).
+ *      {DEFAULT_ADMIN_TIMELOCK_DELAY} = 48h; values below 48h revert — sole
+ *      deploy-script envOr exception).
  *      Export the logged Registry address as REGISTRY_ADDRESS and the logged timelock
  *      address as TIMELOCK_ADDRESS for the subsequent modular scripts.
  */
