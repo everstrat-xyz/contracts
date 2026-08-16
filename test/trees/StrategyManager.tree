@@ -515,7 +515,12 @@ StrategyManager::totalNAVInETH()
 │   ├── Given a priced batch is past MAX_BATCH_PROCESSING_TIME
 │   │   └── It should not deduct that batch (liability lapses in the view with no write)
 │   ├── Given liabilityETH exceeds gross NAV
-│   │   └── It should revert with StrategyManagerQueuedLiabilityExceedsNAV
+│   │   ├── It should revert with StrategyManagerQueuedLiabilityExceedsNAV
+│   │   ├── AMM enter/exit and the four eve*Price views should revert with the same error
+│   │   ├── Controller.priceBatch and fee harvest should revert with the same error
+│   │   ├── Unpriced requests can still be cancelled (closeRequest does not read NAV)
+│   │   ├── Priced in-window requests cannot be closed (ExitQueueRequestCannotBeClosed)
+│   │   └── After MAX_BATCH_PROCESSING_TIME, liability lapses and totalNAVInETH recovers
 │   └── It should return total NAV in ETH (18 decimals)
 ├── Given whitelisted supported ERC-20s
 │   ├── Given a supported ERC-20 has a non-zero balance

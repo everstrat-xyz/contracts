@@ -11,6 +11,7 @@ import {Oracle} from "contracts/Oracle.sol";
 import {Controller} from "contracts/Controller.sol";
 import {EVE} from "contracts/EVE.sol";
 import {ExitQueue} from "contracts/ExitQueue.sol";
+import {IExitQueue} from "interfaces/IExitQueue.sol";
 import {MockStrategy} from "test/mocks/MockStrategy.sol";
 import {MockFeeTakingStrategy} from "test/mocks/MockFeeTakingStrategy.sol";
 import {MockPriceFeed} from "test/mocks/MockPriceFeed.sol";
@@ -35,6 +36,7 @@ contract StrategyManagerTest is ProtocolTestBase {
     Controller public controllerContract;
     Registry public registry;
     AMM public amm;
+    ExitQueue public exitQueue;
     EVE public token;
     MockStrategy public mockStrategy1;
     MockStrategy public mockStrategy2;
@@ -80,12 +82,26 @@ contract StrategyManagerTest is ProtocolTestBase {
     /// @dev `amm.enter` in setUp bootstraps the AMM and forwards this ETH to the Controller,
     ///      which `totalNAVInETH()` always counts as in-flight protocol NAV.
     uint256 internal constant BOOTSTRAP_CONTROLLER_ETH = 1 ether;
+    uint256 internal constant PRICED_QUEUE_EXIT_ETH = 0.5 ether;
+    uint256 internal constant UNPRICED_QUEUE_EXIT_ETH = 0.1 ether;
+    uint256 internal constant SECOND_USER_DEPOSIT = 1 ether;
+    uint256 internal constant LATE_ENTER_ETH = 0.1 ether;
+    uint256 internal constant LEFTOVER_EXIT_ETH = 0.01 ether;
 
     event StrategyAdded(address indexed strategy);
 
     /// @dev Expected protocol NAV in ETH when only strategy NAVs contribute beyond the bootstrap deposit.
     function _expectedTotalNAVInETH(uint256 _strategyNavSum) internal pure returns (uint256) {
         return _strategyNavSum + BOOTSTRAP_CONTROLLER_ETH;
+    }
+
+    function _queueExitAs(address _user, uint256 _requestedETH) internal returns (uint256 batchId) {
+        uint256 bal = token.balanceOf(_user);
+        vm.startPrank(_user);
+        token.approve(address(amm), bal);
+        batchId = amm.exit(_requestedETH, bal, 0);
+        vm.stopPrank();
+        assertGt(batchId, 0);
     }
 
     /// @dev Converts an ETH-denominated strategy NAV to normalized USD (18 decimals).
@@ -163,6 +179,7 @@ contract StrategyManagerTest is ProtocolTestBase {
         strategyManager = contracts.strategyManager;
         oracle = contracts.oracle;
         amm = contracts.amm;
+        exitQueue = contracts.exitQueue;
         implementation = new StrategyManager();
 
         ethPriceFeed = new MockPriceFeed(8, int256(ETH_PRICE));
@@ -948,6 +965,134 @@ contract StrategyManagerTest is ProtocolTestBase {
 
         uint256 totalNAV = strategyManager.totalNAVInETH();
         assertEq(totalNAV, INITIAL_NAV_1 + 2 ether + BOOTSTRAP_CONTROLLER_ETH);
+    }
+
+    function test_TotalNAVInETH_DoesNotDeductUnpricedQueue() public {
+        uint256 navBefore = strategyManager.totalNAVInETH();
+        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
+        assertEq(strategyManager.totalNAVInETH(), navBefore);
+    }
+
+    function test_TotalNAVInETH_DeductsPricedQueueLiability() public {
+        uint256 navBefore = strategyManager.totalNAVInETH();
+        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+        controllerContract.priceBatch();
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertGt(liability, 0);
+        assertGt(escrowed, 0);
+        assertEq(strategyManager.totalNAVInETH(), navBefore - liability);
+    }
+
+    function test_TotalNAVInETH_PricedQueueLiabilityLapsesAfterExpiry() public {
+        uint256 navBefore = strategyManager.totalNAVInETH();
+        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+        controllerContract.priceBatch();
+
+        (uint256 liability,) = exitQueue.liveRedemptionOffsets();
+        assertEq(strategyManager.totalNAVInETH(), navBefore - liability);
+
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+
+        (uint256 liabilityAfter, uint256 escrowedAfter) = exitQueue.liveRedemptionOffsets();
+        assertEq(liabilityAfter, 0);
+        assertEq(escrowedAfter, 0);
+        assertEq(strategyManager.totalNAVInETH(), navBefore);
+    }
+
+    function test_TotalNAVInETH_RevertsWhenQueuedLiabilityExceedsNAV() public {
+        uint256 grossNav = strategyManager.totalNAVInETH();
+        vm.mockCall(
+            address(exitQueue),
+            abi.encodeWithSelector(IExitQueue.liveRedemptionOffsets.selector),
+            abi.encode(grossNav + 1, uint256(0))
+        );
+
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        strategyManager.totalNAVInETH();
+    }
+
+    function test_TotalNAVInETH_QueuedLiabilityFreeze_BlastRadiusAndEscapeHatch() public {
+        vm.deal(user1, SECOND_USER_DEPOSIT);
+        vm.prank(user1);
+        amm.enter{value: SECOND_USER_DEPOSIT}(1);
+
+        uint256 pricedBatchId = _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+        controllerContract.priceBatch();
+        uint256 unpricedBatchId = _queueExitAs(user1, UNPRICED_QUEUE_EXIT_ETH);
+        assertGt(unpricedBatchId, pricedBatchId);
+
+        // Simulate a post-price NAV drop (IL / market move): wipe in-flight ETH so
+        // gross NAV < locked-in liability. Documented freeze — FREEZE_RUNBOOK scenario 10.
+        vm.deal(controller, 0);
+        vm.deal(address(strategyManager), 0);
+        vm.deal(address(amm), 0);
+
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        strategyManager.totalNAVInETH();
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        strategyManager.totalNAVInUSD();
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        amm.eveBasePriceInETH();
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        amm.evePremiumPriceInETH();
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        amm.eveBasePriceInUSD();
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        amm.evePremiumPriceInUSD();
+
+        address lateEntrant = makeAddr("lateEntrant");
+        vm.deal(lateEntrant, LATE_ENTER_ETH);
+        vm.prank(lateEntrant);
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        amm.enter{value: LATE_ENTER_ETH}(1);
+
+        uint256 leftover = token.balanceOf(address(this));
+        token.approve(address(amm), leftover);
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        amm.exit(LEFTOVER_EXIT_ETH, leftover, 0);
+
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        controllerContract.priceBatch();
+
+        // Unpriced requests do not read NAV — cancel still works during the freeze.
+        vm.prank(user1);
+        amm.cancelRedemption(unpricedBatchId);
+        assertGt(token.balanceOf(user1), 0);
+
+        // Priced in-window requests cannot close; users wait out the 3-day window.
+        vm.expectRevert(IExitQueue.ExitQueueRequestCannotBeClosed.selector);
+        amm.cancelRedemption(pricedBatchId);
+
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
+        strategyManager.totalNAVInETH();
+
+        amm.cancelRedemption(pricedBatchId);
+    }
+
+    function test_Harvest_RevertsWhenQueuedLiabilityExceedsNAV() public {
+        vm.prank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        _configurePerformanceFees();
+        _accrueMockLpFees(mockStrategy1, LP_FEE_BASE_1);
+
+        uint256 grossNav = strategyManager.totalNAVInETH();
+        vm.mockCall(
+            address(exitQueue),
+            abi.encodeWithSelector(IExitQueue.liveRedemptionOffsets.selector),
+            abi.encode(grossNav + 1, uint256(0))
+        );
+
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        strategyManager.harvestPerformanceFeeFromStrategy(strategy1);
     }
 
     /*//////////////////////////////////////////////////////////////
