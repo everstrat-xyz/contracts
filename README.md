@@ -828,11 +828,11 @@ Registry-centric deployment is documented in [`mermaid/deployment-architecture.m
 |----------|---------|---------|
 | `PRIVATE_KEY` | All broadcast scripts | Deployer signer |
 | `RPC_URL` | CLI `--rpc-url` | Network endpoint |
-| `DAO_ADDRESS` | `DeployRegistry`, `DeployAll` | **Required.** DAO multisig — timelock proposer/canceller |
+| `DAO_ADDRESS` | `DeployRegistry`, `DeployAll` | **Required, non-zero.** DAO multisig — timelock proposer/canceller. `address(0)` is rejected (it can never `schedule()`) |
 | `SECURITY_ADDRESS` | `DeployRegistry`, `DeployAll`, `FinalizeProtocolDeploy` | **Required.** Security multisig — SECURITY_ROLE + timelock canceller |
 | `DAO_TREASURY_ADDRESS` | `DeployAll`, `DeployAMM` | **Required.** Performance-fee EVE recipient |
 | `PERFORMANCE_FEE_BPS` | `DeployAll`, `DeployAMM` | **Required.** Initial fee rate in bps; `0` disables fees |
-| `TIMELOCK_ADMIN_DELAY` | `DeployRegistry`, `DeployAll` | Optional. Admin timelock min delay in seconds; defaults to 48h (sole `envOr` exception) |
+| `TIMELOCK_ADMIN_DELAY` | `DeployRegistry`, `DeployAll` | Optional. Admin timelock min delay in seconds; defaults to 48h, rejects values below 48h (sole `envOr` exception) |
 | `EXIT_LIQUIDITY_TARGET_ETH` | `DeployAll`, `DeployCREExecutors` | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
 | `CONTROLLER_RESERVE_ETH` | `DeployAll`, `DeployCREExecutors` | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
 | `KEYSTONE_FORWARDER` | `DeployAll`, `DeployCREExecutors` | **Required.** Chainlink-managed KeystoneForwarder (immutable on CRE receivers) |
@@ -854,7 +854,7 @@ export DAO_ADDRESS=<dao_multisig>
 export SECURITY_ADDRESS=<security_multisig>
 export DAO_TREASURY_ADDRESS=<treasury_multisig>
 export PERFORMANCE_FEE_BPS=0         # 0 = fees disabled
-# optional: export TIMELOCK_ADMIN_DELAY=172800  # defaults to 48h
+# optional: export TIMELOCK_ADMIN_DELAY=172800  # defaults to 48h; values below 48h revert
 export EXIT_LIQUIDITY_TARGET_ETH=0   # wei; 0 = immediate exits disabled
 export CONTROLLER_RESERVE_ETH=0      # wei; 0 = no Controller float
 export KEYSTONE_FORWARDER=<keystone_forwarder>
@@ -876,7 +876,7 @@ Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter
 4. `DeployWhitelist.s.sol` — registers `WHITELIST`, optionally seeds `WHITELIST_SIGNER_ADDRESS` (required env; `address(0)` postpones seeding)
 5. `DeployAMM.s.sol` — registers StrategyManager + AMM, grants `MINTER_ROLE` to BOTH (deployer keeps ADMIN for remaining steps)
 6. `DeployCREExecutors.s.sol` — deploys CRE receivers with `KEYSTONE_FORWARDER` / `CHAIN_SELECTOR` / `MAX_REPORT_AGE`, registers both under `QUEUE_KEEPER_EXECUTOR` / `STRATEGY_KEEPER_EXECUTOR`, applies `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH`; required `GRANT_KEEPER_ROLE` (`true` grants in-script, `false` defers grants to the admin timelock before finalize)
-7. `FinalizeProtocolDeploy.s.sol` — required final step; unconditionally renounces the deployer's bootstrap Registry ADMIN and VERIFIES every critical grant (`SECURITY_ROLE` → security multisig, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors), failing loudly on any skipped or mis-granted step
+7. `FinalizeProtocolDeploy.s.sol` — required final step; unconditionally renounces the deployer's bootstrap Registry ADMIN and VERIFIES every critical grant (`SECURITY_ROLE` → security, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors) and every module registration including `WHITELIST`, failing loudly on any skipped or mis-granted step
 8. Optional UniCL path (same after `DeployAll`):
    - `DeployUniswapV3ConverterAdapter.s.sol` — adapter bytecode only (needs Oracle; no ADMIN); export `SWAP_ADAPTER_ADDRESS`
    - Admin timelock: `Converter.setAllowedAdapter`, paired-token `Oracle.updateUsdFeedInfo`, optional `addSupportedERC20(pairedToken)`

@@ -245,12 +245,14 @@ contract DeployScriptsTest is Test {
             registry.hasRole(Auth.KEEPER_ROLE, registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR)),
             "CREStrategyExecutor missing KEEPER_ROLE"
         );
+        assertTrue(registry.getContractByKey(Auth.WHITELIST) != address(0), "WHITELIST not registered");
 
         // NOTE: `new FinalizeProtocolDeploy().run()` would make the CREATE the "next call"
         // for expectRevert — the reverting scenarios below split creation from the call.
 
         // ============ A skipped DeployConverter step fails finalization loudly ============
-        _deployFreshRegistry();
+        (registryAddress,) = _deployFreshRegistry();
+        registry = Registry(registryAddress);
         _runCoreModuleSteps();
         new DeployWhitelist().run();
         new DeployAMM().run();
@@ -261,8 +263,22 @@ contract DeployScriptsTest is Test {
         vm.expectRevert(abi.encodeWithSelector(IRegistry.RegistryContractNotRegistered.selector, Auth.CONVERTER));
         finalize.run();
 
+        // ============ A skipped DeployWhitelist step fails finalization loudly ============
+        (registryAddress,) = _deployFreshRegistry();
+        registry = Registry(registryAddress);
+        _runCoreModuleSteps();
+        new DeployConverter().run();
+        new DeployAMM().run();
+        new DeployCREExecutors().run();
+        // DeployWhitelist intentionally skipped.
+
+        finalize = new FinalizeProtocolDeploy();
+        vm.expectRevert(abi.encodeWithSelector(IRegistry.RegistryContractNotRegistered.selector, Auth.WHITELIST));
+        finalize.run();
+
         // ============ A skipped DeployCREExecutors step fails finalization loudly ============
-        _deployFreshRegistry();
+        (registryAddress,) = _deployFreshRegistry();
+        registry = Registry(registryAddress);
         _runCoreModuleSteps();
         new DeployConverter().run();
         new DeployWhitelist().run();
@@ -380,5 +396,103 @@ contract UsdQuotedFeedGuardTest is Test {
         feed.setDescription("USD");
         _expectGuardRevert("USD");
         harness.assertUsdQuotedFeed(address(feed));
+    }
+}
+
+/**
+ * @title AdminTimelockDelayGuardHarness
+ * @notice Exposes ProtocolDeployBase._requireAdminTimelockDelay for direct testing.
+ */
+contract AdminTimelockDelayGuardHarness is ProtocolDeployBase {
+    function requireAdminTimelockDelay(uint256 _minDelay) external pure {
+        _requireAdminTimelockDelay(_minDelay);
+    }
+}
+
+/**
+ * @title AdminTimelockDelayGuardTest
+ * @notice Verifies the 48h floor applied by {_adminTimelockDelay} (PL-003): a weaker
+ *         delay would let ADMIN_ROLE act inside the documented reaction window.
+ */
+contract AdminTimelockDelayGuardTest is Test {
+    uint256 internal constant ADMIN_TIMELOCK_DELAY_FLOOR = 48 hours;
+    uint256 internal constant ADMIN_TIMELOCK_DELAY_ABOVE_FLOOR = 72 hours;
+    string internal constant REVERT_BELOW_FLOOR = "CRITICAL: TIMELOCK_ADMIN_DELAY below 48h floor";
+
+    AdminTimelockDelayGuardHarness internal harness;
+
+    function setUp() public {
+        harness = new AdminTimelockDelayGuardHarness();
+    }
+
+    function test_RequireAdminTimelockDelay_AcceptsFloor() public view {
+        harness.requireAdminTimelockDelay(ADMIN_TIMELOCK_DELAY_FLOOR);
+    }
+
+    function test_RequireAdminTimelockDelay_AcceptsAboveFloor() public view {
+        harness.requireAdminTimelockDelay(ADMIN_TIMELOCK_DELAY_ABOVE_FLOOR);
+    }
+
+    function test_RequireAdminTimelockDelay_RejectsBelowFloor() public {
+        vm.expectRevert(bytes(REVERT_BELOW_FLOOR));
+        harness.requireAdminTimelockDelay(ADMIN_TIMELOCK_DELAY_FLOOR - 1);
+    }
+
+    function test_RequireAdminTimelockDelay_RejectsZero() public {
+        vm.expectRevert(bytes(REVERT_BELOW_FLOOR));
+        harness.requireAdminTimelockDelay(0);
+    }
+
+    function testFuzz_RequireAdminTimelockDelay_RejectsBelowFloor(uint256 delay) public {
+        delay = bound(delay, 0, ADMIN_TIMELOCK_DELAY_FLOOR - 1);
+        vm.expectRevert(bytes(REVERT_BELOW_FLOOR));
+        harness.requireAdminTimelockDelay(delay);
+    }
+
+    function testFuzz_RequireAdminTimelockDelay_AcceptsAtOrAboveFloor(uint256 delay) public view {
+        delay = bound(delay, ADMIN_TIMELOCK_DELAY_FLOOR, type(uint256).max);
+        harness.requireAdminTimelockDelay(delay);
+    }
+}
+
+/**
+ * @title ProtocolDaoGuardHarness
+ * @notice Exposes ProtocolDeployBase._requireNonZeroDao for direct testing.
+ */
+contract ProtocolDaoGuardHarness is ProtocolDeployBase {
+    function requireNonZeroDao(address _dao) external pure {
+        _requireNonZeroDao(_dao);
+    }
+}
+
+/**
+ * @title ProtocolDaoGuardTest
+ * @notice Verifies the deploy-script rejection of DAO_ADDRESS = address(0) applied by
+ *         {_protocolDao} (PL-003): OZ grants PROPOSER_ROLE to the zero address so
+ *         membership checks pass, but no account can ever `schedule()`.
+ */
+contract ProtocolDaoGuardTest is Test {
+    string internal constant REVERT_ZERO_DAO = "CRITICAL: DAO_ADDRESS is zero";
+
+    ProtocolDaoGuardHarness internal harness;
+    address internal proposer;
+
+    function setUp() public {
+        harness = new ProtocolDaoGuardHarness();
+        proposer = makeAddr("proposer");
+    }
+
+    function test_RequireNonZeroDao_AcceptsNonZero() public view {
+        harness.requireNonZeroDao(proposer);
+    }
+
+    function test_RequireNonZeroDao_RejectsZero() public {
+        vm.expectRevert(bytes(REVERT_ZERO_DAO));
+        harness.requireNonZeroDao(address(0));
+    }
+
+    function testFuzz_RequireNonZeroDao_AcceptsNonZero(address dao) public view {
+        dao = address(uint160(bound(uint256(uint160(dao)), 1, type(uint160).max)));
+        harness.requireNonZeroDao(dao);
     }
 }

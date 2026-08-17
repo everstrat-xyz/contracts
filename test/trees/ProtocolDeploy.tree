@@ -2,10 +2,16 @@ ProtocolDeploy::Deployment Flow
 ├── Env configuration (ProtocolDeployBase)
 │   ├── Given DAO_ADDRESS, SECURITY_ADDRESS, or DAO_TREASURY_ADDRESS is unset
 │   │   └── It should revert (required env — critical addresses never default to the deployer)
+│   ├── Given DAO_ADDRESS is the zero address
+│   │   └── It should revert (sole timelock proposer; address(0) can never schedule operations)
 │   ├── Given EXIT_LIQUIDITY_TARGET_ETH or CONTROLLER_RESERVE_ETH is unset
 │   │   └── It should revert (required env — CREStrategyExecutor policy knobs; 0 is a valid explicit choice)
 │   ├── Given TIMELOCK_ADMIN_DELAY is unset
 │   │   └── It should default to the production 48h delay (sole deploy-script envOr exception)
+│   ├── Given TIMELOCK_ADMIN_DELAY is set below 48h
+│   │   └── It should revert (48h floor — ADMIN_ROLE trust model cannot ship with a weaker delay)
+│   ├── Given TIMELOCK_ADMIN_DELAY is set to 48h or above
+│   │   └── It should deploy the admin timelock with that min delay
 │   ├── Given PERFORMANCE_FEE_BPS is unset
 │   │   └── It should revert (required env — 0 is a valid explicit choice to disable fees)
 │   └── Given GRANT_KEEPER_ROLE is unset (DeployKeeperExecutors)
@@ -25,6 +31,16 @@ ProtocolDeploy::Deployment Flow
 │   │   └── It should pass and allow updateUsdFeedInfo
 │   └── Given feed description() does not end with " / USD" (non-USD quote, USD as base, missing separator, arbitrary string, shorter than suffix)
 │       └── It should revert the deployment with the offending description (USD-quote invariant)
+├── Admin timelock delay floor (_adminTimelockDelay — DeployRegistry, DeployAll; PL-003)
+│   ├── Given TIMELOCK_ADMIN_DELAY >= 48h (or unset, falling back to 48h)
+│   │   └── It should deploy the admin TimelockController with that min delay
+│   └── Given TIMELOCK_ADMIN_DELAY < 48h
+│       └── It should revert (ADMIN_ROLE trust model cannot ship with a weaker delay)
+├── DAO proposer non-zero guard (_protocolDao — DeployRegistry, DeployAll; PL-003)
+│   ├── Given DAO_ADDRESS is non-zero
+│   │   └── It should install that address as the sole TimelockController proposer
+│   └── Given DAO_ADDRESS is address(0)
+│       └── It should revert (hasRole(PROPOSER, 0) would pass but no account can schedule)
 ├── DeployAMM
 │   ├── It should register STRATEGY_MANAGER and AMM keys
 │   ├── It should initialize StrategyManager with FeeConfig (required DAO_TREASURY_ADDRESS + PERFORMANCE_FEE_BPS)
@@ -66,7 +82,7 @@ ProtocolDeploy::Deployment Flow
     ├── It should verify the admin timelock (TIMELOCK_ADDRESS) holds ADMIN_ROLE
     ├── It should verify every critical grant (SECURITY_ROLE → security, MINTER_ROLE → AMM + StrategyManager,
     │   CONVERTER_CALLER_MANAGER_ROLE → Converter, KEEPER_ROLE → both executors) and fail loudly on any gap
-    ├── It should revert when a modular step was skipped (unregistered Registry key)
+    ├── It should revert when a modular step was skipped (unregistered Registry key, including WHITELIST)
     └── Deployer should not be able to register contracts afterward
 
 ProtocolDeploy::DeployScripts (integration tests)
@@ -74,6 +90,7 @@ ProtocolDeploy::DeployScripts (integration tests)
 └── test_ModularFlow_EndToEndGrantsAndFinalizeGuards
     ├── Happy path: full modular flow ends with every critical grant verified
     ├── Finalize reverts when the DeployConverter step was skipped (unregistered CONVERTER key)
+    ├── Finalize reverts when the DeployWhitelist step was skipped (unregistered WHITELIST key)
     ├── Finalize reverts when the DeployKeeperExecutors step was skipped (unregistered executor key)
     └── Finalize reverts when a registered module misses a grant (StrategyManager MINTER_ROLE)
 

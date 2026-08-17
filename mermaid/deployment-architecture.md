@@ -96,7 +96,7 @@ graph TB
 | `DeployWhitelist.s.sol` | Whitelist | `WHITELIST` | Requires `REGISTRY_ADDRESS`, `WHITELIST_SIGNER_ADDRESS` (explicit `address(0)` postpones invite-signer seeding); redeploys start empty |
 | `DeployAll.s.sol` | Full stack incl. Whitelist + both CRE keeper executors | All keys + keeper keys | Grants protocol roles; `KEEPER_ROLE` only to CRE executors; initializes SM fee config; seeds Whitelist signer when non-zero; unconditionally renounces deployer admin |
 | `DeployCREExecutors.s.sol` | CREQueueExecutor + CREStrategyExecutor | `QUEUE_KEEPER_EXECUTOR`, `STRATEGY_KEEPER_EXECUTOR` | Requires `REGISTRY_ADDRESS`, `KEYSTONE_FORWARDER`, `CHAIN_SELECTOR`, `MAX_REPORT_AGE`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE`; run before finalize; bind workflow identity after deploy |
-| `FinalizeProtocolDeploy.s.sol` | — | — | Unconditionally renounces deployer ADMIN (required final modular step; requires `TIMELOCK_ADDRESS`, `SECURITY_ADDRESS`); VERIFIES every critical grant (`SECURITY_ROLE` → security, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors) and reverts loudly on any skipped/mis-granted step |
+| `FinalizeProtocolDeploy.s.sol` | — | — | Unconditionally renounces deployer ADMIN (required final modular step; requires `TIMELOCK_ADDRESS`, `SECURITY_ADDRESS`); VERIFIES every critical grant (`SECURITY_ROLE` → security, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors) and every module registration including `WHITELIST`; reverts loudly on any skipped/mis-granted step |
 | `DeployUniCLStrat.s.sol` | UniCLStrat | — | Deploy-only after timelocked `setAllowedAdapter`. No `addStrategy` — schedule that on the admin timelock (with paired-token feed / optional `addSupportedERC20` typically in the allowlist batch) |
 
 Shared helpers live in `script/ProtocolDeployBase.sol` (mirrors `test/helpers/ProtocolTestBase.sol`).
@@ -106,14 +106,16 @@ Shared helpers live in `script/ProtocolDeployBase.sol` (mirrors `test/helpers/Pr
 Critical addresses and operational knobs are **required**
 (`vm.envAddress` / `vm.envUint` / `vm.envBool` revert when unset) — they never
 default via `envOr`, except `TIMELOCK_ADMIN_DELAY` which falls back to the production
-48h policy (`DEFAULT_ADMIN_TIMELOCK_DELAY`) and never to a weaker value. Setting a
+48h policy (`DEFAULT_ADMIN_TIMELOCK_DELAY`) and reverts if set below 48h. Setting a
 numeric knob to `0` (or a bool to `false`) is a valid explicit choice; omitting a
-required variable is not.
+required variable is not. Address knobs that hold a live role (notably `DAO_ADDRESS`,
+the sole timelock proposer) reject `address(0)` — unlike `WHITELIST_SIGNER_ADDRESS`,
+where explicit zero postpones invite-signer seeding.
 
 | Variable | Used by | Purpose |
 |----------|---------|---------|
 | `PRIVATE_KEY` | All scripts | Broadcast signer (temporary bootstrap ADMIN only) |
-| `DAO_ADDRESS` | DeployRegistry, DeployAll | **Required.** DAO multisig — timelock proposer/canceller; no direct protocol role |
+| `DAO_ADDRESS` | DeployRegistry, DeployAll | **Required, non-zero.** DAO multisig — timelock proposer/canceller; no direct protocol role. `address(0)` is rejected (it can never `schedule()`) |
 | `SECURITY_ADDRESS` | DeployRegistry, DeployAll, FinalizeProtocolDeploy | **Required.** Security multisig — SECURITY_ROLE + timelock canceller |
 | `DAO_TREASURY_ADDRESS` | DeployAll, DeployAMM | **Required.** Performance-fee EVE recipient |
 | `PERFORMANCE_FEE_BPS` | DeployAll, DeployAMM | **Required.** Initial StrategyManager fee rate in bps; `0` disables fees |
@@ -122,7 +124,7 @@ required variable is not.
 | `KEYSTONE_FORWARDER` | DeployAll, DeployCREExecutors | **Required.** Chainlink-managed KeystoneForwarder (immutable `FORWARDER` on CRE receivers) |
 | `CHAIN_SELECTOR` | DeployAll, DeployCREExecutors | **Required** (uint64). CCIP chain selector baked into the CRE Envelope |
 | `MAX_REPORT_AGE` | DeployAll, DeployCREExecutors | **Required** (uint64, > 0). Max Envelope `observedAt` age in seconds |
-| `TIMELOCK_ADMIN_DELAY` | DeployRegistry, DeployAll | Optional. Admin timelock min delay (seconds); defaults to 48h — sole deploy-script `envOr` |
+| `TIMELOCK_ADMIN_DELAY` | DeployRegistry, DeployAll | Optional. Admin timelock min delay (seconds); defaults to 48h, rejects values below 48h — sole deploy-script `envOr` |
 | `REGISTRY_ADDRESS` | Partial deploy scripts, DeployCREExecutors | Existing Registry (logged by DeployRegistry) |
 | `TIMELOCK_ADDRESS` | DeployOracle, FinalizeProtocolDeploy | Existing admin timelock (logged by DeployRegistry) |
 | `PRICE_FEED` | DeployOracle, DeployAll | **Required.** Chainlink ETH/USD feed |
@@ -226,7 +228,7 @@ The Registry constructor grants `ADMIN_ROLE` to both `_admin` (the admin timeloc
 
 - **DeployAll** renounces the deployer's ADMIN automatically at the end.
 - **DeployRegistry** and **DeployAMM** do not finalize — the deployer keeps ADMIN for subsequent scripts.
-- **FinalizeProtocolDeploy** is the explicit, required last step of a modular deploy. Beyond renouncing, it verifies every critical grant (`SECURITY_ROLE` → security multisig, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both keeper executors) and every module registration, reverting loudly when a modular step was skipped or a grant is missing — a gap found only at runtime would need a 48h-timelocked repair. When keeper grants were deferred (`GRANT_KEEPER_ROLE=false`), finalize only after the timelocked grants have executed.
+- **FinalizeProtocolDeploy** is the explicit, required last step of a modular deploy. Beyond renouncing, it verifies every critical grant (`SECURITY_ROLE` → security multisig, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both keeper executors) and every module registration including `WHITELIST`, reverting loudly when a modular step was skipped or a grant is missing — a gap found only at runtime would need a 48h-timelocked repair. When keeper grants were deferred (`GRANT_KEEPER_ROLE=false`), finalize only after the timelocked grants have executed.
 
 ## Contract Addresses
 

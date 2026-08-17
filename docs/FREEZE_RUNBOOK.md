@@ -921,7 +921,7 @@ report bounced, which is the difference between a workflow bug and a DON outage:
 
 | Constant | Value | Where |
 |---|---|---|
-| Admin timelock delay | 48h minimum (`DEFAULT_ADMIN_TIMELOCK_DELAY`; upgrades scheduled longer by policy) | `script/ProtocolDeployBase.sol` |
+| Admin timelock delay | 48h minimum (`DEFAULT_ADMIN_TIMELOCK_DELAY`; deploy scripts revert below this floor; upgrades scheduled longer by policy) | `script/ProtocolDeployBase.sol` |
 | `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | `src/contracts/ExitQueue.sol` |
 | Oracle staleness | per-token `stalenessInterval`, set via `updateUsdFeedInfo` | `src/contracts/Oracle.sol` |
 | `UniCLStrat.MIN_TWAP_INTERVAL` | 1800 s (long TWAP floor) | `src/contracts/strategies/UniCLStrat.sol` |
