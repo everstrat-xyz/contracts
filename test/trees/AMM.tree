@@ -23,7 +23,7 @@ AMM::enter(uint256 _minTokensToMint) payable
 │   │   ├── It should call oracle to convert ETH to USD for validation
 │   │   ├── It should set bootstrapped = true
 │   │   ├── It should mint _DEAD_SUPPLY (1e18) to address(0xdead)
-│   │   ├── It should mint userTokens (= depositUSD - _DEAD_SUPPLY) to user
+│   │   ├── It should mint userTokens (= depositUSD - _DEAD_SUPPLY) to user BEFORE transferring ETH to controller (same CEI as post-bootstrap enter)
 │   │   ├── It should set total supply to depositUSD
 │   │   ├── It should transfer ETH to controller (via sendValue)
 │   │   └── It should emit Bootstrapped event
@@ -38,8 +38,9 @@ AMM::enter(uint256 _minTokensToMint) payable
 │       ├── It should price tokens using premium price in ETH (_evePremiumPriceInETH)
 │       ├── It should exclude msg.value from NAV when pricing (pre-deposit NAV)
 │       ├── It should not inflate NAV with locked claim ETH
-│       ├── It should mint tokens to user (via mint)
+│       ├── It should mint tokens to user (via mint) BEFORE transferring ETH to controller (AMM-3 / CEI)
 │       ├── It should transfer ETH to controller (via sendValue)
+│       ├── A Controller receive() observer must already see the post-mint totalSupply (mid-call)
 │       └── It should emit UserEntered event
 └── Given contract is paused
     └── It should revert with EnforcedPause

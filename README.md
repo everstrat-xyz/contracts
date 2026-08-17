@@ -81,6 +81,7 @@ A static (immutable) bonding curve contract that handles ETH deposits and EVE to
 - **Pull-over-Push Redemption:** Processed redemptions credit ETH to `claimableBalances` rather than pushing directly to the user, preventing malicious recipients from blocking batch processing
 - **Free Balance Tracking:** `freeBalance()` returns `address(this).balance - lockedForClaims`, used for liquidity checks so locked claim funds are never double-counted
 - **Bootstrap Mechanism:** Initial liquidity provision with dead supply lock
+- **Enter CEI:** Post-bootstrap `enter` mints EVE before forwarding ETH to the Controller (`sendValue`), matching bootstrap — keeps NAV/supply consistent for any observer during the Controller `receive` callback
 - **Entry Whitelist Gate:** While the Registry `WHITELIST` invite period is active, `enter()` requires the caller to be whitelisted (`AMMNotWhitelisted` otherwise). First-time admission can use `enterWithInvite(...)` (redeems an EIP-712 voucher then mints in one tx). `exit()` is never gated. After `Whitelist.disable()`, entry is open to everyone.
 - **RegistryClient:** `constructor(address _registry, uint256 _connectorWeight)`
 - **Access:** `ADMIN_ROLE` on Registry for connector weight and pause; registered `CONTROLLER` for `processRedemption()`
