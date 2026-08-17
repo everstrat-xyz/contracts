@@ -84,10 +84,6 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
 
     // ============ Views ============
 
-    function version() external pure returns (string memory) {
-        return "1.0.0-cre";
-    }
-
     function queueUpkeepStatus() external view returns (QueueAction action, uint256 batchId, uint256 count) {
         if (paused()) return (QueueAction.None, 0, 0);
 
@@ -136,6 +132,10 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
         return _affordableRequests(IExitQueue(registry_.exitQueue()), registry_.controller(), _batchId);
     }
 
+    function version() external pure returns (string memory) {
+        return "1.0.0-cre";
+    }
+
     // ============ CRE processing ============
 
     function _processReport(uint8 action, bytes memory params) internal override {
@@ -178,6 +178,13 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     }
 
     // ============ Internal ============
+
+    function _advanceBatchCursor(IExitQueue _queue) internal {
+        uint256 cursor = _peekAdvancedCursor(_queue);
+        if (cursor != nextBatchIdToProcess) {
+            nextBatchIdToProcess = cursor;
+        }
+    }
 
     /**
      * @notice Whether the cursor may advance past `_batchId` without work being lost.
@@ -237,13 +244,6 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
             if (cumulativeCost + cost > budget) break;
             cumulativeCost += cost;
             count++;
-        }
-    }
-
-    function _advanceBatchCursor(IExitQueue _queue) internal {
-        uint256 cursor = _peekAdvancedCursor(_queue);
-        if (cursor != nextBatchIdToProcess) {
-            nextBatchIdToProcess = cursor;
         }
     }
 }

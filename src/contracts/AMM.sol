@@ -86,7 +86,7 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
      * @notice Mapping from user to claimable ETH amount for implementing
      * pull-over-push pattern.
      */
-    mapping(address user => uint256) public claimableBalances;
+    mapping(address user => uint256 claimableETH) public claimableBalances;
 
     // ============ Constructor ============
 
@@ -277,128 +277,46 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         _unpause();
     }
 
+    // ============ View Functions ============
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function freeBalance() external view returns (uint256) {
+        return _freeBalance();
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function eveBasePriceInETH() external view returns (uint256) {
+        uint256 supply = EVE(_registry.eve()).totalSupply();
+        return _basePriceFromNAV(_navInETH(), _liveSupply(supply));
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function evePremiumPriceInETH() external view returns (uint256) {
+        uint256 supply = EVE(_registry.eve()).totalSupply();
+        return _premiumPriceFromNAV(_navInETH(), _liveSupply(supply));
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function eveBasePriceInUSD() external view returns (uint256) {
+        return _eveBasePriceInUSD(_liveSupply(EVE(_registry.eve()).totalSupply()));
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function evePremiumPriceInUSD() external view returns (uint256) {
+        return _evePremiumPriceInUSD(_liveSupply(EVE(_registry.eve()).totalSupply()));
+    }
+
     // ============ Internal Functions ============
-
-    /**
-     * @notice Function to calculate amount ETH to transfer based on number of tokens and price.
-     * @param _tokensAmount Number of protocol tokens.
-     * @param _evePrice Price of the EVE token in ETH terms.
-     * @return uint256 Amount of ETH to transfer.
-     */
-    function _calculateETHToTransfer(uint256 _tokensAmount, uint256 _evePrice) internal pure returns (uint256) {
-        return Math.convertAssets(_tokensAmount, _evePrice);
-    }
-
-    /**
-     * @dev Calculates the number of protocol tokens equivalent to the given ETH amount.
-     * @param _ethAmount Amount of ETH to convert to protocol tokens.
-     * @param _evePrice Price of the EVE token in ETH terms.
-     * @return uint256 Number of protocol tokens equivalent to the given ETH amount.
-     */
-    function _ethToProtocolTokens(uint256 _ethAmount, uint256 _evePrice) internal pure returns (uint256) {
-        return Math.convertAssetsInverse(_ethAmount, _evePrice);
-    }
-
-    /**
-     * @dev Calculates the current EVE token base price in USD terms
-     * @param _totalSupply Current total supply of the EVE token (normalized).
-     * @return uint256 Current base price of EVE token in USD terms.
-     */
-    function _eveBasePriceInUSD(uint256 _totalSupply) internal view returns (uint256) {
-        uint256 basePriceETH = _basePriceFromNAV(_navInETH(), _totalSupply);
-        return Oracle(_registry.oracle()).convertTokenToUSD(address(0), basePriceETH, Math.DECIMALS_NORMALIZED);
-    }
-
-    /**
-     * @dev Calculates the current EVE token premium price in USD terms
-     * @param _totalSupply Current total supply of the EVE token (normalized).
-     * @return uint256 Current premium price of EVE token in USD terms.
-     */
-    function _evePremiumPriceInUSD(uint256 _totalSupply) internal view returns (uint256) {
-        uint256 premiumPriceETH = _premiumPriceFromNAV(_navInETH(), _totalSupply);
-        return Oracle(_registry.oracle()).convertTokenToUSD(address(0), premiumPriceETH, Math.DECIMALS_NORMALIZED);
-    }
-
-    /**
-     * @dev EVE base price in ETH terms from a pre-fetched NAV.
-     * Formula: base_price = NAV_total / EVE_supply (NAV_total = strategy NAVs +
-     * controller balance + AMM free balance). Callers pass the NAV explicitly so
-     * flows that need several prices read NAV only once, and flows with an in-flight
-     * deposit can pass {_navInETHPendingTransfer} instead of {_navInETH}.
-     * @return uint256 Base price of EVE token in ETH terms (18 decimals).
-     */
-    function _basePriceFromNAV(uint256 _navTotal, uint256 _totalSupply) internal pure returns (uint256) {
-        if (_totalSupply == 0) revert AMMZeroTotalSupply();
-
-        return Math.basePrice(_navTotal, _totalSupply);
-    }
-
-    /**
-     * @dev EVE premium price in ETH terms from a pre-fetched NAV.
-     * Formula: premium_price = NAV_total / (EVE_supply * cw) (NAV_total = strategy
-     * NAVs + controller balance + AMM free balance). Callers pass the NAV explicitly
-     * so flows that need several prices read NAV only once, and flows with an in-flight
-     * deposit can pass {_navInETHPendingTransfer} instead of {_navInETH}.
-     * @return uint256 Premium price of EVE token in ETH terms (18 decimals).
-     */
-    function _premiumPriceFromNAV(uint256 _navTotal, uint256 _totalSupply) internal view returns (uint256) {
-        if (_totalSupply == 0) revert AMMZeroTotalSupply();
-
-        return Math.premiumPrice(_navTotal, _totalSupply, connectorWeight);
-    }
-
-    /**
-     * @dev Calculates current NAV of the protocol in ETH terms with normalized
-     * (i.e. 1e18) decimals. Does not adjust for any in-flight deposit; flows that
-     * receive ETH which is not yet protocol-owned must use
-     * {_navInETHPendingTransfer} instead. Locked claim ETH is excluded from NAV.
-     * @return uint256 Current protocol NAV in ETH terms.
-     */
-    function _navInETH() internal view returns (uint256) {
-        // If this reverts, the AMM is not registered or StrategyManager wiring is incomplete.
-        return StrategyManager(payable(_registry.strategyManager())).totalNAVInETH();
-    }
-
-    /**
-     * @dev NAV in ETH excluding `msg.value`, the caller's incoming deposit during
-     * `enter()`. {totalNAVInETH} includes `amm.freeBalance()`, which already holds the
-     * incoming ETH for the current call, but that deposit is not yet protocol-owned and
-     * must not inflate the price the depositor pays — so it is subtracted here.
-     * @return uint256 Protocol NAV in ETH terms with the pending deposit removed.
-     */
-    function _navInETHPendingTransfer() internal view returns (uint256) {
-        // The invariant: totalNAVInETH() includes amm.freeBalance(), so subtraction is safe.
-        uint256 nav = _navInETH();
-        if (nav < msg.value) revert AMMNAVUnderflow();
-
-        return nav - msg.value;
-    }
-
-    /**
-     * @dev Calculates the free balance of the contract.
-     * Free balance is the balance of the contract minus the locked amount for claims.
-     * @return uint256 Free balance of the contract.
-     */
-    function _freeBalance() internal view returns (uint256) {
-        return address(this).balance - lockedForClaims;
-    }
-
-    /**
-     * @dev EVE supply participating in live share price: `totalSupply` minus in-window
-     * priced escrow. Unpriced queued tokens stay in the denominator (cancellable equity).
-     */
-    function _liveSupply(uint256 _totalSupply) internal view returns (uint256) {
-        (, uint256 escrowed) = ExitQueue(payable(_registry.exitQueue())).liveRedemptionOffsets();
-        if (_totalSupply < escrowed) revert AMMEscrowExceedsSupply();
-        return _totalSupply - escrowed;
-    }
-
-    /**
-     * @dev Whether `_user` is whitelisted per the protocol Whitelist contract.
-     */
-    function _isWhitelisted(address _user) internal view returns (bool) {
-        return Whitelist(_registry.whitelist()).isWhitelisted(_user);
-    }
 
     /**
      * @dev Shared body of `enter()` and `enterWithInvite()`: both wrappers apply
@@ -484,42 +402,128 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         minBatchExitETH = _minBatchExitETH;
     }
 
-    // ============ View Functions ============
+    // ============ Internal View Functions ============
 
     /**
-     * @inheritdoc IAMM
+     * @dev Calculates the current EVE token base price in USD terms
+     * @param _totalSupply Current total supply of the EVE token (normalized).
+     * @return uint256 Current base price of EVE token in USD terms.
      */
-    function freeBalance() external view returns (uint256) {
-        return _freeBalance();
+    function _eveBasePriceInUSD(uint256 _totalSupply) internal view returns (uint256) {
+        uint256 basePriceETH = _basePriceFromNAV(_navInETH(), _totalSupply);
+        return Oracle(_registry.oracle()).convertTokenToUSD(address(0), basePriceETH, Math.DECIMALS_NORMALIZED);
     }
 
     /**
-     * @inheritdoc IAMM
+     * @dev Calculates the current EVE token premium price in USD terms
+     * @param _totalSupply Current total supply of the EVE token (normalized).
+     * @return uint256 Current premium price of EVE token in USD terms.
      */
-    function eveBasePriceInETH() external view returns (uint256) {
-        uint256 supply = EVE(_registry.eve()).totalSupply();
-        return _basePriceFromNAV(_navInETH(), _liveSupply(supply));
+    function _evePremiumPriceInUSD(uint256 _totalSupply) internal view returns (uint256) {
+        uint256 premiumPriceETH = _premiumPriceFromNAV(_navInETH(), _totalSupply);
+        return Oracle(_registry.oracle()).convertTokenToUSD(address(0), premiumPriceETH, Math.DECIMALS_NORMALIZED);
     }
 
     /**
-     * @inheritdoc IAMM
+     * @dev EVE premium price in ETH terms from a pre-fetched NAV.
+     * Formula: premium_price = NAV_total / (EVE_supply * cw) (NAV_total = strategy
+     * NAVs + controller balance + AMM free balance). Callers pass the NAV explicitly
+     * so flows that need several prices read NAV only once, and flows with an in-flight
+     * deposit can pass {_navInETHPendingTransfer} instead of {_navInETH}.
+     * @return uint256 Premium price of EVE token in ETH terms (18 decimals).
      */
-    function evePremiumPriceInETH() external view returns (uint256) {
-        uint256 supply = EVE(_registry.eve()).totalSupply();
-        return _premiumPriceFromNAV(_navInETH(), _liveSupply(supply));
+    function _premiumPriceFromNAV(uint256 _navTotal, uint256 _totalSupply) internal view returns (uint256) {
+        if (_totalSupply == 0) revert AMMZeroTotalSupply();
+
+        return Math.premiumPrice(_navTotal, _totalSupply, connectorWeight);
     }
 
     /**
-     * @inheritdoc IAMM
+     * @dev Calculates current NAV of the protocol in ETH terms with normalized
+     * (i.e. 1e18) decimals. Does not adjust for any in-flight deposit; flows that
+     * receive ETH which is not yet protocol-owned must use
+     * {_navInETHPendingTransfer} instead. Locked claim ETH is excluded from NAV.
+     * @return uint256 Current protocol NAV in ETH terms.
      */
-    function eveBasePriceInUSD() external view returns (uint256) {
-        return _eveBasePriceInUSD(_liveSupply(EVE(_registry.eve()).totalSupply()));
+    function _navInETH() internal view returns (uint256) {
+        // If this reverts, the AMM is not registered or StrategyManager wiring is incomplete.
+        return StrategyManager(payable(_registry.strategyManager())).totalNAVInETH();
     }
 
     /**
-     * @inheritdoc IAMM
+     * @dev NAV in ETH excluding `msg.value`, the caller's incoming deposit during
+     * `enter()`. {totalNAVInETH} includes `amm.freeBalance()`, which already holds the
+     * incoming ETH for the current call, but that deposit is not yet protocol-owned and
+     * must not inflate the price the depositor pays — so it is subtracted here.
+     * @return uint256 Protocol NAV in ETH terms with the pending deposit removed.
      */
-    function evePremiumPriceInUSD() external view returns (uint256) {
-        return _evePremiumPriceInUSD(_liveSupply(EVE(_registry.eve()).totalSupply()));
+    function _navInETHPendingTransfer() internal view returns (uint256) {
+        // The invariant: totalNAVInETH() includes amm.freeBalance(), so subtraction is safe.
+        uint256 nav = _navInETH();
+        if (nav < msg.value) revert AMMNAVUnderflow();
+
+        return nav - msg.value;
+    }
+
+    /**
+     * @dev Calculates the free balance of the contract.
+     * Free balance is the balance of the contract minus the locked amount for claims.
+     * @return uint256 Free balance of the contract.
+     */
+    function _freeBalance() internal view returns (uint256) {
+        return address(this).balance - lockedForClaims;
+    }
+
+    /**
+     * @dev EVE supply participating in live share price: `totalSupply` minus in-window
+     * priced escrow. Unpriced queued tokens stay in the denominator (cancellable equity).
+     */
+    function _liveSupply(uint256 _totalSupply) internal view returns (uint256) {
+        (, uint256 escrowed) = ExitQueue(payable(_registry.exitQueue())).liveRedemptionOffsets();
+        if (_totalSupply < escrowed) revert AMMEscrowExceedsSupply();
+        return _totalSupply - escrowed;
+    }
+
+    /**
+     * @dev Whether `_user` is whitelisted per the protocol Whitelist contract.
+     */
+    function _isWhitelisted(address _user) internal view returns (bool) {
+        return Whitelist(_registry.whitelist()).isWhitelisted(_user);
+    }
+
+    // ============ Internal Pure Functions ============
+
+    /**
+     * @notice Function to calculate amount ETH to transfer based on number of tokens and price.
+     * @param _tokensAmount Number of protocol tokens.
+     * @param _evePrice Price of the EVE token in ETH terms.
+     * @return uint256 Amount of ETH to transfer.
+     */
+    function _calculateETHToTransfer(uint256 _tokensAmount, uint256 _evePrice) internal pure returns (uint256) {
+        return Math.convertAssets(_tokensAmount, _evePrice);
+    }
+
+    /**
+     * @dev Calculates the number of protocol tokens equivalent to the given ETH amount.
+     * @param _ethAmount Amount of ETH to convert to protocol tokens.
+     * @param _evePrice Price of the EVE token in ETH terms.
+     * @return uint256 Number of protocol tokens equivalent to the given ETH amount.
+     */
+    function _ethToProtocolTokens(uint256 _ethAmount, uint256 _evePrice) internal pure returns (uint256) {
+        return Math.convertAssetsInverse(_ethAmount, _evePrice);
+    }
+
+    /**
+     * @dev EVE base price in ETH terms from a pre-fetched NAV.
+     * Formula: base_price = NAV_total / EVE_supply (NAV_total = strategy NAVs +
+     * controller balance + AMM free balance). Callers pass the NAV explicitly so
+     * flows that need several prices read NAV only once, and flows with an in-flight
+     * deposit can pass {_navInETHPendingTransfer} instead of {_navInETH}.
+     * @return uint256 Base price of EVE token in ETH terms (18 decimals).
+     */
+    function _basePriceFromNAV(uint256 _navTotal, uint256 _totalSupply) internal pure returns (uint256) {
+        if (_totalSupply == 0) revert AMMZeroTotalSupply();
+
+        return Math.basePrice(_navTotal, _totalSupply);
     }
 }
