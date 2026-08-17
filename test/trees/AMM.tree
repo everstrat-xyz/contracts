@@ -71,7 +71,7 @@ AMM::exit(uint256 _requestedETH, uint256 _maxTokensToBurn, uint256 _priceToleran
 │   ├── When _priceTolerance is greater than Math.SCALE_FACTOR (1e18)
 │   │   └── It should revert with AMMInvalidRange
 │   ├── When calculating tokensToBurn and ethToRedeem
-│   │   └── It should use the base price in ETH (NAV / supply via _basePriceFromNAV)
+│   │   └── It should use the live base price in ETH (NAV−L / liveSupply via _basePriceFromNAV)
 │   ├── When tokensToBurn calculation results in zero
 │   │   └── It should revert with AMMTooLowETHRequested
 │   ├── When _maxTokensToBurn is less than calculated tokensToBurn
@@ -211,13 +211,15 @@ AMM::evePremiumPriceInETH()
 ├── Given total supply is zero
 │   └── It should revert with AMMZeroTotalSupply
 └── Given valid state
-    ├── It should match formula: (NAV_ETH * NORMALIZATION_FACTOR) / (totalSupply * cw / SCALE_FACTOR)
-    └── It should use totalNAVInETH() (strategies + controller + AMM free balance)
+    ├── It should match formula: (liveNAV * NORMALIZATION_FACTOR) / (liveSupply * cw / SCALE_FACTOR)
+    ├── It should use totalNAVInETH() (strategies + controller + AMM free balance − in-window priced liability)
+    └── It should use liveSupply = totalSupply − in-window priced escrow (unpriced queued EVE stays in)
 
 AMM::eveBasePriceInETH()
 └── Given valid state
-    ├── It should match formula: (NAV_ETH * NORMALIZATION_FACTOR) / totalSupply
-    └── It should use totalNAVInETH() (strategies + controller + AMM free balance)
+    ├── It should match formula: (liveNAV * NORMALIZATION_FACTOR) / liveSupply
+    ├── It should use totalNAVInETH() (strategies + controller + AMM free balance − in-window priced liability)
+    └── It should use liveSupply = totalSupply − in-window priced escrow (unpriced queued EVE stays in)
 
 AMM::evePremiumPriceInUSD()
 ├── Given total supply is zero
@@ -232,7 +234,7 @@ AMM::eveBasePriceInUSD()
 ├── Given oracle price is stale
 │   └── It should revert
 └── Given valid state
-    ├── It should match formula: totalNAVInUSD() * NORMALIZATION_FACTOR / supply
+    ├── It should match formula: totalNAVInUSD() * NORMALIZATION_FACTOR / liveSupply
     └── It should equal eveBasePriceInETH() converted via oracle.convertTokenToUSD
 
 AMM::Pricing & NAV (ETH-first)
@@ -247,6 +249,13 @@ AMM::Pricing & NAV (ETH-first)
 ├── Given ETH locked for pending claims (after processRedemption)
 │   ├── totalNAVInETH() should use AMM freeBalance() only (exclude lockedForClaims)
 │   └── enter premium price should not be inflated by locked claim ETH
+├── Given an in-window priced ExitQueue batch
+│   ├── totalNAVInETH() should deduct liabilityETH (remainingTokens * finalEvePrice)
+│   ├── eveBasePriceInETH() / evePremiumPriceInETH() should use liveSupply (exclude escrowed EVE)
+│   └── unpriced queued EVE should remain in the supply denominator (cancellable equity)
+├── Given the priced batch is past MAX_BATCH_PROCESSING_TIME
+│   ├── liveRedemptionOffsets should return (0, 0) with no write (liability lapses on the clock)
+│   └── pullRequest / processRedemption should revert with ExitQueueBatchExpired
 ├── Given prices recomputed after operations
 │   ├── ETH prices should follow NAV/supply and change after enter
 │   └── USD prices should remain oracle conversions of ETH prices

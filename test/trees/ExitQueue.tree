@@ -3,6 +3,7 @@ ExitQueue::initialize(address _admin)
 │   └── It should revert with ExitQueueZeroAddress
 ├── Given valid parameters
 │   ├── It should set currentBatchId to 1
+│   ├── It should set liveScanFromBatchId to 1
 │   ├── It should grant ADMIN_ROLE to _admin
 │   └── It should report version "1.0.0"
 └── Given already initialized
@@ -101,8 +102,21 @@ ExitQueue::pushRequest(address _user, uint256 _evePriceAtRequestTime, uint256 _t
     │   └── It should return currentBatchId
     ├── When multiple distinct users push
     │   └── It should track each user independently (unprocessedUsers count grows)
-    └── When tokensToBurn is zero
-        └── It should still succeed (batch totalTokensToBurn stays 0)
+    ├── When tokensToBurn is zero
+    │   └── It should still succeed (batch totalTokensToBurn stays 0)
+    └── When tokensToBurn exceeds uint128
+        └── It should revert with ExitQueueTokensOverflow
+
+ExitQueue::liveRedemptionOffsets()
+├── Given current batch is unpriced
+│   └── It should return (0, 0) (cancellable equity)
+├── Given a batch is priced and in-window
+│   ├── It should return escrowedSupply = totalTokensToBurn
+│   └── It should return liabilityETH = convertAssets(tokens, finalEvePrice)
+├── Given the in-window request is pulled
+│   └── It should return (0, 0) and advance liveScanFromBatchId
+└── Given the batch is past MAX_BATCH_PROCESSING_TIME
+    └── It should return (0, 0) with no write (liability lapses on the clock)
 
 ExitQueue::priceBatch(uint256 _evePrice)
 ├── Given caller is not the registered Controller
@@ -119,7 +133,9 @@ ExitQueue::priceBatch(uint256 _evePrice)
 │       ├── It should set batch.canBeProcessed to true
 │       ├── It should set batch.pricedAt to block.timestamp
 │       ├── It should increment currentBatchId
-│       └── It should emit BatchPriced event
+│       ├── It should emit BatchPriced event
+│       └── When `[liveScanFromBatchId, currentBatchId)` already has MAX_LIVE_PRICED_BATCHES ids
+│           └── It should revert with ExitQueueTooManyLivePricedBatches
 └── Given reentrancy attempt
     └── It should revert (if reentrancy guard is added)
 
@@ -135,6 +151,8 @@ ExitQueue::pullRequest(uint256 _batchId, address _user)
     │   └── It should revert with ExitQueueRequestNotInBatch
     ├── When contract is paused
     │   └── It should revert with EnforcedPause
+    ├── When batch is priced but MAX_BATCH_PROCESSING_TIME exceeded
+    │   └── It should revert with ExitQueueBatchExpired
     ├── When price slippage exceeds tolerance
     │   ├── It should set request.closedDueToSlippage=true
     │   ├── It should set request.processed=true

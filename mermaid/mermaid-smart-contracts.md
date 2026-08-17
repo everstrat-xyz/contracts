@@ -14,6 +14,7 @@ graph TB
     Proxy["ERC1967<br/>Proxy"]
     OZLibs["OpenZeppelin<br/>Libraries"]
     Math["Math<br/>Library"]
+    ExitQueueLimits["ExitQueueLimits<br/>Library"]
     UniV3Math["Uniswap V3 Shared Libraries<br/>TickMath, FullMath,<br/>LiquidityAmounts, TickUtils<br/>(libraries/integrations/uniswap)"]
     UniswapV3Path["UniswapV3Path<br/>Path Encoding Library<br/>(libraries/integrations/uniswap)"]
     ChainlinkOracle["Chainlink<br/>Oracle"]
@@ -169,6 +170,7 @@ graph TB
     
     ExitQueueProxy --> Proxy
     ExitQueueProxy --> ExitQueue
+    ExitQueue --> ExitQueueLimits
     ExitQueueProxy -.->|"Managed by"| ControllerProxy
     
     StrategyManagerProxy --> Proxy
@@ -214,8 +216,10 @@ graph TB
     CREReceiverBase --> ReentrancyGuard
     CREQueueExecutor --> CREReceiverBase
     CREQueueExecutor --> ICREQueueExecutor
+    CREQueueExecutor --> ExitQueueLimits
     CREStrategyExecutor --> CREReceiverBase
     CREStrategyExecutor --> ICREStrategyExecutor
+    CREStrategyExecutor --> ExitQueueLimits
     CREDon -.->|"runtime.report + writeReport"| KeystoneForwarder
     KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREQueueExecutor
     KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREStrategyExecutor
@@ -260,7 +264,7 @@ graph TB
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
     class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,KeystoneForwarder external
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,KeystoneForwarder external
     class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory,IReceiver interface
     class Tests,Mocks,Helpers,Trees test
     class Registry,RegistryClient,RegistryClientUpgradeable,RegistryClientBase static
@@ -300,7 +304,7 @@ graph TB
 
 #### **AMM** (Static/Immutable) 
 - **Purpose**: Automated Market Maker for EVE token trading
-- **Features**: Enter/exit functionality with native ETH, ETH-first pricing (no oracle in hot path), ExitQueue integration, invite whitelist gate on entry
+- **Features**: Enter/exit functionality with native ETH, ETH-first pricing (no oracle in hot path; live NAV / live supply after in-window priced ExitQueue offsets), ExitQueue integration, invite whitelist gate on entry
 - **Oracle Usage**: Oracle is NOT used in enter/exit operations. Only used for bootstrap validation and USD price view functions
 - **Entry Whitelist**: While the Registry `WHITELIST` invite period is active, `enter()` requires `isWhitelisted(msg.sender)` (`AMMNotWhitelisted` otherwise). `enterWithInvite(...)` redeems an EIP-712 voucher via `Whitelist.whitelist(msg.sender, …)` then mints in the same tx. `exit()` never consults the Whitelist. After `Whitelist.disable()`, entry is open.
 - **Enter CEI**: Post-bootstrap enter mints EVE before forwarding ETH to the Controller (bootstrap already did), so NAV/supply stay consistent during the Controller `receive` callback
@@ -334,35 +338,36 @@ graph TB
 
 #### **ExitQueue** (Upgradeable)
 - **Purpose**: Manages queued redemption requests when AMM has insufficient liquidity
-- **Features**: Batch-based request management, slippage protection, pausable operations (`pushRequest`, `pullRequest`, and `priceBatch` gated by `whenNotPaused`; `closeRequest` works when paused for emergency withdrawals), **MAX_BATCH_PROCESSING_TIME** upper bound for processing; implementation constructor calls `_disableInitializers()`
+- **Features**: Batch-based request management, slippage protection, pausable operations (`pushRequest`, `pullRequest`, and `priceBatch` gated by `whenNotPaused`; `closeRequest` works when paused for emergency withdrawals), **MAX_BATCH_PROCESSING_TIME** upper bound; implementation constructor calls `_disableInitializers()`
+- **Live share-price accounting**: Unpriced queued EVE is cancellable equity (`liveRedemptionOffsets()` = `(0, 0)`). After `priceBatch`, StrategyManager NAV deducts `liabilityETH` and AMM / fee-mint supply deducts `escrowedSupply` until pull, slippage close, or the 3-day window lapses in the view (no reset tx). `pullRequest` after expiry reverts `ExitQueueBatchExpired`. Scan window `[liveScanFromBatchId, currentBatchId)` (empty range: both equal, including at init). Cap `MAX_LIVE_PRICED_BATCHES = 25` from `ExitQueueLimits` (aliased by CRE `MAX_BATCH_SCAN`; DoS bound, not cadence). Do not use the CRE cursor for NAV.
 - **batchInfo()** returns `canBeProcessed`, `finalEvePrice`, `totalTokensToBurn`, `createdAt`, and **`pricedAt`** (timestamp when the batch was priced; zero if not yet priced).
 - **requestCanBeClosed(batchId, user)** returns whether a user can close their request (true if batch not priced, or priced but past MAX_BATCH_PROCESSING_TIME; false if processed, not in batch, or within the processing window).
-- **Request Closure Restriction**: After a batch is priced (`canBeProcessed == true`), requests cannot be closed **within** MAX_BATCH_PROCESSING_TIME of `pricedAt`. Within that window, all requests must be processed via `pullRequest()`. This ensures liquidity commitment and prevents users from gaming the system by canceling after seeing the final price.
-- **Upper Bound / Escape Hatch**: If more than MAX_BATCH_PROCESSING_TIME has passed since `pricedAt`, users may close their requests via `closeRequest()`, allowing recovery if the AMM/keeper does not process the batch in time. **RequestClosed** event includes `viaEscapeHatch` (true when closed via escape hatch).
+- **Request Closure Restriction**: After a batch is priced (`canBeProcessed == true`), requests cannot be closed **within** MAX_BATCH_PROCESSING_TIME of `pricedAt`. Within that window they must be settled via `pullRequest()` (or wait out the window). This prevents users from gaming the system by canceling after seeing the final price.
+- **Upper Bound / Escape Hatch**: If more than MAX_BATCH_PROCESSING_TIME has passed since `pricedAt`, `pullRequest` is forbidden and users may close via `closeRequest()`. **RequestClosed** event includes `viaEscapeHatch` (true when closed via escape hatch).
 - **Access**: AMM_ROLE can push/pull/close requests, CONTROLLER_ROLE can price batches, ADMIN_ROLE can pause/unpause
-- **Errors**: ExitQueueZeroAddress, ExitQueueZeroPrice, ExitQueueBatchCannotBeProcessed, ExitQueueBatchIsEmpty, ExitQueueRequestNotInBatch, ExitQueueRequestAlreadyProcessed, ExitQueueRequestCannotBeClosed, ExitQueueRequestAlreadyInBatch, ExitQueueInvalidRange
+- **Errors**: ExitQueueZeroAddress, ExitQueueZeroPrice, ExitQueueBatchCannotBeProcessed, ExitQueueBatchIsEmpty, ExitQueueRequestNotInBatch, ExitQueueRequestAlreadyProcessed, ExitQueueRequestCannotBeClosed, ExitQueueRequestAlreadyInBatch, ExitQueueInvalidRange, ExitQueueBatchExpired, ExitQueueTooManyLivePricedBatches, ExitQueueTokensOverflow
 - **Deployment**: UUPS proxy pattern
 
 #### **StrategyManager** (Upgradeable)
 - **Purpose**: Manages external investment strategies, NAV calculations, and protocol-level performance fees
 - **Features**: Strategy registration, fund deposit/withdrawal, NAV tracking, rebalance operations, strategy-local LP-fee performance accounting, EVE mint settlement to DAO treasury
 - **Initialization**: `initialize(registry, FeeConfig{daoTreasury, performanceFeeBps})` — treasury must be non-zero; fees disabled when `performanceFeeBps == 0`
-- **Performance Fees**: Strategy-local LP-fee accounting via `IStrategy.pendingPerformanceFeeInETH` / `settlePerformanceFee`. Settlement mints EVE via bonding curve (`totalFeeETH * supply / (totalNAV - totalFeeETH)`) in **one mint per harvest batch**. Keeper/admin entry: `Controller.harvestPerformanceFeeFromStrategy(s)` (`ADMIN_ROLE` or `KEEPER_ROLE`); StrategyManager delegate is `CONTROLLER`-only. Paginated `[startIndex, endIndex)`. Withdrawals batch-harvest accrued fees before withdrawal. Paused strategies report zero pending fees and skip settlement (counters preserved until unpause); `emergencyExit()` writes off pending local fees (charged = earned after any best-effort accrue) after sweep. Requires `MINTER_ROLE` on Registry.
+- **Performance Fees**: Strategy-local LP-fee accounting via `IStrategy.pendingPerformanceFeeInETH` / `settlePerformanceFee`. Settlement mints EVE via bonding curve (`totalFeeETH * liveSupply / (totalNAV - totalFeeETH)`) in **one mint per harvest batch** (`liveSupply = totalSupply - escrowedSupply`; `totalNAV` already net of in-window priced liability). Keeper/admin entry: `Controller.harvestPerformanceFeeFromStrategy(s)` (`ADMIN_ROLE` or `KEEPER_ROLE`); StrategyManager delegate is `CONTROLLER`-only. Paginated `[startIndex, endIndex)`. Withdrawals batch-harvest accrued fees before withdrawal. Paused strategies report zero pending fees and skip settlement (counters preserved until unpause); `emergencyExit()` writes off pending local fees (charged = earned after any best-effort accrue) after sweep. Requires `MINTER_ROLE` on Registry.
 - **Access**: `ADMIN_ROLE` on Registry for strategy management and fee config; registered `CONTROLLER` for fund operations and harvest delegate
 - **Peer resolution**: AMM, Controller, Oracle addresses from Registry (`Auth`); `totalNAVInETH()` reverts if `AMM` key not registered
 - **Deposit Logic**: Receives ETH from Controller and deposits to healthy strategies proportionally based on safety levels (must be > 0 and <= 100). Only healthy strategies with maxDeposit > 0 are included. Reverts with `StrategyManagerNoStrategiesRegistered` when registry empty; returns 0 when none qualify. Returns remaining ETH to Controller if deposit is incomplete. Batch paths wrap each `deposit()` in `try/catch` and emit `StrategyDepositFailed(strategy, reason)` on failure (`reason` is the revert data; partial success). Single-strategy `depositToStrategy()` reverts on failure. Supports pagination with range [startIndex, endIndex) for gas optimization.
 - **Withdrawal Logic**: Withdraws ETH from strategies proportionally based on withdrawal priorities (must be > 0 and <= 100) to Controller. Reverts with `StrategyManagerNoStrategiesRegistered` when registry empty; returns 0 when no maxWithdrawal > 0. Events and return values reflect net ETH received by Controller (after strategy fees). Batch paths wrap each `withdraw()` in `try/catch` and emit `StrategyWithdrawFailed(strategy, reason)` on failure (`reason` is the revert data). Single-strategy `withdrawFromStrategy()` reverts on failure. Supports pagination with range [startIndex, endIndex) for gas optimization.
 - **Rebalance Logic**: `checkAndRebalanceStrategies()` rebalances unhealthy, unpaused strategies; skips paused. Batch paths wrap each `rebalance()` in `try/catch` and emit `StrategyRebalanceFailed(strategy, reason)` on failure (`reason` is the revert data). `checkAndRebalanceStrategy()` is a no-op when paused and reverts on `rebalance()` failure. Harvest paths have no per-strategy `try/catch` (fail-closed).
 - **Sync Logic**: `syncStrategies()` and `syncStrategy()` delegate to each strategy's `sync()`; skips strategies where `paused()` is true.
-- **ETH-First NAV Calculation**: NAV is calculated in ETH terms first, then converted to USD when needed. Total NAV in ETH = sum of all `strategy.navInETH()` (any revert freezes the protocol) + StrategyManager's ETH balance + Controller's ETH balance + AMM free balance (`amm.freeBalance()`; excludes `lockedForClaims`) + ETH value of each whitelisted supported-ERC-20 balance (via Oracle; zero balances skip the Oracle, stale feeds on non-zero balances freeze NAV). USD NAV is derived by converting ETH NAV via Oracle.
+- **ETH-First NAV Calculation**: NAV is calculated in ETH terms first, then converted to USD when needed. Total NAV in ETH = sum of all `strategy.navInETH()` (any revert freezes the protocol) + StrategyManager's ETH balance + Controller's ETH balance + AMM free balance (`amm.freeBalance()`; excludes `lockedForClaims`) + ETH value of each whitelisted supported-ERC-20 balance (via Oracle; zero balances skip the Oracle, stale feeds on non-zero balances freeze NAV) **minus in-window priced ExitQueue liability** (`liveRedemptionOffsets().liabilityETH`). Unpriced queued EVE is still equity. Liability lapses after `MAX_BATCH_PROCESSING_TIME` with no reset tx. Reverts `StrategyManagerQueuedLiabilityExceedsNAV` if liability exceeds gross NAV. USD NAV is derived by converting ETH NAV via Oracle.
 - **Supported-ERC-20 Whitelist**: Admin-managed EnumerableSet of ERC-20 tokens the StrategyManager may hold (e.g. paired tokens from `UniCLStrat.emergencyExit()`). Whitelisted balances are priced into NAV via `Oracle.convert()`; `addSupportedERC20()` / `removeSupportedERC20()` work while paused; `removeSupportedERC20()` is the escape hatch when a feed goes stale. **Future work:** on-chain swap recovery via the shared Converter (`recoverTokenToETH`) is deferred to a follow-up PR — this release ships ERC-20 accounting only.
-- **NAV Fail-Closed**: `_totalNAVInETH()` reverts if any strategy's `navInETH()` reverts, halting enter/exit/pricing until the strategy is fixed or force-removed via `forceRemoveStrategy()` (escape hatch for reverting or over-reporting NAV). Clean removal of an emptied strategy uses `removeStrategy()` (requires a successful dust-NAV read). Supported-ERC-20 pricing follows the same fail-closed semantics.
+- **NAV Fail-Closed**: `_totalNAVInETH()` reverts if any strategy's `navInETH()` reverts, or if in-window priced liability exceeds gross NAV (`StrategyManagerQueuedLiabilityExceedsNAV`), halting enter/exit/pricing until the strategy is fixed / force-removed or remaining priced batches lapse / are cancelled. Clean removal of an emptied strategy uses `removeStrategy()` (requires a successful dust-NAV read). Supported-ERC-20 pricing follows the same fail-closed semantics.
 - **Strategy Removal**: `removeStrategy()` requires a successful `navInETH()` read and reverts with `StrategyManagerStrategyNAVResidueTooHigh` if `nav > MAX_NAV_RESIDUE` (10 wei). A reverting `navInETH()` bubbles up — use `forceRemoveStrategy()`. Emits `StrategyRemoved(strategy)`. Callable while paused. Both removal paths share `_deregisterStrategy()` (drops from registry, best-effort `revokeCallerRole` via Converter — emits `CallerRoleRevokeFailed` on failure; strategy-local LP-fee accounting lives on the strategy, so there is no SM-side counter to clear).
 - **Force Removal**: `forceRemoveStrategy()` (`ADMIN_ROLE`, 48h timelock in production) skips the NAV residue check — escape hatch for strategies whose `navInETH()` over-reports or reverts. Reads NAV via `try/catch` for observability only; emits `StrategyForceRemoved(strategy, reportedNAV, navReverted)`; capital recovery via `IStrategy.emergencyExit()`. Does not require the strategy to be paused. Callable while paused.
 - **Oracle Integration**: Uses Oracle contract for ETH/USD conversion (only when USD values are needed)
 - **NAV Functions**: `totalNAVInETH()` (primary, used by AMM), `totalNAVInUSD()` (converts ETH NAV), `strategyNAVInETH()` (reads from strategy directly — no `try/catch`), `strategyNAVInUSD()` (converts ETH NAV)
 - **Events**: StrategyAdded, StrategyRemoved(strategy), StrategyForceRemoved(strategy, reportedNAV, navReverted), FundsDepositedToStrategy, FundsWithdrawnFromStrategy, StrategyRebalanced, StrategySynced, StrategyDepositFailed(strategy, reason), StrategyWithdrawFailed(strategy, reason), StrategyRebalanceFailed(strategy, reason), CallerRoleRevokeFailed(strategy), EmergencyWithdrawnToController, SupportedERC20Added, SupportedERC20Removed, PerformanceFeePaid, PerformanceFeeBpsChanged(initial, current), DaoTreasuryChanged(initial, current)
-- **Errors**: StrategyManagerStrategyAlreadyRegistered, StrategyManagerStrategyNotRegistered, StrategyManagerInvalidNAVValue, StrategyManagerZeroAddress, StrategyManagerNoCode, StrategyManagerStrategyNAVResidueTooHigh(address strategy), StrategyManagerNoStrategiesRegistered, StrategyManagerInvalidRange, StrategyManagerInvalidDepositWeight(address strategy), StrategyManagerInvalidWithdrawalWeight(address strategy), StrategyManagerInvalidLength, StrategyManagerNoBalanceToRecover, StrategyManagerERC20AlreadySupported, StrategyManagerERC20NotSupported, StrategyManagerERC20NotPriceable, StrategyManagerZeroDaoTreasury, StrategyManagerInvalidPerformanceFeeBps, StrategyManagerFeeMintOverflow; missing AMM registration surfaces `RegistryContractNotRegistered` from Registry
+- **Errors**: StrategyManagerStrategyAlreadyRegistered, StrategyManagerStrategyNotRegistered, StrategyManagerInvalidNAVValue, StrategyManagerZeroAddress, StrategyManagerNoCode, StrategyManagerStrategyNAVResidueTooHigh(address strategy), StrategyManagerNoStrategiesRegistered, StrategyManagerInvalidRange, StrategyManagerInvalidDepositWeight(address strategy), StrategyManagerInvalidWithdrawalWeight(address strategy), StrategyManagerInvalidLength, StrategyManagerNoBalanceToRecover, StrategyManagerERC20AlreadySupported, StrategyManagerERC20NotSupported, StrategyManagerERC20NotPriceable, StrategyManagerZeroDaoTreasury, StrategyManagerInvalidPerformanceFeeBps, StrategyManagerFeeMintOverflow, StrategyManagerQueuedLiabilityExceedsNAV, StrategyManagerEscrowExceedsSupply; missing AMM registration surfaces `RegistryContractNotRegistered` from Registry
 - **Deployment**: UUPS proxy pattern
 - **Interface**: `IStrategyManager` defines the standard manager methods
 - **Strategy Interface**: Strategies must implement `IStrategy` interface
@@ -440,8 +445,8 @@ graph TB
 
 #### **Pricing Mechanism**
 - **ETH-First Calculation**: AMM uses ETH-based NAV for price calculations, then converts to USD when needed
-- **NAV Source**: StrategyManager provides total NAV in ETH via `totalNAVInETH()` (primary function; reverts if any strategy `navInETH()` reverts)
-- **Dual pricing in ETH**: Base price (NAV_ETH/supply) and Premium price (NAV_ETH/adjusted supply) - both calculated in ETH terms
+- **NAV Source**: StrategyManager provides total NAV in ETH via `totalNAVInETH()` (primary function; reverts if any strategy `navInETH()` reverts; deducts in-window priced ExitQueue liability)
+- **Dual pricing in ETH**: Base price (`liveNAV / liveSupply`) and Premium price (`liveNAV / (liveSupply · cw)`) — live supply excludes in-window priced escrow; unpriced queued EVE stays in the denominator
 - **Enter/Exit Operations**: Use ETH prices directly - **NO oracle calls in hot path**
 - **USD Prices**: Derived by converting ETH prices via Oracle (only for view functions)
 - **Oracle Usage**: Chainlink ETH/USD price feed is only used for:
@@ -544,9 +549,9 @@ graph TB
     class E1,E2,E3,E4,E5,E6,E7,E8 err
     class Commit,Execute ok
 ```
-- **CREQueueExecutor**: `queueUpkeepStatus()` is the gas-bounded fallback/cross-check (`MAX_BATCH_SCAN = 25`). Actions: `ProcessRequests` (affordable prefix; report params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`
-  - **Cursor skippability rule**: a batch is skippable only if it is priced AND (fully settled OR past `MAX_BATCH_PROCESSING_TIME`, where users self-serve via `AMM.cancelRedemption`). Unpriced batches — the current one and any future id — are never skipped, even when empty, since they can still receive requests. `ExitQueue.priceBatch` writes `canBeProcessed` and `pricedAt` together, so `canBeProcessed` alone is the "is priced" predicate
-- **CREStrategyExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the report — recomputed at execution. Status view: `strategyUpkeepStatus()`
+- **CREQueueExecutor**: `queueUpkeepStatus()` is the gas-bounded fallback/cross-check (`MAX_BATCH_SCAN` aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`; DoS bound, not cadence). Actions: `ProcessRequests` (affordable prefix; report params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`. After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (`pullRequest` would revert `ExitQueueBatchExpired`). **Do not use the CRE cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`.
+  - **Cursor skippability rule**: a batch is skippable only if it is priced AND (fully settled OR past `MAX_BATCH_PROCESSING_TIME`, where users self-serve via `AMM.cancelRedemption` and `pullRequest` is forbidden). Unpriced batches — the current one and any future id — are never skipped, even when empty, since they can still receive requests. `ExitQueue.priceBatch` writes `canBeProcessed` and `pricedAt` together, so `canBeProcessed` alone is the "is priced" predicate
+- **CREStrategyExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the report — recomputed at execution. Status view: `strategyUpkeepStatus()`. Priced in-window batches cost `finalEvePrice`; expired contribute 0. The current **unpriced** batch is sized at residual `AMM.eveBasePriceInETH()` (cancellable equity; that live price is already net of in-window priced L).
 - **Interfaces**: `src/interfaces/automation/` (`IReceiver`, `ICREReceiverBase`, `ICREQueueExecutor`, `ICREStrategyExecutor`)
 - **Deployment**: `script/DeployCREExecutors.s.sol` / `DeployAll` via `ProtocolDeployBase._deployCREExecutors` — requires `KEYSTONE_FORWARDER`, `CHAIN_SELECTOR`, `MAX_REPORT_AGE`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → bind workflow identity → enable `writeReport`. Set `strategyDepositCooldown` > 0 before granting keeper roles to new addresses
 
@@ -576,17 +581,17 @@ graph TB
 | Registry | ✅ Complete | Static/Immutable | Address book (key→address), role authority (AccessControlEnumerable), pausable mutations, root of trust |
 | RegistryClient Mixins | ✅ Complete | Abstract | RegistryClientBase + static (RegistryClient) and upgradeable (RegistryClientUpgradeable) variants for peer/role resolution |
 | EVE Token | ✅ Complete | Static/Immutable | ERC20, role-based minting, "code is law" |
-| AMM | ✅ Complete | Static/Immutable | Enter/exit, ETH-first pricing (no oracle in hot path), ExitQueue integration, pull-over-push redemption (claim()), freeBalance(), activity events (RedemptionQueued/Processed/Cancelled/Claimed) |
+| AMM | ✅ Complete | Static/Immutable | Enter/exit, ETH-first pricing (live NAV / live supply; no oracle in hot path), ExitQueue integration, pull-over-push redemption (claim()), freeBalance(), activity events (RedemptionQueued/Processed/Cancelled/Claimed) |
 | Controller | ✅ Complete | Upgradeable | ETH receiver, keeper coordinator, redemption queue mgmt, fund distribution/withdrawal |
-| ExitQueue | ✅ Complete | Upgradeable | Batch-based redemption queue, slippage protection, pausable ops (`pushRequest`/`pullRequest`/`priceBatch` gated; `closeRequest` when paused), `_disableInitializers` on implementation, MAX_BATCH_PROCESSING_TIME, pricedAt, escape hatch |
-| StrategyManager | ✅ Complete | Upgradeable | Strategy mgmt, fund distribution/withdrawal, NAV tracking, LP-fee performance fees (EVE mint settlement) |
+| ExitQueue | ✅ Complete | Upgradeable | Batch-based redemption queue, live share-price offsets (`liveRedemptionOffsets` / `liveScanFromBatchId`), slippage protection, pausable ops (`pushRequest`/`pullRequest`/`priceBatch` gated; `closeRequest` when paused), `_disableInitializers` on implementation, MAX_BATCH_PROCESSING_TIME, MAX_LIVE_PRICED_BATCHES, pricedAt, escape hatch (`pullRequest` forbidden after expiry) |
+| StrategyManager | ✅ Complete | Upgradeable | Strategy mgmt, fund distribution/withdrawal, NAV tracking (minus in-window priced ExitQueue liability), LP-fee performance fees (EVE mint on live supply) |
 | IStrategy | ✅ Complete | Interface | Standard interface for investment strategies |
 | Converter | ✅ Complete | Upgradeable | Adapter allowlist, caller-owned swap routing via DELEGATECALL dispatch, exact-input + exact-output swaps (forward paths, balance-delta accounting, surplus refunds), WETH wrap/unwrap, permissionless quoting |
 | IConverterAdapter | ✅ Complete | Interface | Generic DEX adapter interface (validateRoute, routeTokens, quoteExactInput, quoteExactOutput, swapExactInput, swapExactOutput) — forward route encoding for all entry points |
 | UniswapV3ConverterAdapter | ✅ Complete | Static/Immutable | Shared UniswapV3Path encoding/validation, exactInput/exactOutput swaps via SwapRouter (delegatecalled from Converter; exact-output paths reversed internally), TWAP + Chainlink quoting via Oracle.convert (flash-loan resistant, gross-amount deviation check) |
 | UniCLStrat | ✅ Complete | Static/Immutable Strategy | Uniswap V3 concentrated liquidity, TWAP NAV, Converter-delegated swaps with oracle-bounded quotes, exact-output WETH top-ups with balance fallback |
 | Oracle | ✅ Complete | Upgradeable | Price feeds, staleness checks, token management, direct token-to-token convert() cross-rate |
-| CREQueueExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for the redemption queue: affordable-prefix batch processing + guarded batch pricing, Keystone-gated onReport, untrusted report re-validation |
+| CREQueueExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for the redemption queue: affordable-prefix batch processing (expired batches → 0) + guarded batch pricing, Keystone-gated onReport, untrusted report re-validation; MAX_BATCH_SCAN aliased from ExitQueueLimits.MAX_LIVE_PRICED_BATCHES |
 | CREStrategyExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for strategies: rebalance / withdraw-shortfall / provide-exit-liquidity / deposit-excess / harvest / sync with on-chain recomputed amounts, Keystone-gated onReport |
 | Testing | ✅ Complete | Comprehensive | Unit, integration, fuzzing, mocking |
 
@@ -604,6 +609,7 @@ graph TB
     Proxy["ERC1967<br/>Proxy"]
     OZLibs["OpenZeppelin<br/>Libraries"]
     Math["Math<br/>Library"]
+    ExitQueueLimits["ExitQueueLimits<br/>Library"]
     UniV3Math["Uniswap V3 Shared Libraries<br/>TickMath, FullMath,<br/>LiquidityAmounts, TickUtils<br/>(libraries/integrations/uniswap)"]
     UniswapV3Path["UniswapV3Path<br/>Path Encoding Library<br/>(libraries/integrations/uniswap)"]
     ChainlinkOracle["Chainlink<br/>Oracle"]
@@ -701,6 +707,7 @@ graph TB
     ExitQueue --> AccessControl
     ExitQueue --> IExitQueue
     ExitQueue --> OZLibs
+    ExitQueue --> ExitQueueLimits
     
     StrategyManager --> UUPS
     StrategyManager --> AccessControl
@@ -855,7 +862,7 @@ graph TB
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
     class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH external
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH external
     class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
     class Tests,Mocks,Helpers,Trees test
     class Vault,FutureStrategy,FutureDEXAdapter,IVault,VaultProxy future

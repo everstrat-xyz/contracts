@@ -5,6 +5,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {Math} from "../../libraries/Math.sol";
 import {Auth} from "../../libraries/Auth.sol";
+import {ExitQueueLimits} from "../../libraries/ExitQueueLimits.sol";
 
 import {IRegistry} from "interfaces/IRegistry.sol";
 import {IController} from "../../interfaces/IController.sol";
@@ -29,7 +30,11 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     using Math for uint256;
     using Auth for IRegistry;
 
-    uint256 public constant MAX_BATCH_SCAN = 25;
+    /// @dev Gas-bounded fallback scan. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
+    ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
+    ///      desync the keeper. A DoS bound, not cadence — CRE `minBatchAge` vs
+    ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping priced batches.
+    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
     uint256 public constant MIN_BATCH_AGE_UPPER_BOUND = 7 days;
     uint256 public constant MIN_BATCH_AGE_LOWER_BOUND = 1 days;
     uint256 public constant MAX_USERS_PER_UPKEEP_UPPER_BOUND = 100;
@@ -79,10 +84,6 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
 
     // ============ Views ============
 
-    function version() external pure returns (string memory) {
-        return "1.0.0-cre";
-    }
-
     function queueUpkeepStatus() external view returns (QueueAction action, uint256 batchId, uint256 count) {
         if (paused()) return (QueueAction.None, 0, 0);
 
@@ -131,6 +132,10 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
         return _affordableRequests(IExitQueue(registry_.exitQueue()), registry_.controller(), _batchId);
     }
 
+    function version() external pure returns (string memory) {
+        return "1.0.0-cre";
+    }
+
     // ============ CRE processing ============
 
     function _processReport(uint8 action, bytes memory params) internal override {
@@ -174,6 +179,13 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
 
     // ============ Internal ============
 
+    function _advanceBatchCursor(IExitQueue _queue) internal {
+        uint256 cursor = _peekAdvancedCursor(_queue);
+        if (cursor != nextBatchIdToProcess) {
+            nextBatchIdToProcess = cursor;
+        }
+    }
+
     /**
      * @notice Whether the cursor may advance past `_batchId` without work being lost.
      * @dev `ExitQueue.priceBatch` sets `canBeProcessed` and `pricedAt` in the same write, so
@@ -209,8 +221,9 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
         view
         returns (uint256 count)
     {
-        (bool canBeProcessed, uint256 finalEvePrice,,,) = _queue.batchInfo(_batchId);
+        (bool canBeProcessed, uint256 finalEvePrice,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
         if (!canBeProcessed) return 0;
+        if (pricedAt > 0 && block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
 
         uint256 unprocessedCount = _queue.unprocessedUsersCount(_batchId);
         if (unprocessedCount == 0) return 0;
@@ -231,13 +244,6 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
             if (cumulativeCost + cost > budget) break;
             cumulativeCost += cost;
             count++;
-        }
-    }
-
-    function _advanceBatchCursor(IExitQueue _queue) internal {
-        uint256 cursor = _peekAdvancedCursor(_queue);
-        if (cursor != nextBatchIdToProcess) {
-            nextBatchIdToProcess = cursor;
         }
     }
 }

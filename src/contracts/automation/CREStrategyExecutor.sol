@@ -5,6 +5,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 import {Math} from "../../libraries/Math.sol";
 import {Auth} from "../../libraries/Auth.sol";
+import {ExitQueueLimits} from "../../libraries/ExitQueueLimits.sol";
 
 import {IRegistry} from "interfaces/IRegistry.sol";
 import {IAMM} from "../../interfaces/IAMM.sol";
@@ -34,7 +35,11 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
     using Math for uint256;
     using Auth for IRegistry;
 
-    uint256 public constant MAX_BATCH_SCAN = 25;
+    /// @dev Gas-bounded scan of priced batches. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
+    ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
+    ///      desync the keeper. A DoS bound, not cadence — CRE `minBatchAge` vs
+    ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping batches.
+    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
     uint256 public constant MAX_USERS_COST_SCAN = 50;
 
     uint256 private constant _DEFAULT_MIN_DEPOSIT_ETH = 0.1 ether;
@@ -285,6 +290,8 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
 
         (,, uint256 totalTokensToBurn,,) = queue.batchInfo(currentBatchId);
         if (totalTokensToBurn > 0) {
+            // Current (unpriced) batch is still cancellable equity. Size residual need
+            // at the live base price, which is already net of in-window priced liability.
             needsETH += totalTokensToBurn.convertAssets(IAMM(_registry.amm()).eveBasePriceInETH());
         }
     }

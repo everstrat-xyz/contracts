@@ -1690,7 +1690,7 @@ contract AMMTest is ProtocolTestBase {
         uint256 tokensReceived = eve.balanceOf(user2);
         assertApproxEqRel(tokensReceived, expectedTokens, 1e15, "Tokens should match ETH premium price calculation");
 
-        // User2 exits - redemption is priced at the base price (NAV / supply) in ETH
+        // User2 exits - redemption is priced at the live base price (NAV−L / liveSupply) in ETH
         uint256 user2Balance = eve.balanceOf(user2);
         uint256 ethRequested = EXIT_SMALL_ETH;
 
@@ -2214,6 +2214,66 @@ contract AMMTest is ProtocolTestBase {
         vm.stopPrank();
 
         assertGt(batchId, 0, "exit should queue against the new NAV");
+    }
+
+    function test_PricedQueue_ExcludedFromLiveSharePrice() public {
+        vm.prank(user1);
+        bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
+        vm.roll(block.number + 1);
+        vm.prank(user2);
+        bondingCurve.enter{value: ENTER_ETH_DEPOSIT}(ENTER_MIN_TOKENS);
+        vm.roll(block.number + 1);
+
+        uint256 user2Balance = eve.balanceOf(user2);
+        vm.startPrank(user2);
+        eve.approve(address(bondingCurve), user2Balance);
+        bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
+        vm.stopPrank();
+
+        (uint256 liabilityBefore, uint256 escrowedBefore) = exitQueue.liveRedemptionOffsets();
+        assertEq(liabilityBefore, 0, "unpriced queue is still equity");
+        assertEq(escrowedBefore, 0);
+
+        uint256 priceBefore = bondingCurve.eveBasePriceInETH();
+        controller.priceBatch();
+        uint256 priceAfter = bondingCurve.eveBasePriceInETH();
+
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertGt(escrowed, 0);
+        assertGt(liability, 0);
+        // Unchanged NAV: residual price equals the settlement price up to floor rounding.
+        assertApproxEqRel(priceAfter, priceBefore, 1e12);
+
+        uint256 navNet = strategyManager.totalNAVInETH();
+        vm.deal(address(controller), address(controller).balance + 10 ether);
+        uint256 navAfterGift = strategyManager.totalNAVInETH();
+        assertEq(navAfterGift, navNet + 10 ether, "gift accrues to residual holders, not the priced claim");
+        assertGt(bondingCurve.eveBasePriceInETH(), priceAfter);
+    }
+
+    function test_PricedQueue_LiabilityLapsesAfterExpiry() public {
+        vm.prank(user1);
+        bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
+        vm.roll(block.number + 1);
+        vm.prank(user2);
+        bondingCurve.enter{value: ENTER_ETH_DEPOSIT}(ENTER_MIN_TOKENS);
+        vm.roll(block.number + 1);
+
+        uint256 user2Balance = eve.balanceOf(user2);
+        vm.startPrank(user2);
+        eve.approve(address(bondingCurve), user2Balance);
+        bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
+        vm.stopPrank();
+
+        controller.priceBatch();
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertGt(liability, 0);
+        assertGt(escrowed, 0);
+
+        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
+        (liability, escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
     }
 
     // ============ Helper Functions ============

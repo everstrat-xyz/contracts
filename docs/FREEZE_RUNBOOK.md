@@ -63,7 +63,7 @@ and the AMM float is not topped up. The relevant clocks are unforgiving:
 
 | Clock | Value | What runs out |
 |---|---|---|
-| `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | Priced batches go unprocessed; users fall back to `AMM.cancelRedemption()` (escape hatch) |
+| `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | Priced batches go unprocessed; `pullRequest` is forbidden (`ExitQueueBatchExpired`); live NAV drops the liability with no reset tx; users fall back to `AMM.cancelRedemption()` (escape hatch) |
 | Admin timelock delay | 48h minimum | Time to grant `KEEPER_ROLE` to a replacement address *after* the incident starts |
 
 Granting a keeper reactively therefore consumes most of the escape-hatch window
@@ -130,8 +130,9 @@ execute.
 | 5 | Pool observation buffer too small | `UniCLStratPoolTWAPNotAvailable` revert from `navInETH()` → full pricing freeze (same blast radius as #2) | Anyone, then wait | `pool.increaseObservationCardinalityNext(n)`; buffer fills as the pool trades. If urgent: escalate to scenario-2 chain | buffer fill time depends on pool activity |
 | 6 | Unexplained NAV anomaly (monitoring alert) | Off-chain NAV tracking flags a large single-tx base-price move not explained by enter/exit flow; on-chain there is **no deviation guard** — enter/exit keep working | Investigate first; SECURITY if unexplained | Reconcile NAV component-by-component (§6); if unexplained: SECURITY full-freeze (§5.4) → fix → staged un-freeze (§5.5) | pause instant for SECURITY; un-freeze always 48h |
 | 7 | Active exploit / unknown anomaly | Anything not matching a known pattern | SECURITY | Full-freeze procedure (§5.4), then staged un-freeze (§5.5) | un-freeze requires 48h per timelock batch |
-| 8 | Keeper stops processing a priced exit batch | Batch `pricedAt` older than 3 days, requests unprocessed | Users (self-service) | `AMM.cancelRedemption(batchId)` — escape hatch returns escrowed EVE | `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` |
+| 8 | Keeper stops processing a priced exit batch | Batch `pricedAt` older than 3 days, requests unprocessed; `pullRequest` reverts `ExitQueueBatchExpired`; `liveRedemptionOffsets` no longer deducts that batch | Users (self-service) | `AMM.cancelRedemption(batchId)` — escape hatch returns escrowed EVE (the only remaining path; pull is forbidden) | `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` |
 | 9 | Registry paused | Role grants/revokes and contract registration revert; `StrategyManager.addStrategy()` reverts | ADMIN timelock | `Registry.unpause()` | 48h |
+| 10 | In-window priced liability exceeds NAV | `StrategyManagerQueuedLiabilityExceedsNAV` (and/or `AMMEscrowExceedsSupply`) freeze `enter()`/`exit()`/`eveBasePriceInETH()`/`priceBatch()` | SECURITY, then wait | Pause ExitQueue so no new batches can be priced. Do **not** try to pull expired or underwater claims. Wait out `MAX_BATCH_PROCESSING_TIME` so remaining L lapses in the view; users `cancelRedemption` remaining requests; recap AMM prices. Investigate how L exceeded NAV (NAV bug vs oversize queue) | pause instant; L lapses after 3 days from each batch's `pricedAt` |
 
 ---
 
@@ -657,23 +658,35 @@ and swap through the Converter). `UniCLStrat.emergencyExit()` is unaffected
 
 `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` (constant).
 
+Live share-price accounting (see `ExitQueue.liveRedemptionOffsets()`):
+
+- Until `priceBatch`, queued EVE is still **cancellable equity** — NAV and
+  supply are unchanged. Users can close the current unpriced batch at any time.
 - Once a batch is **priced** (`Controller.priceBatch()` → `BatchPriced`,
-  `pricedAt` set), its requests **cannot be closed** for 3 days — they are
-  committed and must be processed via `pullRequest()`
-  (`ExitQueueRequestCannotBeClosed` otherwise). Users *can* still close
-  requests in the current, un-priced batch at any time.
-- If **more than 3 days** pass after `pricedAt` without processing, any user
-  can self-rescue: `AMM.cancelRedemption(batchId)` →
-  `ExitQueue.closeRequest()` returns `viaEscapeHatch = true` and the AMM
-  transfers the escrowed EVE back. This works **during a full protocol
-  freeze** (neither function is pause-gated).
+  `pricedAt` set), live NAV deducts `remainingTokens * finalEvePrice` and live
+  supply deducts remaining escrow. Requests **cannot be closed** for 3 days
+  (`ExitQueueRequestCannotBeClosed`). Within that window they must be settled
+  via `pullRequest()`.
+- If **more than 3 days** pass after `pricedAt` without processing:
+  - Liability **lapses in the view** with no reset transaction — enter/exit
+    no longer reserve ETH for that batch.
+  - `pullRequest` is **forbidden** (`ExitQueueBatchExpired`) so a keeper
+    cannot pay a claim live NAV already dropped.
+  - Any user can self-rescue: `AMM.cancelRedemption(batchId)` →
+    `ExitQueue.closeRequest()` returns `viaEscapeHatch = true` and the AMM
+    transfers the escrowed EVE back. This works **during a full protocol
+    freeze** (neither function is pause-gated).
 - Operational rule: **if you freeze the protocol while a priced batch is
   pending, you have a 3-day SLA.** Either finish processing the batch before
   pausing (preferred: `Controller.processRequests(batchId)` needs Controller,
-  ExitQueue, and AMM all unpaused), or accept that users will exit the batch
-  via the escape hatch and re-enter the queue later. Monitor: alert when
-  `block.timestamp - pricedAt > 2 days` on any batch with
-  `unprocessedUsersCount(batchId) > 0`.
+  ExitQueue, and AMM all unpaused), or accept that after 3 days pull is
+  forbidden, L drops out of NAV, and users exit the batch via the escape
+  hatch. Monitor: alert when `block.timestamp - pricedAt > 2 days` on any
+  batch with `unprocessedUsersCount(batchId) > 0`.
+- If `totalNAVInETH()` reverts `StrategyManagerQueuedLiabilityExceedsNAV`
+  (or AMM `AMMEscrowExceedsSupply`): pause ExitQueue so no further batches
+  can be priced; wait for remaining in-window batches to lapse; users cancel
+  leftover requests; then recap AMM. See scenario 10.
 
 ### 5.4 Full-freeze procedure (SECURITY multisig, single transaction batch if possible)
 

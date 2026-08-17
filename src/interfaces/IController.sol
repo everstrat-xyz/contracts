@@ -155,7 +155,10 @@ interface IController {
     /// @param _endIndex The end index (exclusive) of the strategies to harvest
     function harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex) external;
 
-    /// @notice Prices a batch of redemption requests with the current EVE price from the AMM
+    /// @notice Prices the current ExitQueue batch at the live AMM base price.
+    /// @dev Reads `eveBasePriceInETH()` before marking this batch priced, so the
+    ///      batch being settled is still equity. Already-priced in-window batches
+    ///      are already deducted from NAV and live supply.
     function priceBatch() external;
 
     /// @notice Processes redemption requests from a batch in the given range

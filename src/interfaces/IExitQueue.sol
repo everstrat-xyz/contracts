@@ -27,13 +27,15 @@ interface IExitQueue {
      * can be greater than standard interval between batches.
      */
     struct RedemptionRequestBatch {
-        bool canBeProcessed;
+        // Packed into slot 0 (8 + 8 + 16): hot path for liveRedemptionOffsets loads this
+        // word then `finalEvePrice`. `canBeProcessed` is redundant with `pricedAt != 0`
+        // for "is priced"; lapse is the clock, not this flag (it stays true after expiry).
+        uint64 pricedAt;
+        uint64 createdAt;
+        uint128 totalTokensToBurn;
         // This price is in ETH terms (and normalized to 18 decimals)
         uint256 finalEvePrice;
-        uint256 totalTokensToBurn;
-        uint256 createdAt;
-        // Equals zero if the batch is not priced
-        uint256 pricedAt;
+        bool canBeProcessed;
         mapping(address user => RedemptionRequest request) requests;
         EnumerableSet.AddressSet unprocessedUsers;
     }
@@ -99,8 +101,8 @@ interface IExitQueue {
     error ExitQueueRequestAlreadyProcessed();
 
     /**
-     * @notice Thrown when request cannot be closed at the moment (batch is priced,
-     * so the request must be pulled from the queue by the AMM)
+     * @notice Thrown when request cannot be closed at the moment (batch is priced
+     * and still within `MAX_BATCH_PROCESSING_TIME` of `pricedAt`).
      */
     error ExitQueueRequestCannotBeClosed();
 
@@ -115,10 +117,39 @@ interface IExitQueue {
     error ExitQueueInvalidRange();
 
     /**
-     * @notice Maximum time allowed for processing a batch in seconds, i.e. maximum time between batch
-     * pricing and the moment when all the requests in the batch must be processed.
+     * @notice Thrown when `pullRequest` is called after `MAX_BATCH_PROCESSING_TIME`.
+     * Live NAV has already dropped the batch's liability; settlement is no longer allowed.
+     */
+    error ExitQueueBatchExpired();
+
+    /**
+     * @notice Thrown when pricing would leave more than `MAX_LIVE_PRICED_BATCHES` ids in
+     * `[liveScanFromBatchId, currentBatchId)`. Production overlap is ~3 (CRE `minBatchAge`
+     * vs `MAX_BATCH_PROCESSING_TIME`); CRE `MAX_BATCH_SCAN` is this same cap (aliased). A
+     * DoS bound, not a target.
+     */
+    error ExitQueueTooManyLivePricedBatches();
+
+    /**
+     * @notice Thrown when adding to `totalTokensToBurn` would exceed `uint128`.
+     */
+    error ExitQueueTokensOverflow();
+
+    /**
+     * @notice Maximum time after `pricedAt` during which `pullRequest` may settle a
+     * priced batch. After this window, `pullRequest` reverts (`ExitQueueBatchExpired`)
+     * because live NAV has already dropped the batch's liability. Users recover via
+     * `closeRequest` / `AMM.cancelRedemption` (escape hatch).
      */
     function MAX_BATCH_PROCESSING_TIME() external pure returns (uint256);
+
+    /**
+     * @notice Max width of `[liveScanFromBatchId, currentBatchId)` that `priceBatch` will
+     * allow. CRE `MAX_BATCH_SCAN` is this value (both alias `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`).
+     * Not a production cadence target — CRE `minBatchAge` (1 day) vs `MAX_BATCH_PROCESSING_TIME`
+     * (3 days) implies ~3 overlapping priced batches. The cap is an `enter()` gas / DoS bound.
+     */
+    function MAX_LIVE_PRICED_BATCHES() external pure returns (uint256);
 
     /**
      * @notice Get the version of the exit queue
@@ -132,6 +163,26 @@ interface IExitQueue {
      * @return uint256 The current batch ID
      */
     function currentBatchId() external view returns (uint256);
+
+    /**
+     * @notice Left cursor of the live-NAV scan `[liveScanFromBatchId, currentBatchId)`.
+     * Every id in that range has been priced (`priceBatch` increments `currentBatchId`
+     * only after marking the batch priced). Equals `currentBatchId` when the range is
+     * empty — including at initialize, when batch 1 is the unpriced current batch.
+     * Advanced on writes past empty or expired batches; the view still time-filters
+     * so liability lapses at expiry with no tx.
+     */
+    function liveScanFromBatchId() external view returns (uint256);
+
+    /**
+     * @notice Live share-price offsets for in-window priced, unfinished batches.
+     * `liabilityETH` is deducted from StrategyManager NAV; `escrowedSupply` from EVE
+     * `totalSupply` in AMM pricing and fee mint. Both are zero for unpriced requests
+     * (still cancellable equity) and for batches past `MAX_BATCH_PROCESSING_TIME`.
+     * @return liabilityETH ETH reserved for in-window priced redemptions
+     * @return escrowedSupply EVE still escrowed on the AMM for those redemptions
+     */
+    function liveRedemptionOffsets() external view returns (uint256 liabilityETH, uint256 escrowedSupply);
 
     /**
      * @notice Get the information about a batch
@@ -214,7 +265,8 @@ interface IExitQueue {
      * Requirements:
      * - Contract is not paused
      * - `_evePrice` is non-zero
-     * @param _evePrice The final EVE settlement price (the base price, NAV / supply)
+     * - `[liveScanFromBatchId, currentBatchId)` width is below `MAX_LIVE_PRICED_BATCHES`
+     * @param _evePrice The final EVE settlement price (the live base price, NAV−L / live supply)
      */
     function priceBatch(uint256 _evePrice) external;
 
@@ -238,6 +290,7 @@ interface IExitQueue {
      *
      * Requirements:
      * - Contract is not paused
+     * - Batch is priced and still inside `MAX_BATCH_PROCESSING_TIME`
      * @param _batchId The ID of the batch
      * @param _user The address of the user
      */

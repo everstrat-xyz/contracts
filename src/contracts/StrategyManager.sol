@@ -18,6 +18,7 @@ import {IAMM} from "interfaces/IAMM.sol";
 import {IConverter} from "interfaces/IConverter.sol";
 import {IRegistry} from "interfaces/IRegistry.sol";
 import {IEVE} from "interfaces/IEVE.sol";
+import {IExitQueue} from "interfaces/IExitQueue.sol";
 
 import {Oracle} from "contracts/Oracle.sol";
 import {RegistryClientUpgradeable} from "registry/client/RegistryClientUpgradeable.sol";
@@ -785,6 +786,9 @@ contract StrategyManager is
      */
     function _mintPerformanceFeeEVE(uint256 _totalFeeETH) internal returns (uint256 evesToMint) {
         uint256 supply = IERC20(registry().eve()).totalSupply();
+        (, uint256 escrowedSupply) = IExitQueue(registry().exitQueue()).liveRedemptionOffsets();
+        if (supply < escrowedSupply) revert StrategyManagerEscrowExceedsSupply();
+        supply -= escrowedSupply;
         uint256 totalNAV = _totalNAVInETH();
         if (totalNAV <= _totalFeeETH) revert StrategyManagerFeeMintOverflow();
         evesToMint = (_totalFeeETH * supply) / (totalNAV - _totalFeeETH);
@@ -927,6 +931,10 @@ contract StrategyManager is
      *           + Controller balance (undistributed funds awaiting strategy allocation)
      *           + AMM free balance (ETH available on AMM; excludes lockedForClaims)
      *           + ETH value of each whitelisted supported-ERC-20 balance (via the protocol Oracle)
+     *           − in-window priced ExitQueue liability (`liveRedemptionOffsets`)
+     *      Unpriced queued EVE is still equity and is not deducted. Liability lapses when a batch
+     *      exceeds `ExitQueue.MAX_BATCH_PROCESSING_TIME` (no reset transaction). Reverts if
+     *      liability exceeds gross NAV (fail-closed).
      *      If any strategy's `navInETH()` reverts, this function reverts and enter/exit/pricing
      *      are frozen until the strategy is fixed or force-removed via `forceRemoveStrategy()`.
      *      Supported-ERC-20 pricing is equally fail-closed: a stale or invalid Oracle feed for a
@@ -948,6 +956,10 @@ contract StrategyManager is
         _currentTotalNAV += address(this).balance + registry_.controller().balance + IAMM(registry_.amm()).freeBalance();
 
         _currentTotalNAV += _supportedERC20sNAVInETH(Oracle(registry_.oracle()));
+
+        (uint256 liabilityETH,) = IExitQueue(registry_.exitQueue()).liveRedemptionOffsets();
+        if (_currentTotalNAV < liabilityETH) revert StrategyManagerQueuedLiabilityExceedsNAV();
+        _currentTotalNAV -= liabilityETH;
     }
 
     /**
