@@ -21,6 +21,7 @@ interface IUniCLStrat is IStrategy {
         address registry;
         address weth;
         address pool;
+        address factory;
     }
 
     struct RouteConfig {
@@ -56,7 +57,9 @@ interface IUniCLStrat is IStrategy {
     event SwapSlippageUpdated(uint256 indexed oldSlippage, uint256 newSlippage);
     /// @notice Emitted when the best-effort pool unwind on pause reverted and was skipped
     event LiquidityUnwindSkipped();
-    /// @notice Emitted when the best-effort paired-token transfer on `emergencyExit` reverted and was skipped
+    /// @notice Emitted when pause-time Converter allowance revocation reverted for the paired `token` and was skipped
+    event ConverterAllowanceRevocationSkipped(address indexed token);
+    /// @notice Emitted when paired-token recovery on `emergencyExit` was skipped (`balanceOf` or transfer failed)
     event PairedTokenTransferSkipped();
 
     // ============ Errors ============
@@ -68,9 +71,9 @@ interface IUniCLStrat is IStrategy {
     error UniCLStratCallerNotSelf();
     error UniCLStratInvalidMintCallback();
     error UniCLStratNotCalm();
-    error UniCLStratTransferFailed();
     error UniCLStratInsufficientWETH();
     error UniCLStratPoolTWAPNotAvailable();
+    error UniCLStratInsufficientObservationCardinality(uint16 cardinality, uint16 required);
     error UniCLStratNotPaused();
     error UniCLStratInvalidRouteConfig();
     error UniCLStratQuoteFailed();

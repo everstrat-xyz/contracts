@@ -1,9 +1,11 @@
 UniCLStrat::constructor(DeploymentConfig _params)
 ├── Given registry in config is zero
 │   └── It should revert with RegistryClientZeroRegistry
-├── Given any required address in config is zero (weth, pool, swapRouter, quoter)
+├── Given any required address in config is zero (weth, pool, factory)
 │   └── It should revert with UniCLStratZeroAddress
 ├── Given the configured pool does not contain WETH
+│   └── It should revert with UniCLStratInvalidPool
+├── Given the configured pool is not returned by factory.getPool(token0, token1, fee)
 │   └── It should revert with UniCLStratInvalidPool
 ├── Given positionWidth is zero
 │   └── It should revert with UniCLStratInvalidConfig
@@ -13,17 +15,29 @@ UniCLStrat::constructor(DeploymentConfig _params)
 │   └── It should revert with UniCLStratInvalidConfig
 ├── Given twapInterval is less than MIN_TWAP_INTERVAL
 │   └── It should revert with UniCLStratInvalidConfig
+├── Given twapInterval is greater than MAX_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given shortTwapInterval is less than MIN_SHORT_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given shortTwapInterval is greater than MAX_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given pool.observe cannot serve twapInterval
+│   └── It should revert with UniCLStratPoolTWAPNotAvailable
+├── Given pool.observe cannot serve shortTwapInterval
+│   └── It should revert with UniCLStratPoolTWAPNotAvailable
+├── Given in-use observationCardinality is below MIN_OBSERVATION_CARDINALITY
+│   └── It should revert with UniCLStratInsufficientObservationCardinality
 ├── Given maxSwapSlippageBps exceeds MAX_SLIPPAGE_BPS
 │   └── It should revert with UniCLStratInvalidConfig
 └── Given valid parameters
     ├── It should chain RegistryClient(_params.addresses.registry) in the constructor modifier list
     ├── It should store registry reference via RegistryClient (immutable after deploy)
-    ├── It should set immutable integration addresses (pool, router, quoter, WETH)
+    ├── It should set immutable integration addresses (pool, factory, WETH)
     ├── It should identify the paired token
     ├── It should set strategy configuration
     ├── It should set swap paths and slippage
     ├── It should set genesisTimestamp
-    └── It should approve token0 and token1 to the swap router
+    └── It should approve token0 and token1 to the Converter
 
 UniCLStrat::registry()
 └── It should return the protocol Registry address (set in constructor)
@@ -151,6 +165,7 @@ UniCLStrat::withdraw(address _receiver, uint256 _amount)
     ├── It should send ETH to receiver in a single native transfer
     ├── It should rebalance remaining inventory only if pool is calm
     ├── It should re-add liquidity only if pool is calm
+    ├── It should still complete the unwind and payout when the pool is not calm (re-add skipped)
     ├── It should emit FundsWithdrawn
     └── It should return the ETH amount actually sent to the receiver
 
@@ -194,6 +209,13 @@ UniCLStrat::pause()
 │   ├── It should still pause the strategy
 │   ├── It should still revoke Converter token allowances
 │   └── It should emit LiquidityUnwindSkipped
+├── Given the paired token rejects zero approval
+│   ├── It should still pause the strategy
+│   ├── It should still revoke the WETH Converter allowance
+│   ├── It should leave the paired token's Converter allowance unchanged
+│   └── It should emit ConverterAllowanceRevocationSkipped for the paired token
+├── Given WETH rejects zero approval
+│   └── It should revert
 └── Given the pause-time liquidity unwind was skipped and the pool has recovered
     └── It should remove and collect the remaining pool liquidity on unpause() followed by pause()
 
@@ -203,6 +225,12 @@ UniCLStrat::selfRemoveLiquidityAndCollect()
 └── Given caller is the strategy itself
     ├── It should poke then accrue pending LP fees before remove/collect
     └── It should remove and collect existing liquidity
+
+UniCLStrat::selfRevokePairedTokenConverterAllowance()
+├── Given caller is not the strategy itself
+│   └── It should revert with UniCLStratCallerNotSelf
+└── Given caller is the strategy itself
+    └── It should revoke the paired token's Converter allowance
 
 UniCLStrat::pendingPerformanceFeeInETH(uint256 _performanceFeeBps)
 ├── Given strategy is paused
@@ -246,12 +274,19 @@ UniCLStrat::emergencyExit()
 │   ├── It should not touch the pool
 │   ├── It should leave the LP position in the pool, still attributed to the strategy via navInETH()
 │   └── It should accrue then set charged = earned so resume does not re-charge already-charged fees
+├── Given pause-time Converter allowance revocation was skipped
+│   └── It should still unwrap WETH and send native ETH to strategyManager
 ├── Given paired-token transfer reverts (blacklist / pause)
 │   ├── It should still unwrap WETH and send native ETH to strategyManager
 │   ├── It should emit PairedTokenTransferSkipped
 │   ├── It should leave paired-token balance on the strategy
 │   ├── It should still write off pending LP fees and emit EmergencyExited
 │   └── It should transfer paired tokens on a later emergencyExit once the token is transferable
+├── Given paired-token balanceOf reverts
+│   ├── It should still unwrap WETH and send native ETH to strategyManager
+│   ├── It should emit PairedTokenTransferSkipped
+│   ├── It should leave paired-token balance on the strategy
+│   └── It should transfer paired tokens on a later emergencyExit once balanceOf succeeds
 ├── Given paired-token transfer succeeds with no return data (USDT-style)
 │   ├── It should still unwrap WETH and send native ETH to strategyManager
 │   ├── It should transfer paired tokens to strategyManager (trySafeTransfer treats empty returndata as success)
@@ -268,6 +303,32 @@ UniCLStrat::emergencyExit()
     ├── It should write off pending LP fees (try-accrue then charged = earned) so only post-reset fee growth is feeable
     ├── It should emit EmergencyExited with native ETH amount only
     └── It should leave zero native ETH and WETH balances on the strategy
+
+UniCLStrat::setTwapInterval(uint32 _newTwapInterval)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given new interval is below MIN_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given new interval is above MAX_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given pool.observe cannot serve the new interval
+│   └── It should revert with UniCLStratPoolTWAPNotAvailable (storage unchanged)
+├── Given in-use observationCardinality is below ceil(newInterval / MAX_BLOCK_SECONDS)
+│   └── It should revert with UniCLStratInsufficientObservationCardinality (storage unchanged)
+└── Given caller has ADMIN_ROLE and the pool can serve the interval
+    └── It should update twapInterval and emit TwapIntervalUpdated
+
+UniCLStrat::setShortTwapInterval(uint32 _newShortTwapInterval)
+├── Given caller does not have ADMIN_ROLE on Registry
+│   └── It should revert with RegistryClientMissingRole
+├── Given new interval is below MIN_SHORT_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given new interval is above MAX_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given pool.observe cannot serve the new interval
+│   └── It should revert with UniCLStratPoolTWAPNotAvailable (storage unchanged)
+└── Given caller has ADMIN_ROLE and the pool can serve the interval
+    └── It should update shortTwapInterval and emit ShortTwapIntervalUpdated
 
 UniCLStrat::uniswapV3MintCallback(uint256 _amount0, uint256 _amount1, bytes _data)
 ├── Given caller is not the pool

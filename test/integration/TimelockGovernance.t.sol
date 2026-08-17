@@ -18,7 +18,7 @@ import {IUniCLStrat} from "../../src/interfaces/strategies/IUniCLStrat.sol";
 import {ProtocolTestBase} from "../helpers/ProtocolTestBase.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockUniCLPool, MockWETH} from "../mocks/UniCLStratMocks.sol";
+import {MockUniCLPool, MockWETH, MockUniswapV3Factory} from "../mocks/UniCLStratMocks.sol";
 import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
 
 /**
@@ -84,6 +84,8 @@ contract TimelockGovernanceTest is ProtocolTestBase {
         MockWETH weth = new MockWETH();
         MockERC20 pairedToken = new MockERC20("Paired Token", "PAIR", 18);
         MockUniCLPool pool = new MockUniCLPool(address(weth), address(pairedToken), 60, 0);
+        MockUniswapV3Factory factory = new MockUniswapV3Factory();
+        factory.setPool(address(weth), address(pairedToken), pool.fee(), address(pool));
         MockConverterAdapter swapAdapter = new MockConverterAdapter(weth, pairedToken);
         // Allowlist the adapter on the protocol Converter so the strategy's route
         // validation passes (this test contract still holds ADMIN_ROLE during setUp).
@@ -94,7 +96,8 @@ contract TimelockGovernanceTest is ProtocolTestBase {
                 addresses: IUniCLStrat.AddressConfig({
                     registry: address(protocol.registry),
                     weth: address(weth),
-                    pool: address(pool)
+                    pool: address(pool),
+                    factory: address(factory)
                 }),
                 routes: IUniCLStrat.RouteConfig({
                     swapAdapter: address(swapAdapter),

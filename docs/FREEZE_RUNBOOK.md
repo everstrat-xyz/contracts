@@ -126,8 +126,8 @@ execute.
 | 1 | Chainlink feed stale / broken | `OracleStalePrice`, `OracleInvalidPrice`, `OracleNoRoundData`, `OracleInvalidTimestamp` reverts; if a UniCLStrat holds paired-token inventory or the StrategyManager holds a non-zero supported-ERC-20 balance, `enter()`/`exit()`/`eveBasePriceInETH()` also revert | ADMIN timelock (DAO proposes) | `Oracle.updateUsdFeedInfo(token, newFeed, stalenessInterval)` — this is also how a token is (re)registered | 48h timelock; per-token `stalenessInterval` defines when the freeze starts |
 | 2 | Strategy `navInETH()` reverts | Every `AMM.enter/exit`, `eveBasePriceInETH()`, `Controller.priceBatch()` reverts (bubbled from `StrategyManager.totalNAVInETH()`) | SECURITY, then ADMIN | `UniCLStrat.pause()` → `UniCLStrat.emergencyExit()` → `StrategyManager.emergencyWithdrawToController()` → `Controller.emergencyExitToAMM()`; then ADMIN `StrategyManager.forceRemoveStrategy()` | pause/exit instant; `forceRemoveStrategy` needs 48h timelock |
 | 3 | Strategy unhealthy (`isHealthy() == false`) but not reverting | No freeze; batch deposits skip it; keeper `checkAndRebalance*` triggers `rebalance()` | Keeper (SECURITY only if funds at risk) | `Controller.checkAndRebalanceStrategy(strategy)`; reverts `UniCLStratNotCalm` if pool not calm — back off and retry | none |
-| 4 | Uniswap pool not calm | `UniCLStratNotCalm` reverts on deposit/rebalance; `maxDeposit() == 0`; withdrawals still work | Keeper | Back off; retry when pool calms. No governance action needed | TWAP windows: long ≥ 1800s, short ≥ 60s |
-| 5 | Pool observation buffer too small | `UniCLStratPoolTWAPNotAvailable` revert from `navInETH()` → full pricing freeze (same blast radius as #2) | Anyone, then wait | `pool.increaseObservationCardinalityNext(n)`; buffer fills as the pool trades. If urgent: escalate to scenario-2 chain | buffer fill time depends on pool activity |
+| 4 | Uniswap pool not calm | `UniCLStratNotCalm` reverts on deposit/rebalance/`investIdleETH`; `maxDeposit() == 0`; **withdrawals still work** (burn/convert ungated; re-add skipped) — intentional, see STRATEGY_GUARDRAILS §1.1.1 | Keeper | Back off deposits/rebalances; retry when pool calms. Do not treat ungated withdraw as a bug. No governance action needed | TWAP windows: long ≥ 1800s, short ≥ 60s |
+| 5 | Pool observation buffer too small | Constructor/setters revert `UniCLStratPoolTWAPNotAvailable` or `UniCLStratInsufficientObservationCardinality` (deploy/retune blocked); `navInETH()` reverts `UniCLStratPoolTWAPNotAvailable` if a registered pool later bricks `observe` → full pricing freeze | Anyone, then wait | Grow via `pool.increaseObservationCardinalityNext(n)` *before* deploy/setter; buffer fills as the pool trades. If already registered and urgent: escalate to scenario-2 chain | buffer fill time depends on pool activity |
 | 6 | Unexplained NAV anomaly (monitoring alert) | Off-chain NAV tracking flags a large single-tx base-price move not explained by enter/exit flow; on-chain there is **no deviation guard** — enter/exit keep working | Investigate first; SECURITY if unexplained | Reconcile NAV component-by-component (§6); if unexplained: SECURITY full-freeze (§5.4) → fix → staged un-freeze (§5.5) | pause instant for SECURITY; un-freeze always 48h |
 | 7 | Active exploit / unknown anomaly | Anything not matching a known pattern | SECURITY | Full-freeze procedure (§5.4), then staged un-freeze (§5.5) | un-freeze requires 48h per timelock batch |
 | 8 | Keeper stops processing a priced exit batch | Batch `pricedAt` older than 3 days, requests unprocessed; `pullRequest` reverts `ExitQueueBatchExpired`; `liveRedemptionOffsets` no longer deducts that batch | Users (self-service) | `AMM.cancelRedemption(batchId)` — escape hatch returns escrowed EVE (the only remaining path; pull is forbidden) | `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` |
@@ -346,7 +346,8 @@ Consequences for the keeper:
    ```
    Side effects (by design, `_pauseStrategy()`):
    - Flips the Pausable flag **first**, before any external call — so a
-     degraded pool can never block the circuit breaker.
+     degraded pool or a paired token that rejects `approve(0)` can never
+     block the circuit breaker.
    - Attempts to unwind pool liquidity and collect fees via a
      `try this.selfRemoveLiquidityAndCollect() {} catch {}` self-call (the
      parameterless `catch` is deliberate — it avoids a returndata-bomb griefing
@@ -355,7 +356,16 @@ Consequences for the keeper:
      `navInETH()`. Once the pool functions again, the admin can `unpause()`
      (then resume normal withdrawals) or re-run `pause()` (which re-attempts
      the unwind) followed by `emergencyExit()`.
-   - Revokes the strategy's token approvals to the Converter.
+   - Revokes Converter allowances: WETH `approve(0)` is **strict**
+     (canonical WETH does not revert). The paired-token revoke is
+     **best-effort** via a try/catch self-call
+     (`selfRevokePairedTokenConverterAllowance`); a paused or blacklisted
+     token (USDC `whenNotPaused` / `notBlacklisted`) emits
+     `ConverterAllowanceRevocationSkipped(token)` and does not roll back
+     the pause, the unwind, or the WETH revoke. Leftover paired-token
+     approvals while paused are inert — every Converter-calling path is
+     `whenNotPaused`. If revocation was skipped, also pause the Converter
+     (step below / §5.1) until the token can `approve` again.
 
    After pausing: `maxDeposit() == 0`, `maxWithdrawal() == 0`,
    `isHealthy() == false` — all batch keeper paths now skip the strategy.
@@ -391,11 +401,11 @@ StrategyManager.forceRemoveStrategy(strategy) (4) ADMIN timelock, 48h
      under a bricked pool or a paused Converter.
    - Unwraps the strategy's WETH balance via `weth.withdraw()` **directly**.
    - Sends all native ETH to the StrategyManager **first** (strict), then best-effort
-     transfers any paired-token balance to the StrategyManager **as an ERC-20** via
+     recovers any paired-token balance: `balanceOf` is try/catch'd and the transfer uses
      `SafeERC20.trySafeTransfer` (reverts, false returns, and USDT-style empty returndata).
-     A blacklisted/paused USDC-style token emits `PairedTokenTransferSkipped` and leaves
-     the balance on the strategy — it must not roll back the ETH sweep. A later
-     `emergencyExit()` retries the transfer.
+     A blacklisted/paused USDC-style token (or a reverting `balanceOf`) emits
+     `PairedTokenTransferSkipped` and leaves the balance on the strategy — it must not
+     roll back the ETH sweep. A later `emergencyExit()` retries once the token responds.
    - Writes off pending strategy-local LP fees via `_resetLpFeeAccounting()`:
      best-effort `_tryAccrueLpFees()` (reads `positions`; on any failure falls
      back to the aggregate `_lpFeesOwedSnapshot*` so accrue is a no-op), then
@@ -494,9 +504,11 @@ StrategyManager.forceRemoveStrategy(strategy) (4) ADMIN timelock, 48h
 
 ## 4. Scenario: Uniswap pool halted / not calm / TWAP observation buffer issues
 
-`UniCLStrat` guards every pool interaction with a **calm-period check**
-(`_isCalm()`): the spot tick *and* the short TWAP (window ≥ 60s) must both sit
-within `maxTickDeviation` of the long TWAP (window ≥ 1800s = 30 min).
+`UniCLStrat` gates **mints** with a calm-period check (`_isCalm()`): the spot
+tick *and* the short TWAP (window ≥ 60s) must both sit within
+`maxTickDeviation` of the long TWAP (window ≥ 1800s = 30 min). Burns and the
+withdraw conversion swap are intentionally ungated — see
+[`STRATEGY_GUARDRAILS.md`](./STRATEGY_GUARDRAILS.md) §1.1.1.
 
 ### 4.1 Pool not calm (volatility / manipulation attempt)
 
@@ -507,7 +519,7 @@ What degrades — **no pricing freeze**, only capital operations:
 | `deposit()` | reverts `UniCLStratNotCalm` |
 | `investIdleETH()` | reverts `UniCLStratNotCalm` |
 | `rebalance()` | reverts `UniCLStratNotCalm` |
-| `withdraw()` | **works** — removes liquidity and pays out; only skips the re-add of remaining liquidity (`if (_isCalm())`) |
+| `withdraw()` | **works** — removes liquidity and pays out; only skips the re-add of remaining liquidity (`if (_isCalm())`). Intentional: see STRATEGY_GUARDRAILS §1.1.1 |
 | `maxDeposit()` | returns 0 → batch deposits skip this strategy and refund the Controller |
 | `isHealthy()` | returns false → keeper `checkAndRebalance*` will try `rebalance()` and revert `UniCLStratNotCalm` — the keeper must back off |
 | `navInETH()` | **works** (prices the LP position off the long TWAP, not spot) |
@@ -531,10 +543,14 @@ If the pool's observation cardinality does not cover `twapInterval`,
   even when the strategy holds no LP position — the TWAP read is
   unconditional in `_balancesOfPool()`.
 
-When this occurs: at initial deployment against a fresh pool (the deploy
-script `DeployUniCLStrat.s.sol` warns about exactly this), after an ADMIN
-`setTwapInterval()` increase beyond the buffer, or on a pool whose cardinality
-was never grown.
+When this occurs: after an already-registered strategy's pool bricks `observe`,
+or (historically) after an ADMIN `setTwapInterval()` increase beyond the
+buffer — **the constructor and both TWAP setters now probe `observe` first**,
+so a thin/never-grown pool cannot be deployed and a window increase that the
+ring cannot serve reverts `UniCLStratPoolTWAPNotAvailable` without writing
+storage. A quiet cardinality-1 pool that *extrapolates* a spot-like TWAP
+(does not revert `OLD`) is a different failure mode: grow the ring before
+deploy so the lookback is a real average.
 
 Recovery:
 
@@ -547,10 +563,11 @@ Recovery:
    as scenario 3: SECURITY `pause()` + `emergencyExit()`, ADMIN
    `forceRemoveStrategy()` (the `navReverted = true` path applies, since
    `navInETH()` is reverting).
-3. Preventative: before `addStrategy()` of any UniCL strategy, verify
-   `pool.slot0().observationCardinality` covers the configured `twapInterval`;
-   before executing a queued `setTwapInterval()` increase, grow the buffer
-   first.
+3. Preventative: constructor / `DeployUniCLStrat` / TWAP setters require
+   **both** `pool.observe([interval, 0])` (NAV will compute) **and** in-use
+   `slot0.observationCardinality >= ceil(interval / 12)` floored at 150
+   (TWAP is not a cardinality-1 spot extrapolation). Grow the ring and wait
+   for fill *before* deploy and before executing a queued window increase.
 
 ### 4.3 Pool halted entirely / bricked
 
@@ -558,9 +575,11 @@ A pool with zero trading still serves `observe()` (it extrapolates from the
 last observation), so pricing generally keeps working; the danger is a pool
 whose contract calls revert (upgrade-frozen fork, self-destructed periphery,
 etc.). Then `navInETH()` itself reverts. `UniCLStrat.pause()` still succeeds —
-it flips the Pausable flag first and attempts the pool unwind as a best-effort
-`try/catch` self-call, emitting `LiquidityUnwindSkipped()` if the pool is
-bricked. Recovery path:
+it flips the Pausable flag first, attempts the pool unwind as a best-effort
+`try/catch` self-call, and revokes Converter allowances (WETH strictly; paired
+token best-effort), emitting `LiquidityUnwindSkipped()` /
+`ConverterAllowanceRevocationSkipped(token)` if the pool is bricked or the
+paired token rejects `approve(0)`. Recovery path:
 1. SECURITY `UniCLStrat.pause()` — flag flips, unwind attempt fails gracefully.
 2. `UniCLStrat.emergencyExit()` — transfers whatever the strategy currently
    holds (WETH, paired token) to the StrategyManager; **does not** touch the
@@ -587,8 +606,8 @@ bricked. Recovery path:
 | Controller | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | |
 | ExitQueue | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | |
 | StrategyManager | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | |
-| UniCLStrat | `ADMIN_ROLE` or `SECURITY_ROLE` (unwinds LP + revokes Converter allowances) | `ADMIN_ROLE` only (re-grants allowances) | |
-| **Converter** | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | Instant circuit breaker for wrap/unwrap/swap; strategy pause still revokes that strategy's allowances |
+| UniCLStrat | `ADMIN_ROLE` or `SECURITY_ROLE` (best-effort LP unwind; strict WETH allowance revoke; best-effort paired-token revoke) | `ADMIN_ROLE` only (re-grants allowances strictly) | |
+| **Converter** | `ADMIN_ROLE` or `SECURITY_ROLE` | `ADMIN_ROLE` only | Instant circuit breaker for wrap/unwrap/swap; strategy pause revokes WETH allowance strictly and the paired token's best-effort |
 | Oracle | — no pause exists | — | fail-closed via staleness checks |
 | EVE | — no pause exists | — | mint/burn gated by `MINTER_ROLE` only |
 
@@ -700,8 +719,12 @@ freeze privilege escalation first, then user flows, then capital movement:
 4. `ExitQueue.pause()` — stops queue push/pull.
 5. `StrategyManager.pause()` — stops fund movement into/out of strategies.
 6. `UniCLStrat.pause()` for **each** registered strategy — unwinds LP to the
-   strategy contract and revokes its Converter allowances. (Enumerate via
-   `StrategyManager.strategies()`.)
+   strategy contract, revokes WETH's Converter allowance strictly, and
+   best-effort-revokes the paired token's. (Enumerate via
+   `StrategyManager.strategies()`.) Watch for
+   `ConverterAllowanceRevocationSkipped` — leftover paired-token approvals
+   are inert while the strategy is paused, but pause Converter in step 7
+   regardless.
 7. `Converter.pause()` — stops wrap/unwrap/swap for every strategy at once
    (redundant with step 6's allowance revokes, but closes any remaining
    `CONVERTER_CALLER_ROLE` path immediately).
@@ -869,7 +892,8 @@ Do not page on moves with an obvious on-chain explanation:
 - `FundsDeposited(uint256)`, `FundsWithdrawn(uint256)`, `FundsInvested(uint256)`, `Rebalanced()`, `Synced()`
 - `EmergencyExited(uint256 ethAmount)` — **page** (ETH amount only; paired-token transfer is not in the event — reconcile via token `Transfer` logs)
 - `LiquidityUnwindSkipped()` — **page**: `pause()` was called and the pool-unwind self-call reverted; the strategy is paused but still holds an LP position
-- `PairedTokenTransferSkipped()` — **page**: `emergencyExit()` swept ETH but the paired-token transfer reverted (blacklist/pause); paired inventory remains on the strategy — retry `emergencyExit()` once transferable
+- `ConverterAllowanceRevocationSkipped(token)` — **page**: `pause()` succeeded but paired-token `approve(0)` reverted (paused/blacklisted); leftover Converter approval is inert while paused — pause Converter and retry after the token can `approve` again
+- `PairedTokenTransferSkipped()` — **page**: `emergencyExit()` swept ETH but paired-token `balanceOf` or transfer failed (blacklist/pause); paired inventory remains on the strategy — retry `emergencyExit()` once readable/transferable
 - `PerformanceFeeSettled(uint256 feeETH)` — strategy-local performance-fee settlement (drives the EVE dilution mint on the StrategyManager)
 - Config events (`TwapIntervalUpdated`, `MaxTickDeviationUpdated`, `RouteConfigUpdated`, `SwapSlippageUpdated`, `MaxTotalNAVUpdated`, …) — must match known timelock ops
 
@@ -896,7 +920,8 @@ Do not page on moves with an obvious on-chain explanation:
 | `StrategyManager.strategyNAVInETH(s)` per strategy | reverts → the frozen strategy, isolated |
 | Chainlink `feed.latestRoundData()` per configured token | `now − updatedAt` > 80% of `Oracle.getUsdFeedInfo(token).stalenessInterval` |
 | `UniCLStrat.isHealthy()` | false beyond rebalance cadence |
-| `pool.slot0().observationCardinality` | < required for `twapInterval` |
+| `pool.observe([twapInterval, 0])` | reverts `OLD` / fails → ring cannot serve the window (scenario 5) |
+| `pool.slot0().observationCardinality` | below `ceil(twapInterval / 12)` (min 150) → TWAP may be spot-extrapolated; Next is not the gate |
 | `AMM.eveBasePriceInETH()` block-over-block delta | unexplained single-tx move > ~5% (§6 monitoring flow) |
 | `ExitQueue.batchInfo(id)` for open batches | `canBeProcessed && unprocessedUsersCount(id) > 0 && now − pricedAt > 2 days` (1-day margin before the 3-day hatch) |
 | `paused()` on every pausable contract | any unexpected `true` |
@@ -907,6 +932,7 @@ Do not page on moves with an obvious on-chain explanation:
 `OracleStalePrice()`, `OracleInvalidPrice()`, `OracleNoRoundData()`,
 `OracleInvalidTimestamp()`, `OracleInvalidFeedDecimals()`, `OraclePairNotRegistered()`,
 `UniCLStratNotCalm()`, `UniCLStratNotPaused()`, `UniCLStratPoolTWAPNotAvailable()`,
+`UniCLStratInsufficientObservationCardinality(uint16,uint16)`,
 `UniCLStratQuoteFailed()`, `UniCLStratQuoteBelowOracleFloor(uint256,uint256)`,
 `UniCLStratQuoteExceedsOracleCeiling(uint256,uint256)`,
 `StrategyManagerStrategyNAVResidueTooHigh(address)`,
@@ -939,6 +965,7 @@ report bounced, which is the difference between a workflow bug and a DON outage:
 | Oracle staleness | per-token `stalenessInterval`, set via `updateUsdFeedInfo` | `src/contracts/Oracle.sol` |
 | `UniCLStrat.MIN_TWAP_INTERVAL` | 1800 s (long TWAP floor) | `src/contracts/strategies/UniCLStrat.sol` |
 | `UniCLStrat.MIN_SHORT_TWAP_INTERVAL` | 60 s | `src/contracts/strategies/UniCLStrat.sol` |
+| `UniCLStrat.MAX_TWAP_INTERVAL` | `65535 × 12` s (~9.1 days; uint16 ring cap) | `src/contracts/strategies/UniCLStrat.sol` |
 | `StrategyManager.MAX_NAV_RESIDUE` | 10 wei | `src/contracts/StrategyManager.sol` |
 
 ---

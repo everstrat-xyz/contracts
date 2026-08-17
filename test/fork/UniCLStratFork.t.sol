@@ -172,7 +172,12 @@ contract UniCLStratForkTest is Test {
 
     function _deploymentConfig() internal view returns (IUniCLStrat.DeploymentConfig memory) {
         return IUniCLStrat.DeploymentConfig({
-            addresses: IUniCLStrat.AddressConfig({registry: address(registry), weth: WETH, pool: WETH_USDC_POOL_005}),
+            addresses: IUniCLStrat.AddressConfig({
+                registry: address(registry),
+                weth: WETH,
+                pool: WETH_USDC_POOL_005,
+                factory: UNIV3_FACTORY
+            }),
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(adapter),
                 wethToPairedTokenPath: wethToUsdcPath,

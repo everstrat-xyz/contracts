@@ -142,6 +142,12 @@ contract MockUniCLPool is IUniswapV3Pool {
     uint160 public currentSqrtPriceX96;
     bool public observeShouldRevert;
     bool public poolShouldRevert;
+    /// @dev 0 = no cap (every lookback succeeds). Non-zero: `observe` reverts OLD when any
+    ///      `secondsAgo` exceeds the cap, modelling a ring that cannot cover a longer window.
+    uint32 public maxObserveSecondsAgo;
+    /// @dev In-use Uniswap observation cardinality (`slot0` field). Default covers
+    ///      UniCLStrat's `ceil(3600 / 12)` setter window used in unit tests.
+    uint16 public inUseObservationCardinality = 1024;
 
     mapping(bytes32 => PositionState) public positionStates;
 
@@ -167,6 +173,14 @@ contract MockUniCLPool is IUniswapV3Pool {
         observeShouldRevert = _observeShouldRevert;
     }
 
+    function setMaxObserveSecondsAgo(uint32 _maxObserveSecondsAgo) external {
+        maxObserveSecondsAgo = _maxObserveSecondsAgo;
+    }
+
+    function setObservationCardinality(uint16 _observationCardinality) external {
+        inUseObservationCardinality = _observationCardinality;
+    }
+
     /// @notice Simulates a degraded/halted pool: positions, mint, burn, and collect all revert
     function setPoolShouldRevert(bool _poolShouldRevert) external {
         poolShouldRevert = _poolShouldRevert;
@@ -188,7 +202,7 @@ contract MockUniCLPool is IUniswapV3Pool {
             bool unlocked
         )
     {
-        return (currentSqrtPriceX96, currentTick, 0, 0, 0, 0, true);
+        return (currentSqrtPriceX96, currentTick, 0, inUseObservationCardinality, inUseObservationCardinality, 0, true);
     }
 
     function observe(uint32[] calldata _secondsAgos)
@@ -197,6 +211,11 @@ contract MockUniCLPool is IUniswapV3Pool {
         returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s)
     {
         if (observeShouldRevert) revert("OLD");
+        if (maxObserveSecondsAgo != 0) {
+            for (uint256 i; i < _secondsAgos.length; ++i) {
+                if (_secondsAgos[i] > maxObserveSecondsAgo) revert("OLD");
+            }
+        }
 
         tickCumulatives = new int56[](_secondsAgos.length);
         secondsPerLiquidityCumulativeX128s = new uint160[](_secondsAgos.length);
