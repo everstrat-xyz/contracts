@@ -277,6 +277,12 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         return shortfall < excess ? shortfall : excess;
     }
 
+    /// @dev ETH the Controller must hold to settle in-window priced batches. Matches
+    ///      share-price accounting: the current unpriced batch is still cancellable
+    ///      equity (`liveRedemptionOffsets` is 0), so counting it here would let a
+    ///      queue-then-cancel loop pull LP (`WithdrawShortfall`) and re-deposit
+    ///      (`DepositExcess`). After `priceBatch` the batch is in
+    ///      `[cursor, currentBatchId)` and is costed at `finalEvePrice`.
     function _pendingRedemptionNeedsETH(IRegistry _registry) internal view returns (uint256 needsETH) {
         IExitQueue queue = IExitQueue(_registry.exitQueue());
         uint256 currentBatchId = queue.currentBatchId();
@@ -286,13 +292,6 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         uint256 scanLimit = cursor + MAX_BATCH_SCAN;
         for (uint256 batchId = cursor; batchId < currentBatchId && batchId < scanLimit; batchId++) {
             needsETH += _batchSettlementCost(queue, batchId);
-        }
-
-        (,, uint256 totalTokensToBurn,,) = queue.batchInfo(currentBatchId);
-        if (totalTokensToBurn > 0) {
-            // Current (unpriced) batch is still cancellable equity. Size residual need
-            // at the live base price, which is already net of in-window priced liability.
-            needsETH += totalTokensToBurn.convertAssets(IAMM(_registry.amm()).eveBasePriceInETH());
         }
     }
 

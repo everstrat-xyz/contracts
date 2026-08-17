@@ -44,6 +44,8 @@ interface ICREStrategyExecutor is ICREReceiverBase {
     function lastSyncAt() external view returns (uint256);
     function exitLiquidityTargetETH() external view returns (uint256);
     function minExitLiquidityTopUpETH() external view returns (uint256);
+    /// @notice ETH the Controller must hold to settle in-window priced batches.
+    ///         The current unpriced batch is excluded (cancellable equity).
     function pendingRedemptionNeedsETH() external view returns (uint256 needsETH);
 
     /**

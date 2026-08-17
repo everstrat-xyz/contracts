@@ -681,6 +681,8 @@ Live share-price accounting (see `ExitQueue.liveRedemptionOffsets()`):
 
 - Until `priceBatch`, queued EVE is still **cancellable equity** — NAV and
   supply are unchanged. Users can close the current unpriced batch at any time.
+  `CREStrategyExecutor.pendingRedemptionNeedsETH` also ignores it, so
+  `WithdrawShortfall` cannot be griefed by queue-then-cancel.
 - Once a batch is **priced** (`Controller.priceBatch()` → `BatchPriced`,
   `pricedAt` set), live NAV deducts `remainingTokens * finalEvePrice` and live
   supply deducts remaining escrow. Requests **cannot be closed** for 3 days

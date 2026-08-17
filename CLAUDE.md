@@ -431,7 +431,7 @@ The protocol implements the following core contracts:
      - After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (expired batches are skippable; `pullRequest` would revert `ExitQueueBatchExpired`). Cursor / `minBatchAge` / `maxUsersPerUpkeep` otherwise unchanged from the prior CLA design. **Do not use the CRE cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`
    - **CREStrategyExecutor** (`StrategyAction`, priority: Rebalance, WithdrawShortfall, ProvideExitLiquidity, DepositExcess, HarvestPerformanceFees, Sync):
      - `strategyUpkeepStatus()` exposes the recommended action + estimated amount; `_processReport` recomputes amounts and never trusts the report for ETH quantities
-     - Pending redemption needs anchored at `CREQueueExecutor.nextLiveBatchIdToProcess()` (priced in-window batches at `finalEvePrice`; expired contribute 0). The current **unpriced** batch is sized at residual `AMM.eveBasePriceInETH()` — still cancellable equity, and that live base price is already net of in-window priced liability
+     - Pending redemption needs anchored at `CREQueueExecutor.nextLiveBatchIdToProcess()` (priced in-window batches at `finalEvePrice`; expired contribute 0). The current **unpriced** batch is not counted — still cancellable equity, matching `liveRedemptionOffsets`; `WithdrawShortfall` waits until `priceBatch` so a queue-then-cancel cannot pull LP
      - Config setters (ADMIN_ROLE): same policy knobs as before (`controllerReserveETH`, `minDepositETH`, `minWithdrawETH`, `minHarvestETH`, `syncInterval`, `exitLiquidityTargetETH`, `minExitLiquidityTopUpETH`)
    - Version: `1.0.0-cre`
    - Location: `src/contracts/automation/`
