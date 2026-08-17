@@ -88,4 +88,36 @@ describe('Contract Detection', () => {
       expect(result).toBeNull();
     });
   });
+
+  describe('isArchitectureDiagram', () => {
+    it('should match GitHub repo-relative mermaid path', () => {
+      const result = (checker as any).isArchitectureDiagram('mermaid/mermaid-smart-contracts.md');
+
+      expect(result).toBe(true);
+    });
+
+    it('should not match the absolute disk path used for fs reads', () => {
+      const absolutePath = (checker as any).config.mermaid_file;
+      const result = (checker as any).isArchitectureDiagram(absolutePath);
+
+      expect(absolutePath).toMatch(/[/\\]mermaid[/\\]mermaid-smart-contracts\.md$/);
+      expect(result).toBe(false);
+    });
+
+    it('should not match unrelated files', () => {
+      const result = (checker as any).isArchitectureDiagram('src/contracts/AMM.sol');
+
+      expect(result).toBe(false);
+    });
+
+    it('should normalize backslashes in GitHub filenames', () => {
+      const result = (checker as any).isArchitectureDiagram('mermaid\\mermaid-smart-contracts.md');
+
+      expect(result).toBe(true);
+    });
+
+    it('should expose a POSIX repo-relative path for API comparisons', () => {
+      expect((checker as any).config.mermaid_file_repo_path).toBe('mermaid/mermaid-smart-contracts.md');
+    });
+  });
 });

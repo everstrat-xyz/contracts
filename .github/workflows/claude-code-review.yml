@@ -10,53 +10,91 @@ on:
         required: true
         type: string
 
+# Deny all permissions by default; each job grants the minimum it needs.
+# Architecture analysis must never run PR-controlled Node (package.json
+# lifecycle scripts or the checker) with a write token (audit M-14).
+permissions: {}
+
 jobs:
-  claude-review:
+  architecture-check:
     runs-on: ubuntu-latest
-    outputs:
-      architecture_status: ${{ steps.process-results.outputs.architecture_status }}
-      architecture_summary: ${{ steps.process-results.outputs.architecture_summary }}
-      architecture_issues_count: ${{ steps.process-results.outputs.architecture_issues_count }}
     permissions:
       contents: read
       pull-requests: write
       issues: write
-      id-token: write
-    
+    outputs:
+      architecture_status: ${{ steps.process-results.outputs.architecture_status }}
+      architecture_summary: ${{ steps.process-results.outputs.architecture_summary }}
+      architecture_issues_count: ${{ steps.process-results.outputs.architecture_issues_count }}
+      new_contracts: ${{ steps.process-results.outputs.new_contracts }}
+      aligned_contracts: ${{ steps.process-results.outputs.aligned_contracts }}
+      architecture_updated: ${{ steps.process-results.outputs.architecture_updated }}
+      has_new_contracts: ${{ steps.process-results.outputs.has_new_contracts }}
+      undocumented_contracts: ${{ steps.process-results.outputs.undocumented_contracts }}
     steps:
-    - name: Checkout code
+    # Run the checker from the PR base (or default branch), not from the PR
+    # head: npm install / tsx then execute trusted code only. PR file lists
+    # come from the GitHub API; the diagram is fetched as data, not executed.
+    - name: Checkout trusted base
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
-    
+        ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+        persist-credentials: false
+        fetch-depth: 1
+
+    - name: Load PR architecture diagram
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number || '' }}
+      run: |
+        if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "0" ]; then
+          echo "No PR number; using base-branch diagram"
+          exit 0
+        fi
+        case "$PR_NUMBER" in
+          ''|*[!0-9]*) echo "Invalid PR number; using base-branch diagram"; exit 0 ;;
+        esac
+        if gh api \
+          -H "Accept: application/vnd.github.raw" \
+          "/repos/${GITHUB_REPOSITORY}/contents/mermaid/mermaid-smart-contracts.md?ref=refs/pull/${PR_NUMBER}/head" \
+          > /tmp/mermaid.md; then
+          mv /tmp/mermaid.md mermaid/mermaid-smart-contracts.md
+          echo "Loaded mermaid diagram from PR #${PR_NUMBER}"
+        else
+          echo "PR has no mermaid diagram; keeping base-branch copy"
+        fi
+
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
         node-version: '18'
-    
+        cache: 'npm'
+        cache-dependency-path: mermaid/scripts/package-lock.json
+
     - name: Install architecture checker dependencies
-      run: |
-        cd mermaid/scripts
-        npm install
-    
+      working-directory: mermaid/scripts
+      run: npm ci --ignore-scripts
+
     - name: Run Simple Architecture Check
       id: architecture-check
       continue-on-error: true
+      working-directory: mermaid/scripts
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GITHUB_REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number || '0' }}
       run: |
-        cd mermaid/scripts
-        # Use tsx instead of ts-node for better ES module support
-        npx tsx simple-architecture-checker.ts ${{ github.event.pull_request.number || inputs.pr_number || '0' }}
-        
-        # Extract outputs from the script's GITHUB_OUTPUT file
+        case "$PR_NUMBER" in
+          ''|*[!0-9]*) echo "Invalid PR number: $PR_NUMBER"; exit 1 ;;
+        esac
+        ./node_modules/.bin/tsx simple-architecture-checker.ts "$PR_NUMBER"
+
         if [ -f "$GITHUB_OUTPUT" ]; then
           echo "Architecture check completed. Outputs available in GITHUB_OUTPUT file."
         else
           echo "No GITHUB_OUTPUT file found. Architecture check may have failed."
         fi
-    
+
     - name: Process Architecture Check Results
       id: process-results
       if: always()
@@ -64,7 +102,7 @@ jobs:
         # Read architecture check results from GITHUB_OUTPUT file
         if [ -f "$GITHUB_OUTPUT" ]; then
           echo "Reading architecture check results..."
-          
+
           # Extract values from GITHUB_OUTPUT file
           ARCH_STATUS=$(grep "^status=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "unknown")
           ARCH_SUMMARY=$(grep "^summary=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "No summary available")
@@ -74,7 +112,7 @@ jobs:
           ARCH_UPDATED=$(grep "^architecture_updated=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "false")
           HAS_NEW_CONTRACTS=$(grep "^has_new_contracts=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "false")
           UNDOCUMENTED_CONTRACTS=$(grep "^undocumented_contracts=" "$GITHUB_OUTPUT" | cut -d'=' -f2- || echo "")
-          
+
           echo "Architecture Check Status: $ARCH_STATUS"
           echo "Summary: $ARCH_SUMMARY"
           echo "Architectural Issues: $ARCH_ISSUES"
@@ -83,7 +121,7 @@ jobs:
           echo "Architecture Updated: $ARCH_UPDATED"
           echo "Has New Contracts: $HAS_NEW_CONTRACTS"
           echo "Undocumented Contracts: $UNDOCUMENTED_CONTRACTS"
-          
+
           # Set step-level outputs for other steps to use
           echo "architecture_status=$ARCH_STATUS" >> $GITHUB_OUTPUT
           echo "architecture_summary=$ARCH_SUMMARY" >> $GITHUB_OUTPUT
@@ -104,8 +142,74 @@ jobs:
           echo "has_new_contracts=false" >> $GITHUB_OUTPUT
           echo "undocumented_contracts=" >> $GITHUB_OUTPUT
         fi
-    
-    
+
+    - name: Post Architecture Diagram Comment
+      if: always()
+      uses: actions/github-script@v7
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number || '' }}
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+
+          const mermaidPath = 'mermaid/mermaid-smart-contracts.md';
+          let mermaidContent = '';
+
+          if (fs.existsSync(mermaidPath)) {
+            const content = fs.readFileSync(mermaidPath, 'utf8');
+            const match = content.match(/```mermaid\n([\s\S]*?)\n```/);
+            if (match) {
+              mermaidContent = match[1];
+            }
+          }
+
+          const commentBody = `## 📊 Current Architecture
+
+          This diagram shows the current system architecture for reference during code review.
+
+          \`\`\`mermaid
+          ${mermaidContent}
+          \`\`\`
+
+          ---
+          *This diagram is automatically updated and provided for reference during code review.*`;
+
+          const parsed = Number(process.env.PR_NUMBER);
+          const prNumber = context.payload.pull_request?.number || context.issue?.number || (Number.isInteger(parsed) && parsed > 0 ? parsed : undefined);
+          console.log('Posting comment to PR/Issue number:', prNumber);
+
+          if (!prNumber) {
+            console.log('No PR or issue number found, skipping comment');
+            return;
+          }
+
+          await github.rest.issues.createComment({
+            issue_number: prNumber,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: commentBody
+          });
+
+  claude-review:
+    runs-on: ubuntu-latest
+    needs: architecture-check
+    if: always()
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+    # PR head is required for review, but this job must not npm-install or
+    # execute PR-controlled scripts. persist-credentials is off so the
+    # GITHUB_TOKEN is not written into .git/config.
+    - name: Checkout pull request
+      uses: actions/checkout@v4
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+
     - name: Run Claude Code Review
       id: claude-review
       uses: anthropics/claude-code-action@v1
@@ -114,17 +218,17 @@ jobs:
         github_token: ${{ secrets.GITHUB_TOKEN }}
         prompt: |
           REPO: ${{ github.repository }}
-          PR NUMBER: ${{ github.event.pull_request.number }}
+          PR NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
 
           ## 🏗️ Architecture Check Results
-          **Status:** ${{ steps.process-results.outputs.architecture_status }}
-          **Summary:** ${{ steps.process-results.outputs.architecture_summary }}
-          **Architectural Issues:** ${{ steps.process-results.outputs.architecture_issues_count }}
-          **New Contracts:** ${{ steps.process-results.outputs.new_contracts }}
-          **Aligned Contracts:** ${{ steps.process-results.outputs.aligned_contracts }}
-          **Architecture Updated:** ${{ steps.process-results.outputs.architecture_updated }}
-          **Has New Contracts:** ${{ steps.process-results.outputs.has_new_contracts }}
-          **Undocumented Contracts:** ${{ steps.process-results.outputs.undocumented_contracts }}
+          **Status:** ${{ needs.architecture-check.outputs.architecture_status }}
+          **Summary:** ${{ needs.architecture-check.outputs.architecture_summary }}
+          **Architectural Issues:** ${{ needs.architecture-check.outputs.architecture_issues_count }}
+          **New Contracts:** ${{ needs.architecture-check.outputs.new_contracts }}
+          **Aligned Contracts:** ${{ needs.architecture-check.outputs.aligned_contracts }}
+          **Architecture Updated:** ${{ needs.architecture-check.outputs.architecture_updated }}
+          **Has New Contracts:** ${{ needs.architecture-check.outputs.has_new_contracts }}
+          **Undocumented Contracts:** ${{ needs.architecture-check.outputs.undocumented_contracts }}
 
           Please review this pull request and provide feedback on:
           - Code quality and best practices
@@ -133,7 +237,7 @@ jobs:
           - Security concerns
           - Test coverage
           - **Architecture compliance** (pay special attention to the architecture check results above)
-          
+
           **Important:** The architecture check has already analyzed this PR against the target architecture. Please:
           1. **Review the architecture check results above** - Pay attention to the status and summary
           2. **Evaluate architectural alignment** - Check if new contracts follow established patterns
@@ -141,82 +245,14 @@ jobs:
           4. **Validate contract design** - Ensure new contracts fit well with the existing architecture
           5. **Check documentation** - Verify that architecture diagrams are updated if needed
           6. **Provide actionable feedback** - Give specific suggestions for improvement
-          
+
           **Architecture Check Interpretation:**
           - ✅ **PASSED**: All changes align with target architecture
           - ⚠️ **WARNING**: Some concerns found, review and address
           - ❌ **FAILED**: Significant architectural issues detected
-          
+
           Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
 
           Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
-        
+
         claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
-    
-    - name: Check GitHub Token Permissions
-      if: always()
-      run: |
-        echo "Checking GitHub token permissions..."
-        echo "Repository: ${{ github.repository }}"
-        echo "Event: ${{ github.event_name }}"
-        echo "PR Number: ${{ github.event.pull_request.number }}"
-    
-    - name: Post Architecture Diagram Comment
-      if: always()
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        script: |
-          const fs = require('fs');
-          const path = require('path');
-          
-          console.log('Context:', JSON.stringify(context, null, 2));
-          console.log('Event name:', context.eventName);
-          console.log('Payload:', JSON.stringify(context.payload, null, 2));
-          
-          // Read the mermaid diagram
-          const mermaidPath = 'mermaid/mermaid-smart-contracts.md';
-          let mermaidContent = '';
-          
-          if (fs.existsSync(mermaidPath)) {
-            const content = fs.readFileSync(mermaidPath, 'utf8');
-            const match = content.match(/```mermaid\n([\s\S]*?)\n```/);
-            if (match) {
-              mermaidContent = match[1];
-            }
-          }
-          
-          // Create architecture diagram comment
-          const commentBody = `## 📊 Current Architecture
-          
-          This diagram shows the current system architecture for reference during code review.
-          
-          \`\`\`mermaid
-          ${mermaidContent}
-          \`\`\`
-          
-          ---
-          *This diagram is automatically updated and provided for reference during code review.*`;
-          
-          // Get the correct PR/issue number
-          const prNumber = context.payload.pull_request?.number || context.issue?.number;
-          console.log('Posting comment to PR/Issue number:', prNumber);
-          
-          if (!prNumber) {
-            console.log('No PR or issue number found, skipping comment');
-            return;
-          }
-          
-          try {
-            // Post comment to PR/Issue
-            await github.rest.issues.createComment({
-              issue_number: prNumber,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: commentBody
-            });
-            console.log('Comment posted successfully');
-          } catch (error) {
-            console.error('Error posting comment:', error);
-            throw error;
-          }

@@ -15,7 +15,10 @@ const currentDirname = path.dirname(currentFilename);
 interface SimpleConfig {
   github_token: string;
   repo: string;
+  /** Absolute path used for disk reads. */
   mermaid_file: string;
+  /** Repo-relative POSIX path, matching GitHub pull-file `filename`s. */
+  mermaid_file_repo_path: string;
 }
 
 interface PRFile {
@@ -55,14 +58,20 @@ class SimpleArchitectureChecker {
       throw new Error('GITHUB_REPO must be in format "owner/repo"');
     }
     
-    // More robust path resolution
+    // Disk path vs GitHub API path are different strings: `fs.readFileSync`
+    // needs an absolute path, while `pulls.listFiles` returns repo-relative
+    // POSIX paths (e.g. mermaid/mermaid-smart-contracts.md).
     const scriptDir = currentDirname || path.dirname(fileURLToPath(import.meta.url));
-    const mermaidFile = process.env.MERMAID_FILE || path.resolve(scriptDir, '../mermaid-smart-contracts.md');
+    const mermaidFile = path.resolve(
+      process.env.MERMAID_FILE || path.join(scriptDir, '../mermaid-smart-contracts.md')
+    );
+    const repoRoot = path.resolve(scriptDir, '../..');
     
     this.config = {
       github_token: githubToken,
       repo: githubRepo,
-      mermaid_file: mermaidFile
+      mermaid_file: mermaidFile,
+      mermaid_file_repo_path: path.relative(repoRoot, mermaidFile).split(path.sep).join('/')
     };
     
     this.octokit = new Octokit({ auth: this.config.github_token });
@@ -331,6 +340,14 @@ class SimpleArchitectureChecker {
   }
 
   /**
+   * True when a GitHub pull-file path is the architecture diagram.
+   * GitHub `filename`s are repo-relative POSIX paths; `mermaid_file` is absolute.
+   */
+  private isArchitectureDiagram(filename: string): boolean {
+    return filename.replace(/\\/g, '/') === this.config.mermaid_file_repo_path;
+  }
+
+  /**
    * Extract contract name from file path
    * Handles contracts in src/ and any subdirectories
    */
@@ -387,8 +404,8 @@ class SimpleArchitectureChecker {
       const architecturalIssues: string[] = [];
       const newContracts: string[] = [];
       const alignedContracts: string[] = [];
-      const architectureUpdated = files.some(file => 
-        file.filename === this.config.mermaid_file && 
+      const architectureUpdated = files.some(file =>
+        this.isArchitectureDiagram(file.filename) &&
         (file.status === 'added' || file.status === 'modified')
       );
       
