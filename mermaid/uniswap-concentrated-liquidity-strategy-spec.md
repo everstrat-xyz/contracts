@@ -154,21 +154,19 @@ This mirrors the reference design: the main range receives the maximum balanced 
 8. Add remaining token inventory into the alternative position.
 9. Emit `FundsDeposited(msg.value)`.
 
-Deposits should be blocked when `isCalm()` is false.
+Deposits should be blocked when `isCalm()` is false. The calm gate is load-bearing here: `pool.mint()` has no price bound, and `_setTicks()` / `_liquidityForPosition()` both read spot. See [Calm-Period Gate Asymmetry](#calm-period-gate-asymmetry).
 
 ### Withdraw
 
-`withdraw(_receiver, _amount)` is called by `StrategyManager` and returns native ETH.
+`withdraw(_receiver, _amount)` is called by `StrategyManager` and returns native ETH. It is **not** calm-gated on the unwind (see [Calm-Period Gate Asymmetry](#calm-period-gate-asymmetry)).
 
-1. Claim/collect current fees and remove liquidity from active ranges for accounting, mirroring the reference `beforeAction()` behavior.
-2. Calculate the token0/token1 amounts that represent `_amount` of ETH-denominated NAV.
-3. Keep or withdraw the required WETH-side amount and swap the needed paired-token proceeds back into WETH using caller/keeper-supplied slippage limits or conservative stored limits.
-4. Unwrap WETH into ETH.
-5. Send ETH to `_receiver`.
-6. Re-add remaining liquidity if the strategy is not paused.
-7. Emit `FundsWithdrawn(actualAmount)`.
+1. If idle native ETH covers `_amount`, pay out directly — no pool or Converter interaction.
+2. Otherwise spend all idle ETH toward the payout and source only the remainder from WETH: poke-then-accrue, remove both positions, convert paired token via `_convertToWeth()` (exact-output, independently bounded by TWAP quote / Chainlink / slippage — not by `_isCalm()`).
+3. Unwrap only the WETH portion needed; deliver idle ETH + unwrapped remainder in a single native transfer.
+4. Re-add remaining inventory **only if `_isCalm()`** (minting into a dislocated pool is the thing the calm gate exists to prevent). If not calm, inventory stays idle until a later calm `deposit` / `investIdleETH` / `rebalance`.
+5. Emit `FundsWithdrawn(actualAmount)`.
 
-`maxWithdrawal()` should return the amount of ETH that can be withdrawn immediately under the configured slippage assumptions.
+`maxWithdrawal()` returns `navInETH()` whenever unpaused (including when not calm), matching the ungated withdraw path.
 
 ### Rebalance
 
@@ -213,6 +211,48 @@ This is separate from the keeper flow (`Controller.depositToStrategies()` → `S
 - Spot tick from `slot0()`.
 - Main TWAP tick over `twapInterval`.
 - Optional short TWAP tick over a small interval, such as 3 seconds, to reduce single-block manipulation risk.
+
+## Calm-Period Gate Asymmetry
+
+`_isCalm()` enforces **never mint into a dislocated pool**, not "never touch the pool when dislocated." `deposit` / `investIdleETH` / `rebalance` revert `UniCLStratNotCalm`; `withdraw` burns and converts unconditionally and only gates the re-add. Normative decision and residual-risk ranking: [`docs/STRATEGY_GUARDRAILS.md`](../docs/STRATEGY_GUARDRAILS.md) §1.1.1.
+
+### Why a burn at a skewed tick does not crystallize IL into NAV
+
+`navInETH()` never marks at spot. Pool positions are valued at the long TWAP (`_twapSqrtPrice()`); loose balances at Chainlink. Let \(P\) be the price of token0 in token1. A Uniswap V3 position with liquidity \(L\) over \([P_a, P_b]\), while \(P\) is inside the range, has value
+
+\[V(P) = L\left(2\sqrt{P} - \tfrac{P}{\sqrt{P_b}} - \sqrt{P_a}\right),\]
+
+with \(V'(P) = x(P)\) (the token0 holding) and \(V''(P) = -L/(2P^{3/2}) < 0\): strictly concave.
+
+Burning at pool price \(Q\) (possibly manipulated) and marking at the true/oracle price \(P^\*\) yields the bag \((x(Q), y(Q))\), whose mark is the tangent to \(V\) at \(Q\):
+
+\[B(Q) = x(Q)P^\* + y(Q) = V(Q) + V'(Q)(P^\* - Q) \equiv T_Q(P^\*).\]
+
+Concavity gives \(T_Q(P^\*) \ge V(P^\*)\) for every \(Q\), with equality only at \(Q = P^\*\). The gap is the standard divergence-loss quantity (independent of the range endpoints as long as both prices lie inside the range):
+
+\[\Delta(Q, P^\*) = T_Q(P^\*) - V(P^\*) = L\,\frac{\left(\sqrt{P^\*} - \sqrt{Q}\right)^2}{\sqrt{Q}} \ge 0.\]
+
+Freezing the position at a dislocated tick and marking it at the true price is worth *at least* as much as remaining in the pool at that price. A round-trip manipulation around a burn does not pay the attacker: they pay swap fees moving the price, the burn gives them nothing, and the reversion leg they'd need never happens because the strategy is already out.
+
+### Why minting at a dislocated price is the opposite trade
+
+Minting runs the same step backwards. A linear bag is converted into a curve position at \(Q\); as price reverts to \(P^\*\) the strategy pays \(-\Delta\), and the attacker is the counterparty. Write \(Q = P^\*(1+\varepsilon)\):
+
+\[\Delta \approx \frac{L\sqrt{P^\*}}{4}\,\varepsilon^2, \qquad \frac{\Delta}{V} \approx \frac{\varepsilon^2}{4w}\]
+
+for a position of half-width \(w\). Instantaneous extraction is second-order and saturates around \(w/4\) once \(\varepsilon\) exceeds the range. That is **not** what makes `deposit()` dangerous.
+
+The first-order risk is tick placement. `_setTicks()` centers the range on `_currentTick()` (spot) and `_liquidityForPosition()` sizes the mint from `_sqrtPrice()` (also spot). `pool.mint()` has no `minAmount` / oracle bound — `_isCalm()` is the only defence on that path. If the reversion \(\varepsilon\) exceeds \(w\), the position ends up entirely outside the live price: earning zero fees, holding 100% of one asset, directionally exposed. The only fix is `rebalance()`, itself calm-gated. That damage is proportional to the position, persists until the pool calms, and has no \(\varepsilon^2\) bound.
+
+The deposit-path *swap* is not the vulnerable part: `_balanceInventory()` targets 50/50 from `_tokenValueInETH` (Chainlink) and executes through the same TWAP / oracle / slippage machinery as withdraw. The calm gate on `deposit()` buys protection specifically for the mint and the tick placement.
+
+### Why `withdraw()` stays ungated
+
+- **Deposits are deferrable; exits are not.** A blocked deposit leaves ETH idle at StrategyManager / Controller, fully counted in NAV; `maxDeposit()` honestly returns 0. A blocked withdrawal stalls `Controller.provideExitLiquidity()` → `StrategyManager.withdrawFromStrategies()`. On the batch path a revert is swallowed as `StrategyWithdrawFailed` (silent underfill); on the single-strategy path it hard-reverts. Redemption demand and pool dislocation are correlated.
+- **The conversion swap is independently bounded** (adapter TWAP quote, `MAX_QUOTE_DEVIATION_BPS = 200`, `MAX_SWAP_SLIPPAGE_BPS = 200` padded off the TWAP quote). A seriously manipulated pool misses the bound and reverts the whole `withdraw()`, burn included. Residual window: between the calm band (`maxTickDeviation = 60` ≈ 0.6%) and the ~2% swap tolerance, max extraction is ~2% minus the fee tier on the *converted* notional only.
+- **`maxWithdrawal()` advertises full `navInETH()` whenever unpaused.** A calm revert would make that view a lie and keep StrategyManager routing amounts to a strategy that always fails.
+
+A hard `_isCalm()` revert on `withdraw()` is therefore ranked last among alternatives (status quo; fractional burn so a small withdrawal does not park the whole position idle; skip `_convertToWeth()` when not calm and return a short fill).
 
 ## DAO Performance Fees
 
@@ -280,9 +320,11 @@ Because `navInETH()` feeds AMM pricing (via `StrategyManager.totalNAVInETH()`), 
 
 Constructor takes a single `IUniCLStrat.DeploymentConfig` struct:
 
-- **`AddressConfig`**: `registry`, `weth`, `pool` (Oracle / Converter resolved via Registry)
+- **`AddressConfig`**: `registry`, `weth`, `pool`, `factory` (Oracle / Converter resolved via Registry; constructor verifies `factory.getPool(token0, token1, pool.fee()) == pool` so a malicious interface-compatible pool cannot be trusted as the mint-callback caller)
 - **`RouteConfig`**: `swapAdapter`, `wethToPairedTokenPath`, `pairedTokenToWethPath`
 - **`StrategyConfig`**: `positionWidth`, `rebalanceTickThreshold`, `maxTickDeviation`, `twapInterval`, `shortTwapInterval`, `maxTotalNAV`
+
+Constructor and `setTwapInterval` / `setShortTwapInterval` probe `pool.observe([interval, 0])` (`UniCLStratPoolTWAPNotAvailable`) **and** require in-use `slot0.observationCardinality >= ceil(interval / MAX_BLOCK_SECONDS)` floored at `MIN_OBSERVATION_CARDINALITY = 150` (`UniCLStratInsufficientObservationCardinality`). Intervals above `MAX_TWAP_INTERVAL` (`uint16.max × 12` s) revert `UniCLStratInvalidConfig` — no V3 ring can densely cover a longer lookback. Observe-only still accepts a quiet cardinality-1 pool that marks at a spot-extrapolated TWAP; cardinality-only does not prove the lookback will compute. Grow the ring and wait for fill before deploy.
 
 Deploy via `script/DeployUniCLStrat.s.sol` with `REGISTRY_ADDRESS` and env-driven strategy parameters (bytecode only — no `addStrategy`; requires prior timelocked `Converter.setAllowedAdapter`). Register the strategy via the 48h admin timelock (`StrategyManager.addStrategy`; paired-token Oracle feed / optional `addSupportedERC20` usually share the allowlist batch). Performance-fee treasury and rate are configured on StrategyManager at protocol deploy (`DAO_TREASURY_ADDRESS`, `PERFORMANCE_FEE_BPS`), not in UniCLStrat.
 
@@ -323,7 +365,7 @@ Implementation must include:
 - Reentrancy protection around deposit, withdraw, and rebalance.
 - Strict Uniswap mint callback validation: caller must be the configured pool and the strategy must be in a minting state.
 - Slippage controls for swaps and liquidity removal.
-- TWAP/calm-period checks before deposits and rebalances.
+- TWAP/calm-period checks before deposits, rebalances, and liquidity *mints* (including the withdraw re-add). `withdraw()` burn/convert is intentionally ungated — see [Calm-Period Gate Asymmetry](#calm-period-gate-asymmetry).
 - Tick validation against min/max tick and tick spacing.
 - Approval lifecycle management with revoke-on-pause/panic.
 - Conservative `maxDeposit()` and `maxWithdrawal()` values.

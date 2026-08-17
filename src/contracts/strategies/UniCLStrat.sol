@@ -6,6 +6,7 @@ pragma solidity ^0.8.30;
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
@@ -20,6 +21,7 @@ import {IRegistry} from "interfaces/IRegistry.sol";
 import {IStrategy} from "../../interfaces/IStrategy.sol";
 import {IUniCLStrat} from "../../interfaces/strategies/IUniCLStrat.sol";
 import {IUniswapV3Pool} from "../../interfaces/integrations/uniswap/IUniswapV3Pool.sol";
+import {IUniswapV3Factory} from "../../interfaces/integrations/uniswap/IUniswapV3Factory.sol";
 import {IWETH} from "../../interfaces/integrations/IWETH.sol";
 
 import {LiquidityAmounts} from "../../libraries/integrations/uniswap/LiquidityAmounts.sol";
@@ -41,6 +43,7 @@ import {TickUtils} from "../../libraries/integrations/uniswap/TickUtils.sol";
  */
 contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20Metadata;
+    using Address for address payable;
 
     using Auth for IRegistry;
 
@@ -51,14 +54,28 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     ///      (`_isCalm()`) and the LP-position composition used by `navInETH()`, which feeds
     ///      StrategyManager NAV and AMM pricing — so its window must be expensive to bias.
     ///      30 minutes of averaging means an attacker has to sustain a skewed tick across
-    ///      ~150 blocks. The pool must be able to serve this lookback: deploy only against
-    ///      pools whose observation cardinality covers MIN_TWAP_INTERVAL, otherwise
-    ///      `navInETH()` reverts (freezing protocol pricing) until the buffer fills.
+    ///      ~150 blocks (12s L1). Constructor and `setTwapInterval` / `setShortTwapInterval`
+    ///      require both (1) `pool.observe` serving the window (`UniCLStratPoolTWAPNotAvailable`)
+    ///      so NAV will compute, and (2) in-use `observationCardinality` covering
+    ///      `ceil(interval / MAX_BLOCK_SECONDS)` slots, floored at
+    ///      `MIN_OBSERVATION_CARDINALITY` (`UniCLStratInsufficientObservationCardinality`)
+    ///      so a quiet cardinality-1 pool cannot mark at a spot-extrapolated TWAP.
+    ///      Runtime `navInETH()` still fail-closes on a later `observe` revert.
     uint32 public constant MIN_TWAP_INTERVAL = 1800;
     /// @dev Floor for the short TWAP window used as a secondary calm check. Aligned with the
     ///      UniswapV3ConverterAdapter's MIN_TWAP_INTERVAL (60s) so a single-block flash-loan
     ///      tick skew cannot satisfy the calm-period guard.
     uint32 public constant MIN_SHORT_TWAP_INTERVAL = 60;
+    /// @dev Assumed L1 block time when converting a TWAP window into a minimum in-use
+    ///      observation cardinality. Matches the ~150-block bias cost of `MIN_TWAP_INTERVAL`.
+    uint32 public constant MAX_BLOCK_SECONDS = 12;
+    /// @dev Floor on in-use Uniswap observation slots (`slot0.observationCardinality`, not
+    ///      `observationCardinalityNext`). Equal to `MIN_TWAP_INTERVAL / MAX_BLOCK_SECONDS`.
+    uint16 public constant MIN_OBSERVATION_CARDINALITY = 150;
+    /// @dev Longest TWAP window that can be densely covered by Uniswap's uint16 observation
+    ///      ring at {MAX_BLOCK_SECONDS} per slot: `type(uint16).max * MAX_BLOCK_SECONDS`.
+    ///      Longer windows cannot satisfy the cardinality floor on any V3 pool — fail closed.
+    uint32 public constant MAX_TWAP_INTERVAL = uint32(type(uint16).max) * MAX_BLOCK_SECONDS;
     uint256 public constant DEFAULT_SWAP_SLIPPAGE_BPS = 100;
     uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 200;
     uint256 public constant SWAP_DEADLINE_OFFSET = 15 minutes;
@@ -80,6 +97,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     IWETH public immutable weth;
     IUniswapV3Pool public immutable pool;
+    /// @dev Canonical Uniswap V3 factory used to prove `pool` provenance at construction.
+    IUniswapV3Factory public immutable factory;
 
     int24 public immutable tickSpacing;
     uint256 private immutable _genesisTimestamp;
@@ -138,6 +157,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
         weth = IWETH(_params.addresses.weth);
         pool = IUniswapV3Pool(_params.addresses.pool);
+        factory = IUniswapV3Factory(_params.addresses.factory);
 
         address _token0Address = IUniswapV3Pool(_params.addresses.pool).token0();
         address _token1Address = IUniswapV3Pool(_params.addresses.pool).token1();
@@ -152,6 +172,14 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             revert UniCLStratInvalidPool();
         }
 
+        // Factory provenance: only a pool created by the configured Uniswap V3 factory may
+        // be trusted as `msg.sender` of `uniswapV3MintCallback`. Without this check an
+        // interface-compatible malicious pool could drain inventory during mint.
+        uint24 _fee = IUniswapV3Pool(_params.addresses.pool).fee();
+        if (factory.getPool(_token0Address, _token1Address, _fee) != _params.addresses.pool) {
+            revert UniCLStratInvalidPool();
+        }
+
         tickSpacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
         positionWidth = _params.strategy.positionWidth;
         rebalanceTickThreshold = _params.strategy.rebalanceTickThreshold;
@@ -159,6 +187,10 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         twapInterval = _params.strategy.twapInterval;
         shortTwapInterval = _params.strategy.shortTwapInterval;
         maxTotalNAV = _params.strategy.maxTotalNAV;
+        // Both probes: `observe` so NAV will compute; in-use cardinality so the TWAP is
+        // a dense average rather than a cardinality-1 spot extrapolation.
+        _requireTwapOracle(twapInterval);
+        _requireTwapOracle(shortTwapInterval);
         swapAdapter = _params.routes.swapAdapter;
         wethToPairedTokenPath = _params.routes.wethToPairedTokenPath;
         pairedTokenToWethPath = _params.routes.pairedTokenToWethPath;
@@ -292,7 +324,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        remainder is sourced from WETH (liquidity removal plus paired-token conversion),
      *        of which exactly the needed amount is unwrapped. Native ETH is never wrapped
      *        just to be unwrapped again. Remaining WETH/paired inventory is rebalanced and
-     *        re-added as liquidity only when the pool is calm.
+     *        re-added as liquidity only when the pool is calm. The unwind itself is
+     *        intentionally not calm-gated: `navInETH()` marks at TWAP/oracle (a skewed
+     *        burn does not crystallize IL into NAV), the conversion swap is independently
+     *        bounded, and a calm revert would stall exit liquidity when redemptions spike.
+     *        See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *      In both paths the receiver gets a single native ETH transfer and the return value
      *      is the ETH actually delivered.
      */
@@ -316,7 +352,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             // LP position and WETH/paired inventory untouched.
             _withdrawn = _amount;
             _totalWithdrawn += _withdrawn;
-            _sendETH(_receiver, _withdrawn);
+            payable(_receiver).sendValue(_withdrawn);
         } else {
             // Spend all idle native ETH toward the payout; source only the remainder
             // from WETH via liquidity removal and paired-token conversion.
@@ -336,7 +372,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             // Unwrap only the WETH portion to this contract, then deliver idle ETH +
             // unwrapped remainder to the receiver in a single native transfer.
             if (_wethToUnwrap > 0) IConverter(_registry.converter()).unwrapWETH(_wethToUnwrap, address(this));
-            _sendETH(_receiver, _withdrawn);
+            payable(_receiver).sendValue(_withdrawn);
 
             if (_isCalm()) {
                 _balanceInventory();
@@ -473,14 +509,16 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      * @notice Emergency unwind: send liquidity to StrategyManager. ADMIN_ROLE or SECURITY_ROLE. Requires pause.
      * @dev WETH is unwrapped to native ETH via direct weth.withdraw() (not through the Converter).
      *      This is an intentional design choice: emergencyExit must work even when the Converter
-     *      is paused, so we bypass the Converter and call the WETH contract directly. Native ETH
-     *      is swept first (strict). Any paired-token balance is then transferred to StrategyManager
-     *      as ERC-20 via best-effort {SafeERC20-trySafeTransfer} — handles reverting tokens,
-     *      false returns, and USDT-style no-return-value transfers without rolling back the ETH
-     *      sweep (emits {PairedTokenTransferSkipped} on failure; a later `emergencyExit()` retries
-     *      once the token is transferable again). Whitelist the paired token via
-     *      `IStrategyManager.addSupportedERC20()` so NAV continues to count recoverable value when
-     *      the transfer succeeds.
+     *      is paused, so we bypass the Converter and call the WETH contract directly. WETH unwrap
+     *      is strict (canonical WETH does not revert) — same trust assumption as the pause-time
+     *      WETH allowance revoke. Native ETH is swept first (strict). Paired-token recovery is
+     *      best-effort end-to-end: `balanceOf` is try/catch'd and the transfer uses
+     *      {SafeERC20-trySafeTransfer} (reverting tokens, false returns, USDT-style empty
+     *      returndata) so neither a bricked balance read nor a failed transfer can roll back the
+     *      ETH sweep (emits {PairedTokenTransferSkipped} on either failure; a later
+     *      `emergencyExit()` retries once the token responds again). Whitelist the paired token
+     *      via `IStrategyManager.addSupportedERC20()` so NAV continues to count recoverable
+     *      value when the transfer succeeds.
      *
      *      This function never moves pool liquidity: it only transfers what the strategy
      *      already holds. The LP-fee accounting reset (see {_resetLpFeeAccounting}) best-effort
@@ -495,23 +533,27 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (!paused()) revert UniCLStratNotPaused();
 
         uint256 _wethBalance = weth.balanceOf(address(this));
-        uint256 _pairedBalance = pairedToken.balanceOf(address(this));
-
         if (_wethBalance > 0) weth.withdraw(_wethBalance);
 
         uint256 _ethToSend = address(this).balance;
 
         address strategyManagerAddress = _registry.strategyManager();
         // ETH first: paired-token transfer is best-effort and must not roll back the sweep.
-        if (_ethToSend > 0) _sendETH(strategyManagerAddress, _ethToSend);
+        if (_ethToSend > 0) payable(strategyManagerAddress).sendValue(_ethToSend);
 
-        if (_pairedBalance > 0) {
-            // trySafeTransfer (not try/catch on transfer): empty returndata from USDT-style
-            // tokens cannot be ABI-decoded as `bool` and would revert outside catch scope,
-            // hostaging the ETH sweep. OZ treats empty returndata + code as success.
-            if (!pairedToken.trySafeTransfer(strategyManagerAddress, _pairedBalance)) {
-                emit PairedTokenTransferSkipped();
+        // Paired-token `balanceOf` is best-effort: a paused/blacklisted token must not hostage
+        // the ETH sweep. Parameterless catch — same returndata-bomb rationale as pause-time paths.
+        try pairedToken.balanceOf(address(this)) returns (uint256 _pairedBalance) {
+            if (_pairedBalance > 0) {
+                // trySafeTransfer (not try/catch on transfer): empty returndata from USDT-style
+                // tokens cannot be ABI-decoded as `bool` and would revert outside catch scope,
+                // hostaging the ETH sweep. OZ treats empty returndata + code as success.
+                if (!pairedToken.trySafeTransfer(strategyManagerAddress, _pairedBalance)) {
+                    emit PairedTokenTransferSkipped();
+                }
             }
+        } catch {
+            emit PairedTokenTransferSkipped();
         }
 
         _resetLpFeeAccounting();
@@ -552,13 +594,15 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     function _setTwapInterval(uint32 _newTwapInterval) private {
-        if (_newTwapInterval < MIN_TWAP_INTERVAL) revert UniCLStratInvalidConfig();
+        _validateTwapInterval(_newTwapInterval, MIN_TWAP_INTERVAL);
+        _requireTwapOracle(_newTwapInterval);
         emit TwapIntervalUpdated(twapInterval, _newTwapInterval);
         twapInterval = _newTwapInterval;
     }
 
     function _setShortTwapInterval(uint32 _newShortTwapInterval) private {
-        if (_newShortTwapInterval < MIN_SHORT_TWAP_INTERVAL) revert UniCLStratInvalidConfig();
+        _validateTwapInterval(_newShortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+        _requireTwapOracle(_newShortTwapInterval);
         emit ShortTwapIntervalUpdated(shortTwapInterval, _newShortTwapInterval);
         shortTwapInterval = _newShortTwapInterval;
     }
@@ -622,13 +666,14 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     /**
      * @dev Engages the circuit breaker first: `_pause()` touches only local state, so the
-     *      SECURITY_ROLE pause can never be blocked by a degraded pool. The pool unwind is
-     *      best-effort — attempted through a try/catch self-call, with a failure surfaced as
-     *      {LiquidityUnwindSkipped} instead of reverting the pause — keeping `emergencyExit()`
-     *      (which requires the paused state) reachable even when the pool is bricked. The
-     *      Converter allowance revocation runs directly: the pool tokens are standard assets
-     *      (WETH and the configured paired token) whose `approve()` does not revert, so no
-     *      extra guard is warranted there.
+     *      SECURITY_ROLE pause can never be blocked by a degraded pool or a paired token
+     *      that rejects `approve(0)` (paused / blacklisted USDC). The pool unwind is
+     *      best-effort (try/catch self-call, {LiquidityUnwindSkipped} on failure). WETH
+     *      Converter allowance is revoked strictly — canonical WETH `approve` does not
+     *      revert. The paired-token revoke is best-effort ({ConverterAllowanceRevocationSkipped})
+     *      so it cannot roll back the pause, the unwind, or the WETH revoke. Leftover
+     *      paired-token approvals while paused are inert: every Converter-calling path is
+     *      `whenNotPaused`. `unpause()` restores allowances strictly (fail-closed).
      */
     function _pauseStrategy() private {
         _pause();
@@ -641,7 +686,9 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             emit LiquidityUnwindSkipped();
         }
 
-        _removeConverterAllowances();
+        address _converter = address(_registry.converter());
+        IERC20Metadata(address(weth)).forceApprove(_converter, 0);
+        _tryRevokePairedTokenConverterAllowance();
     }
 
     /**
@@ -653,6 +700,18 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function selfRemoveLiquidityAndCollect() external {
         if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
         _removeLiquidityAndCollect();
+    }
+
+    /**
+     * @notice Self-call hook that revokes this strategy's Converter allowance for the paired token.
+     * @dev Callable only by the strategy itself. Exists so the pause path can attempt
+     *      paired-token `approve(0)` inside a try/catch — a paused or blacklisted token must
+     *      never block the circuit breaker or roll back the strict WETH revoke.
+     *      Not `nonReentrant`: `pause()` is already entered.
+     */
+    function selfRevokePairedTokenConverterAllowance() external {
+        if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
+        pairedToken.forceApprove(address(_registry.converter()), 0);
     }
 
     function _unpauseStrategy() private {
@@ -685,6 +744,16 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         return maxTotalNAV - _currentNAV;
     }
 
+    /**
+     * @notice True when spot tick and short TWAP both sit within ±`maxTickDeviation` of the long TWAP.
+     * @dev Gates minting paths (`deposit`, `investIdleETH`, `rebalance`, and the
+     *      re-add branch of `withdraw`). Does NOT gate `withdraw`'s burn / convert
+     *      / payout — `pool.mint` has no price bound of its own, so this check is
+     *      the only defence against minting into a dislocated tick. Burns are
+     *      marked at TWAP in `navInETH()` and the conversion swap is bounded
+     *      independently by quote / oracle / slippage. Rationale:
+     *      `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
+     */
     function _isCalm() internal view returns (bool) {
         int24 _tick = _currentTick();
         (bool _twapAvailable, int56 _twapTick) = _observeTwap(twapInterval);
@@ -718,6 +787,41 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         (bool _twapAvailable, int56 _observedTwapTick) = _observeTwap(twapInterval);
         if (!_twapAvailable) revert UniCLStratPoolTWAPNotAvailable();
         return _observedTwapTick;
+    }
+
+    /// @dev Constructor / setter gate. `observe` succeeding is necessary so `navInETH`
+    ///      will compute; in-use cardinality is necessary so that TWAP is not a
+    ///      one-observation spot extrapolation. Neither check is sufficient alone.
+    function _requireTwapOracle(uint32 _interval) internal view {
+        _requireTwapAvailable(_interval);
+        _requireObservationCardinality(_interval);
+    }
+
+    /// @dev `pool.observe([interval, 0])` must succeed for the configured window.
+    function _requireTwapAvailable(uint32 _interval) internal view {
+        (bool _available,) = _observeTwap(_interval);
+        if (!_available) revert UniCLStratPoolTWAPNotAvailable();
+    }
+
+    /// @dev In-use ring length (`slot0.observationCardinality`, not Next) must cover
+    ///      `ceil(_interval / MAX_BLOCK_SECONDS)` slots, floored at
+    ///      {MIN_OBSERVATION_CARDINALITY}. Rejects the quiet cardinality-1 pool that
+    ///      still serves `observe` by extrapolating with the current tick.
+    function _requireObservationCardinality(uint32 _interval) internal view {
+        (,,, uint16 _cardinality,,,) = pool.slot0();
+        uint16 _required = _requiredObservationCardinality(_interval);
+        if (_cardinality < _required) {
+            revert UniCLStratInsufficientObservationCardinality(_cardinality, _required);
+        }
+    }
+
+    function _requiredObservationCardinality(uint32 _interval) internal pure returns (uint16) {
+        uint256 _required = (uint256(_interval) + MAX_BLOCK_SECONDS - 1) / MAX_BLOCK_SECONDS;
+        if (_required < MIN_OBSERVATION_CARDINALITY) _required = MIN_OBSERVATION_CARDINALITY;
+        // Uniswap's ring is uint16; a window that needs more slots cannot be densely
+        // served by any V3 pool. Callers must reject `> MAX_TWAP_INTERVAL` first.
+        if (_required > type(uint16).max) revert UniCLStratInvalidConfig();
+        return uint16(_required);
     }
 
     /// @dev Shared with the UniswapV3ConverterAdapter via {TickUtils.tryMeanTick};
@@ -998,14 +1102,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @notice Sends `_amount` native ETH to `_receiver`.
-     */
-    function _sendETH(address _receiver, uint256 _amount) internal {
-        (bool _success,) = _receiver.call{value: _amount}("");
-        if (!_success) revert UniCLStratTransferFailed();
-    }
-
-    /**
      * @notice Tops up the strategy's WETH balance to `_targetWethAmount` by swapping
      *         paired tokens for exactly the missing WETH amount.
      * @dev Uses an exact-output swap so the strategy receives precisely the WETH it is
@@ -1055,10 +1151,13 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *         may quote from spot pool state, which is why the strategy keeps its own
      *         adapter-agnostic defence layers (1–3 below).
      *
-     *      1. **Calm-period guard** (`_isCalm`): swaps are only executed when the
-     *         spot tick and short TWAP are within `maxTickDeviation` of the long TWAP.
-     *         Large instantaneous price deviations are rejected before the quote is even
-     *         fetched.
+     *      1. **Calm-period guard** (`_isCalm`): a *caller-path* check, not
+     *         enforced in this helper. Minting callers (`deposit` /
+     *         `investIdleETH` / `rebalance`, and the re-add branch of
+     *         `withdraw`) require calm before inventory swaps. `withdraw` →
+     *         `_convertToWeth` reaches this helper while the pool may be
+     *         dislocated; layers 0, 2, and 3 carry that path. Rationale:
+     *         `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *
      *      2. **Slippage cap** (`MAX_SWAP_SLIPPAGE_BPS = 200`): even against a
      *         manipulated quote, the minimum output floor caps the loss at 2 % of the
@@ -1167,11 +1266,14 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      * @notice Swaps along `_path` for exactly `_amountOut` of the output token via the
      *         shared Converter, with an oracle-bounded, slippage-padded input cap.
      *
-     * @dev Symmetric counterpart of {_swapViaRouteExactAmountIn} — the same security model applies
-     *      (TWAP-based quote, calm-period guard, slippage cap, oracle bounds),
-     *      mirrored onto the input side: the quoted required input is checked against the
-     *      Chainlink-implied input, and the slippage tolerance pads the input MAXIMUM
-     *      instead of flooring the output minimum.
+     * @dev Symmetric counterpart of {_swapViaRouteExactAmountIn} — the same
+     *      in-helper security model applies (TWAP-based quote, slippage cap,
+     *      oracle bounds), mirrored onto the input side: the quoted required
+     *      input is checked against the Chainlink-implied input, and the
+     *      slippage tolerance pads the input MAXIMUM instead of flooring the
+     *      output minimum. The calm-period guard is a caller-path check, not
+     *      enforced here; {_convertToWeth} (withdraw) is the intended non-calm
+     *      caller.
      *
      *      Balance-cap fallback: if the slippage-padded maximum input exceeds the
      *      strategy's balance of the input token, the exact output is unaffordable.
@@ -1271,28 +1373,33 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // WETH approval is needed.
     }
 
-    function _removeConverterAllowances() internal {
-        token0.forceApprove(address(_registry.converter()), 0);
-        token1.forceApprove(address(_registry.converter()), 0);
+    /// @dev Best-effort paired-token revoke. Parameterless catch — same returndata-bomb
+    ///      rationale as the pause-time pool unwind. WETH is revoked strictly by the caller.
+    function _tryRevokePairedTokenConverterAllowance() private {
+        try this.selfRevokePairedTokenConverterAllowance() {}
+        catch {
+            emit ConverterAllowanceRevocationSkipped(address(pairedToken));
+        }
     }
 
     // ============ Internal Validation ============
     function _validateConstructorParams(DeploymentConfig memory _params) internal pure {
         if (
             _params.addresses.registry == address(0) || _params.addresses.weth == address(0)
-                || _params.addresses.pool == address(0)
+                || _params.addresses.pool == address(0) || _params.addresses.factory == address(0)
         ) {
             revert UniCLStratZeroAddress();
         }
 
         _validatePositiveInt24(_params.strategy.positionWidth);
         _validatePositiveInt24(_params.strategy.rebalanceTickThreshold);
-        if (
-            _params.strategy.maxTickDeviation <= 0 || _params.strategy.twapInterval < MIN_TWAP_INTERVAL
-                || _params.strategy.shortTwapInterval < MIN_SHORT_TWAP_INTERVAL
-        ) {
-            revert UniCLStratInvalidConfig();
-        }
+        if (_params.strategy.maxTickDeviation <= 0) revert UniCLStratInvalidConfig();
+        _validateTwapInterval(_params.strategy.twapInterval, MIN_TWAP_INTERVAL);
+        _validateTwapInterval(_params.strategy.shortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+    }
+
+    function _validateTwapInterval(uint32 _interval, uint32 _min) internal pure {
+        if (_interval < _min || _interval > MAX_TWAP_INTERVAL) revert UniCLStratInvalidConfig();
     }
 
     function _validatePositiveInt24(int24 _value) internal pure {

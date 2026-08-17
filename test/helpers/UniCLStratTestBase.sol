@@ -19,7 +19,7 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockConverter} from "../mocks/MockConverter.sol";
 import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
-import {MockUniCLPool, MockWETH} from "../mocks/UniCLStratMocks.sol";
+import {MockUniCLPool, MockWETH, MockUniswapV3Factory} from "../mocks/UniCLStratMocks.sol";
 
 contract UniCLStratTestBase is ProtocolTestBase {
     uint256 public constant INITIAL_TIMESTAMP = 1_700_000_000;
@@ -53,6 +53,7 @@ contract UniCLStratTestBase is ProtocolTestBase {
     MockWETH public weth;
     MockERC20 public pairedToken;
     MockUniCLPool public pool;
+    MockUniswapV3Factory public factory;
     MockConverter public converter;
     MockConverterAdapter public swapAdapter;
     Oracle public oracle;
@@ -71,6 +72,8 @@ contract UniCLStratTestBase is ProtocolTestBase {
         weth = new MockWETH();
         pairedToken = new MockERC20("Paired Token", "PAIR", PAIRED_TOKEN_DECIMALS);
         pool = new MockUniCLPool(address(weth), address(pairedToken), TICK_SPACING, INITIAL_TICK);
+        factory = new MockUniswapV3Factory();
+        factory.setPool(address(weth), address(pairedToken), pool.fee(), address(pool));
         converter = new MockConverter(weth, pairedToken, strategyManager);
         swapAdapter = new MockConverterAdapter(weth, pairedToken);
         oracle = _deployOracle();
@@ -102,7 +105,12 @@ contract UniCLStratTestBase is ProtocolTestBase {
 
     function _defaultConfig() internal view returns (IUniCLStrat.DeploymentConfig memory) {
         return IUniCLStrat.DeploymentConfig({
-            addresses: IUniCLStrat.AddressConfig({registry: address(registry), weth: address(weth), pool: address(pool)}),
+            addresses: IUniCLStrat.AddressConfig({
+                registry: address(registry),
+                weth: address(weth),
+                pool: address(pool),
+                factory: address(factory)
+            }),
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(swapAdapter),
                 wethToPairedTokenPath: abi.encodePacked(address(weth), uint24(3000), address(pairedToken)),

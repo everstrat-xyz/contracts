@@ -10,11 +10,15 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
  */
 contract MockERC20 is ERC20 {
     error MockERC20TransferReverted();
+    error MockERC20ApproveReverted();
+    error MockERC20BalanceOfReverted();
 
     uint8 private _decimals;
     bool private _revertTransfer;
     bool private _returnFalseTransfer;
     bool private _noReturnTransfer;
+    bool private _revertApprove;
+    bool private _revertBalanceOf;
 
     constructor(string memory _name, string memory _symbol, uint8 _tokenDecimals) ERC20(_name, _symbol) {
         _decimals = _tokenDecimals;
@@ -35,6 +39,26 @@ contract MockERC20 is ERC20 {
     /// @dev USDT-style: succeed but return no returndata (empty).
     function setNoReturnTransfer(bool noReturn_) external {
         _noReturnTransfer = noReturn_;
+    }
+
+    /// @dev Simulates a paused / blacklisted token whose `approve` reverts (e.g. USDC).
+    function setRevertApprove(bool revert_) external {
+        _revertApprove = revert_;
+    }
+
+    /// @dev Simulates a token whose `balanceOf` reverts (e.g. upgradeably paused view).
+    function setRevertBalanceOf(bool revert_) external {
+        _revertBalanceOf = revert_;
+    }
+
+    function approve(address spender, uint256 value) public override returns (bool) {
+        if (_revertApprove) revert MockERC20ApproveReverted();
+        return super.approve(spender, value);
+    }
+
+    function balanceOf(address account) public view override returns (uint256) {
+        if (_revertBalanceOf) revert MockERC20BalanceOfReverted();
+        return super.balanceOf(account);
     }
 
     function mint(address _to, uint256 _amount) external {

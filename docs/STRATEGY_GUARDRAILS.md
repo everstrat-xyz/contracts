@@ -40,10 +40,24 @@ MUST NOT be registered via `StrategyManager.addStrategy()`.
 
 | Guardrail | Status | Enforcing mechanism (UniCLStrat) | Parameters / values |
 |---|---|---|---|
-| **TWAP calm check** (manipulation-resistant oracle; reject ops when spot deviates from TWAP) | **Implemented** | `_isCalm()` gates `deposit()`, `investIdleETH()`, `rebalance()`, and liquidity re-adds in `withdraw()`: spot tick **and** short-TWAP tick must both sit within ±`maxTickDeviation` of the long TWAP tick. NAV itself is TWAP-based (`_twapSqrtPrice()`), never spot. | `twapInterval` ≥ `MIN_TWAP_INTERVAL = 1800` (30 min) — enforced in constructor and `setTwapInterval()`; `shortTwapInterval` ≥ `MIN_SHORT_TWAP_INTERVAL = 60`; `maxTickDeviation` > 0 (constructor + `setMaxTickDeviation()`) |
+| **TWAP calm check** (manipulation-resistant oracle; reject **mints** when spot deviates from TWAP) | **Implemented** | `_isCalm()` gates `deposit()`, `investIdleETH()`, `rebalance()`, and the **re-add** branch of `withdraw()`: spot tick **and** short-TWAP tick must both sit within ±`maxTickDeviation` of the long TWAP tick. `withdraw()` burn / convert / payout is **intentionally ungated** (§1.1.1). NAV itself is TWAP-based (`_twapSqrtPrice()`), never spot. Constructor and TWAP setters require **both** `pool.observe([interval, 0])` (`UniCLStratPoolTWAPNotAvailable`) and in-use `observationCardinality` (`UniCLStratInsufficientObservationCardinality`) — observe-only still accepts a quiet cardinality-1 spot-extrapolated TWAP. | `twapInterval` ∈ [`MIN_TWAP_INTERVAL = 1800`, `MAX_TWAP_INTERVAL = 65535 × 12`]; `shortTwapInterval` ∈ [`MIN_SHORT_TWAP_INTERVAL = 60`, `MAX_TWAP_INTERVAL`]; `maxTickDeviation` > 0; in-use cardinality ≥ `ceil(interval / MAX_BLOCK_SECONDS)` floored at `MIN_OBSERVATION_CARDINALITY = 150` |
 | **Slippage protection** (`minAmountOut` on all swaps and liquidity operations) | **Implemented** | All swaps route through the shared Converter with a quote-derived `minAmountOut` (exact-input) / `maxAmountIn` (exact-output), cross-checked against symmetric Chainlink floor/ceiling (`_enforceOracleBounds`). Liquidity mints are sized from pool state in the same transaction and only execute inside the calm band. Note: the forwarded per-swap deadline (`block.timestamp + SWAP_DEADLINE_OFFSET`) is **not** a defense layer — it only satisfies the router interface (see `_swapViaRouteExactAmountIn` NatSpec). | `swapSlippageBps` default `DEFAULT_SWAP_SLIPPAGE_BPS = 100` (1%), hard-capped at `MAX_SWAP_SLIPPAGE_BPS = 200` (2%) in `_setSwapSlippageBps`; `MAX_QUOTE_DEVIATION_BPS = 200` (constant) |
 | **Tick / range bounds** (positions bounded against adversarial range manipulation) | **Implemented** | Positions are derived deterministically: `_setTicks()` places `positionMain` around the current tick via `TickUtils.baseTicks(_tick, positionWidth * tickSpacing, tickSpacing)`; `positionAlt` is a single-sided band adjacent to the current tick. `_positionIsValid()` enforces `tickLower < tickUpper` within `[TickMath.MIN_TICK, TickMath.MAX_TICK]`. | `positionWidth` > 0 (constructor `_validatePositiveInt24` + `setPositionWidth()`); effective width = `positionWidth × tickSpacing` |
 | **Max single-deposit cap** (per-transaction deposit limit relative to strategy TVL) | **GAP — not implemented as specified** | `deposit()` enforces only `_depositAmount <= _maxDeposit()`, where `_maxDeposit() = maxTotalNAV − navInETH()` (headroom to an **absolute** cap). A single transaction may therefore deposit up to the entire remaining headroom regardless of current TVL — there is no per-transaction cap expressed as a fraction of strategy TVL. `maxTotalNAV` bounds total exposure but not deposit velocity. | `maxTotalNAV` (absolute NAV ceiling; `setMaxTotalNAV()`, ADMIN_ROLE) |
+
+### 1.1.1 Calm-gate asymmetry (mint vs burn)
+
+The invariant `_isCalm()` actually enforces is **never mint into a dislocated pool** — not "never touch the pool when dislocated." Gating `withdraw()` the same way as `deposit()` would be a regression. Math and tick-placement argument: [`uniswap-concentrated-liquidity-strategy-spec.md`](../mermaid/uniswap-concentrated-liquidity-strategy-spec.md) §Calm-Period Gate Asymmetry.
+
+**Minting paths are gated** (`deposit`, `investIdleETH`, `rebalance`, withdraw re-add) because `pool.mint()` has no `minAmount` / oracle bound of its own. Liquidity is sized from spot (`_liquidityForPosition` → `_sqrtPrice()` / `slot0`) and `_setTicks()` centers the range on `_currentTick()`. A dislocated mint (1) pays the LP value-function concavity as price reverts (the attacker is the counterparty), and (2) — first-order — parks a concentrated range around the wrong tick, so after reversion the position can sit entirely out of range, 100% the wrong asset, earning nothing, until a calm-gated `rebalance()`. Deposits are deferrable: idle ETH stays fully counted in NAV, `maxDeposit()` honestly returns 0, the keeper retries.
+
+**Burning / conversion on `withdraw()` is ungated.** Three independent reasons:
+
+1. **NAV is not marked at the burn tick.** `_balancesOfPool()` values positions at `_twapSqrtPrice()` and loose balances at Chainlink. Burning at a skewed spot hands the strategy a skewed *bag*, which is immediately re-marked at oracle prices. Because $V(P)$ is concave, a bag frozen at $Q$ and marked at the true price $P^*$ sits on the tangent and is worth *at least* as much as remaining in the pool at $P^*$ — the further $Q$ from truth, the larger that gap. Round-trip manipulation around a burn does not pay the attacker.
+2. **The conversion swap is independently bounded.** `_convertToWeth()` does not check calm; layers that *do* fire are the adapter TWAP quote, strategy-side Chainlink floor/ceiling (`MAX_QUOTE_DEVIATION_BPS = 200`), and `MAX_SWAP_SLIPPAGE_BPS = 200` padded off that TWAP quote (not spot). A seriously manipulated pool misses the TWAP-derived bound and reverts the whole `withdraw()` (burn included). Residual window: between the calm band (~0.6% at `maxTickDeviation = 60`) and the ~2% swap tolerance, an attacker can extract at most ~2% minus the fee tier, on the *converted* notional only (payout above idle ETH + WETH recovered from the burn), while funding the dislocation.
+3. **Exit liquidity is not deferrable.** `AMM.exit()` queues when AMM `freeBalance()` is short; the queue is refilled by `Controller.provideExitLiquidity()` → `StrategyManager.withdrawFromStrategies()`. A non-calm revert is swallowed on the batch path as `StrategyWithdrawFailed` (silent underfill) and hard-reverts the single-strategy path. Redemption demand and pool dislocation are correlated — gating withdraw stalls exits exactly when they spike, which is unbounded in a way the 2% swap window is not. `maxWithdrawal()` advertises full `navInETH()` whenever unpaused; a calm revert would make that view a lie and keep StrategyManager routing amounts to a strategy that always fails.
+
+**Do not "fix" this by adding `if (!_isCalm()) revert UniCLStratNotCalm()` to `withdraw()`.** Ranked alternatives if the residual swap window is later judged too wide: (1) status quo; (2) burn only the liquidity fraction needed for the shortfall (orthogonal — removes the full-unwind cliff when re-add is skipped); (3) skip `_convertToWeth()` when not calm and return a short fill (StrategyManager already accounts via Controller balance delta); (4) hard calm gate — last.
 
 ### 1.2 Recommended guardrails
 
@@ -51,7 +65,7 @@ MUST NOT be registered via `StrategyManager.addStrategy()`.
 |---|---|---|
 | **Per-strategy TVL cap** | **Implemented at strategy level** (`maxTotalNAV`); **GAP at StrategyManager level** — see §3.4 for the protocol-level design | The strategy-local cap only helps while the strategy itself is honest; it is not enforceable against a malicious strategy (its own `navInETH()`/`maxDeposit()` are self-reported). Protocol-level enforcement is specified in §3.4 (implementation tracked in #231 L-3). |
 | **Cooldown / rate limiting** | **GAP — not on this branch** | Keeper-cycling cooldown (PLM-6 / #195) is developed on a separate, unmerged branch. Do not assume it exists. Mitigation until then: calm-check gating + off-chain cadence monitoring (§4). |
-| **Emergency exit** (unwinding path when health degrades) | **Implemented** | `pause()` (ADMIN or SECURITY; best-effort pool unwind via try/catch self-call, emits `LiquidityUnwindSkipped` on pool failure, revokes Converter allowances) → `emergencyExit()` (requires pause; unwraps WETH directly via `weth.withdraw()`, sends ETH first then best-effort `trySafeTransfer` of paired token — emits `PairedTokenTransferSkipped` on blacklist/pause/false-return failure; never touches pool/Converter/Oracle). |
+| **Emergency exit** (unwinding path when health degrades) | **Implemented** | `pause()` (ADMIN or SECURITY; best-effort pool unwind via try/catch self-call, emits `LiquidityUnwindSkipped` on pool failure; WETH Converter allowance revoked strictly; paired-token revoke best-effort via try/catch self-call, emits `ConverterAllowanceRevocationSkipped` if `approve(0)` reverts) → `emergencyExit()` (requires pause; unwraps WETH directly via `weth.withdraw()` strictly; sends ETH first then best-effort paired-token recovery — try/catch on `balanceOf` + `trySafeTransfer`; emits `PairedTokenTransferSkipped` on balanceOf/transfer failure; never touches pool/Converter/Oracle). |
 | **Health factor** (continuous on-chain metric) | **Implemented** | `isHealthy()`: false when paused, not calm, ticks uninitialized, price outside `positionMain`, or center-tick drift beyond `rebalanceTickThreshold`. Consumed by StrategyManager batch paths (deposit inclusion, rebalance triggering) and by off-chain monitoring (§4). |
 
 ---
@@ -64,21 +78,31 @@ is verifiable on-chain or in the repo's test suite.
 
 ### 2.1 Code and parameter verification
 
-- [ ] **Calm check present and gated**: every external function that deploys or
-  moves capital reverts (or skips) when the manipulation check fails. For
+- [ ] **Calm check present and gated on mints**: every external function that
+  *mints* liquidity reverts (or skips) when the manipulation check fails. For
   UniCL-style strategies: `deposit`/`rebalance`/`investIdleETH` revert
-  `UniCLStratNotCalm`.
-- [ ] **TWAP floors respected**: long TWAP window ≥ 1800 s, short TWAP window ≥
-  60 s, enforced in the constructor **and** in every setter (`setTwapInterval`
-  / `setShortTwapInterval` revert below the floors). For non-UniCL strategies:
-  an equivalent manipulation-resistant price source with a documented
-  bias-resistance argument.
-- [ ] **TWAP cardinality check**: `pool.slot0().observationCardinality` covers
-  the configured `twapInterval` at the pool's trade cadence. If it does not,
-  `navInETH()` reverts (`UniCLStratPoolTWAPNotAvailable`) and **freezes
-  protocol-wide pricing** — grow the buffer via
-  `pool.increaseObservationCardinalityNext(n)` *before* `addStrategy()`
-  (FREEZE_RUNBOOK §4.2).
+  `UniCLStratNotCalm`; `withdraw` may burn/convert while not calm and only
+  gates the re-add. Do **not** gate `withdraw()` on `_isCalm()` — that stalls
+  exit liquidity when redemptions spike (see §1.1.1).
+- [ ] **TWAP floors respected**: long TWAP window ∈ [1800 s, `MAX_TWAP_INTERVAL`]
+  (`65535 × 12` s — Uniswap uint16 ring at 12 s/slot), short TWAP window ∈
+  [60 s, `MAX_TWAP_INTERVAL`], enforced in the constructor **and** in every
+  setter (`setTwapInterval` / `setShortTwapInterval` revert outside the
+  range). Windows above the max cannot be densely served by any V3 pool. For
+  non-UniCL strategies: an equivalent manipulation-resistant price source with
+  a documented bias-resistance argument.
+- [ ] **TWAP observe + cardinality probes**: UniCLStrat constructor and
+  `setTwapInterval` / `setShortTwapInterval` require both:
+  1. `pool.observe([interval, 0])` succeeds (`UniCLStratPoolTWAPNotAvailable`) —
+     otherwise `navInETH()` would freeze pricing.
+  2. In-use `slot0.observationCardinality` (not `Next`) ≥
+     `ceil(interval / MAX_BLOCK_SECONDS)` floored at
+     `MIN_OBSERVATION_CARDINALITY = 150`
+     (`UniCLStratInsufficientObservationCardinality`) — otherwise a quiet
+     cardinality-1 pool can still serve `observe` by extrapolating a spot-like
+     TWAP.
+  Grow via `pool.increaseObservationCardinalityNext(n)` and wait for fill
+  *before* deploy or a window-increase timelock op (FREEZE_RUNBOOK §4.2).
 - [ ] **Slippage params within caps**: slippage tolerance > 0 and ≤ the
   contract's hard cap (UniCLStrat: ≤ 200 bps); every swap path applies
   `minAmountOut`/`maxAmountIn`; quote-vs-oracle bounds enforced
@@ -92,6 +116,10 @@ is verifiable on-chain or in the repo's test suite.
 - [ ] **Routes validated**: swap adapter is whitelisted on the Converter and
   route bytes validate against `Converter.validateRoute` / `routeTokens`
   (UniCLStrat checks this in the constructor and `setRouteConfig`).
+- [ ] **Pool factory provenance**: UniCLStrat was constructed with the canonical
+  Uniswap V3 factory and `factory.getPool(token0, token1, pool.fee()) == pool`
+  (constructor-enforced). Prevents a malicious interface-compatible pool from
+  draining inventory via `uniswapV3MintCallback`.
 - [ ] **Access control**: `deposit`/`withdraw`/`rebalance`/`sync` callable only
   by the registered StrategyManager; configuration and unpause behind
   `ADMIN_ROLE` (48h timelock); `pause`/`emergencyExit` behind `ADMIN_ROLE` or
@@ -106,7 +134,8 @@ is verifiable on-chain or in the repo's test suite.
 
 - [ ] **Flash-loan calm-check PoC** (fork or mock pool): a same-block tick skew
   beyond `maxTickDeviation` makes `deposit()`/`rebalance()` revert
-  (`UniCLStratNotCalm`) and makes `maxDeposit()` return 0.
+  (`UniCLStratNotCalm`) and makes `maxDeposit()` return 0. `withdraw()` still
+  completes (idle-ETH and LP-sourced paths); re-add is skipped.
 - [ ] **Quote-manipulation PoC**: a manipulated pool quote outside the Chainlink
   ±200 bps band reverts (`UniCLStratQuoteBelowOracleFloor` /
   `UniCLStratQuoteExceedsOracleCeiling`).
@@ -116,8 +145,9 @@ is verifiable on-chain or in the repo's test suite.
   attempt moves within rounding, demonstrating TWAP-based valuation does not
   track the manipulated spot price.
 - [ ] **Emergency-path PoC**: `pause()` + `emergencyExit()` succeeds with the
-  pool degraded (unwind skipped, `LiquidityUnwindSkipped` emitted) and with
-  the Converter paused.
+  pool degraded (unwind skipped, `LiquidityUnwindSkipped` emitted), with a
+  paired token that rejects `approve(0)` (`ConverterAllowanceRevocationSkipped`
+  emitted; WETH revoke still lands), and with the Converter paused.
 
 ### 2.3 Governance and operations
 
@@ -293,7 +323,8 @@ strategy-relevant subset:
 - `StrategyDepositFailed` / `StrategyWithdrawFailed` /
   `StrategyRebalanceFailed` / `StrategyHarvestFailed` / `StrategySyncFailed` —
   page (per-strategy keeper op failed inside the batch try/catch).
-- `LiquidityUnwindSkipped`, `PairedTokenTransferSkipped`, `EmergencyExited`,
+- `LiquidityUnwindSkipped`, `ConverterAllowanceRevocationSkipped`,
+  `PairedTokenTransferSkipped`, `EmergencyExited`,
   `EmergencyWithdrawnToController` — page (emergency path used / partial recovery).
 - `StrategyAdded` / `StrategyRemoved` /
   `StrategyForceRemoved` — page on `StrategyForceRemoved` (especially
@@ -308,7 +339,9 @@ strategy-relevant subset:
 - `IStrategy.maxDeposit()` / `maxWithdrawal()` — persistent 0 on an unpaused
   strategy signals a sustained not-calm pool (manipulation red flag when the
   pool is otherwise liquid — FREEZE_RUNBOOK §4.1).
-- `pool.slot0().observationCardinality` — must cover `twapInterval`.
+- `pool.observe([twapInterval, 0])` — must succeed (FREEZE_RUNBOOK §4.2).
+- `pool.slot0().observationCardinality` — must stay ≥ `ceil(twapInterval / 12)`
+  (floored at 150); Next is allocated-only and is not the gate.
 - Block-over-block `strategyNAVInETH(s)` delta — feed into the §6 NAV-anomaly
   detector.
 
@@ -321,6 +354,7 @@ localize the anomaly before the response flow starts.
 
 **Revert selectors to decode in alerts** — FREEZE_RUNBOOK §7.3, notably
 `UniCLStratNotCalm()`, `UniCLStratPoolTWAPNotAvailable()`,
+`UniCLStratInsufficientObservationCardinality(uint16,uint16)`,
 `UniCLStratQuoteFailed()`, `UniCLStratQuoteBelowOracleFloor(uint256,uint256)`,
 `UniCLStratQuoteExceedsOracleCeiling(uint256,uint256)`.
 
@@ -336,8 +370,10 @@ strategy.
 Response (all steps detailed in FREEZE_RUNBOOK; section references below):
 
 1. **Pause the strategy** — `UniCLStrat.pause()` (SECURITY or ADMIN, instant).
-   Flips the pause flag first (a degraded pool cannot block it), attempts the
-   LP unwind best-effort, revokes Converter allowances. Batch keeper paths now
+   Flips the pause flag first (a degraded pool or a paired token that rejects
+   `approve(0)` cannot block it), attempts the LP unwind best-effort, revokes
+   WETH's Converter allowance strictly and the paired token's best-effort.
+   Batch keeper paths now
    skip the strategy. Note: pausing does **not** unfreeze pricing if
    `navInETH()` itself is reverting (FREEZE_RUNBOOK §3.4).
 2. **Freeze wider if warranted** — if the failure looks like an active exploit

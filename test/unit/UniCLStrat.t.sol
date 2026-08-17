@@ -56,6 +56,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(address(strategy.weth()), address(weth));
         assertEq(address(strategy.pairedToken()), address(pairedToken));
         assertEq(address(strategy.pool()), address(pool));
+        assertEq(address(strategy.factory()), address(factory));
         assertEq(address(strategy.swapAdapter()), address(swapAdapter));
         assertEq(strategy.swapSlippageBps(), strategy.DEFAULT_SWAP_SLIPPAGE_BPS());
         assertEq(registry.getContractByKey(Auth.ORACLE), address(oracle));
@@ -66,6 +67,8 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(strategy.maxTickDeviation(), MAX_TICK_DEVIATION);
         assertEq(strategy.twapInterval(), TWAP_INTERVAL);
         assertEq(strategy.shortTwapInterval(), SHORT_TWAP_INTERVAL);
+        assertEq(strategy.MIN_OBSERVATION_CARDINALITY() * strategy.MAX_BLOCK_SECONDS(), strategy.MIN_TWAP_INTERVAL());
+        assertEq(strategy.MAX_TWAP_INTERVAL(), uint32(type(uint16).max) * strategy.MAX_BLOCK_SECONDS());
         assertEq(strategy.maxTotalNAV(), MAX_TOTAL_NAV);
         assertEq(strategy.totalDeposited(), 0);
         assertEq(strategy.totalWithdrawn(), 0);
@@ -84,6 +87,14 @@ contract UniCLStratTest is UniCLStratTestBase {
         new UniCLStrat(config);
     }
 
+    function test_Constructor_RevertsWithZeroFactory() public {
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
+        config.addresses.factory = address(0);
+
+        vm.expectRevert(IUniCLStrat.UniCLStratZeroAddress.selector);
+        new UniCLStrat(config);
+    }
+
     function test_Constructor_RevertsWithInvalidPool() public {
         MockERC20 otherToken = new MockERC20("Other Token", "OTHER", PAIRED_TOKEN_DECIMALS);
         MockUniCLPool invalidPool =
@@ -91,6 +102,26 @@ contract UniCLStratTest is UniCLStratTestBase {
         IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
         config.addresses.pool = address(invalidPool);
 
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidPool.selector);
+        new UniCLStrat(config);
+    }
+
+    function test_Constructor_RevertsWhenPoolNotRegisteredInFactory() public {
+        MockUniCLPool unregisteredPool =
+            new MockUniCLPool(address(weth), address(pairedToken), TICK_SPACING, INITIAL_TICK);
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
+        config.addresses.pool = address(unregisteredPool);
+
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidPool.selector);
+        new UniCLStrat(config);
+    }
+
+    function test_Constructor_RevertsWhenFactoryReturnsDifferentPool() public {
+        MockUniCLPool otherPool = new MockUniCLPool(address(weth), address(pairedToken), TICK_SPACING, INITIAL_TICK);
+        // Rebind the fee tier to a different pool address so provenance fails.
+        factory.setPool(address(weth), address(pairedToken), pool.fee(), address(otherPool));
+
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidPool.selector);
         new UniCLStrat(config);
     }
@@ -133,6 +164,51 @@ contract UniCLStratTest is UniCLStratTestBase {
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
         new UniCLStrat(config);
+    }
+
+    function test_Constructor_RevertsWhenTwapIntervalExceedsMax() public {
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
+        config.strategy.twapInterval = strategy.MAX_TWAP_INTERVAL() + 1;
+
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        new UniCLStrat(config);
+    }
+
+    function test_Constructor_RevertsWhenShortTwapIntervalExceedsMax() public {
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
+        config.strategy.shortTwapInterval = strategy.MAX_TWAP_INTERVAL() + 1;
+
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        new UniCLStrat(config);
+    }
+
+    function test_Constructor_RevertsWhenPoolCannotServeTwapInterval() public {
+        pool.setMaxObserveSecondsAgo(TWAP_INTERVAL - 1);
+
+        vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
+        new UniCLStrat(_defaultConfig());
+    }
+
+    function test_Constructor_RevertsWhenPoolCannotServeShortTwapInterval() public {
+        // Long window still fits; short is raised above the mock's lookback cap.
+        pool.setMaxObserveSecondsAgo(TWAP_INTERVAL);
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
+        config.strategy.shortTwapInterval = TWAP_INTERVAL + 1;
+
+        vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
+        new UniCLStrat(config);
+    }
+
+    function test_Constructor_RevertsWhenObservationCardinalityBelowMinimum() public {
+        uint16 required = strategy.MIN_OBSERVATION_CARDINALITY();
+        pool.setObservationCardinality(required - 1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniCLStrat.UniCLStratInsufficientObservationCardinality.selector, required - 1, required
+            )
+        );
+        new UniCLStrat(_defaultConfig());
     }
 
     function test_Constructor_RevertsWithInvalidRouteConfig() public {
@@ -1033,9 +1109,54 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
         strategy.setShortTwapInterval(INVALID_SHORT_TWAP_INTERVAL);
 
+        // Hoist the getter: `vm.expectRevert` would otherwise be consumed by
+        // `MAX_TWAP_INTERVAL()` itself, which does not revert.
+        uint32 tooLong = strategy.MAX_TWAP_INTERVAL() + 1;
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setTwapInterval(tooLong);
+
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setShortTwapInterval(tooLong);
+
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
         strategy.setSwapSlippageBps(EXCESS_SWAP_SLIPPAGE_BPS);
         vm.stopPrank();
+    }
+
+    function test_SetTwapInterval_RevertsWhenPoolCannotServeNewWindow() public {
+        pool.setMaxObserveSecondsAgo(TWAP_INTERVAL);
+
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
+        strategy.setTwapInterval(UPDATED_TWAP_INTERVAL);
+
+        assertEq(strategy.twapInterval(), TWAP_INTERVAL);
+    }
+
+    function test_SetShortTwapInterval_RevertsWhenPoolCannotServeNewWindow() public {
+        pool.setMaxObserveSecondsAgo(TWAP_INTERVAL);
+
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
+        strategy.setShortTwapInterval(TWAP_INTERVAL + 1);
+
+        assertEq(strategy.shortTwapInterval(), SHORT_TWAP_INTERVAL);
+    }
+
+    function test_SetTwapInterval_RevertsWhenObservationCardinalityInsufficient() public {
+        uint32 blockSeconds = strategy.MAX_BLOCK_SECONDS();
+        uint16 required = uint16((uint256(UPDATED_TWAP_INTERVAL) + blockSeconds - 1) / blockSeconds);
+        pool.setObservationCardinality(required - 1);
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniCLStrat.UniCLStratInsufficientObservationCardinality.selector, required - 1, required
+            )
+        );
+        strategy.setTwapInterval(UPDATED_TWAP_INTERVAL);
+
+        assertEq(strategy.twapInterval(), TWAP_INTERVAL);
     }
 
     function test_Pause_SecurityCanPauseImmediately() public {
@@ -1125,6 +1246,59 @@ contract UniCLStratTest is UniCLStratTestBase {
         strategy.selfRemoveLiquidityAndCollect();
     }
 
+    function test_Pause_SucceedsWhenPairedTokenRejectsZeroApproval() public {
+        _deposit(DEPOSIT_AMOUNT);
+
+        uint256 _pairedAllowanceBefore = pairedToken.allowance(address(strategy), address(converter));
+        assertGt(_pairedAllowanceBefore, 0);
+
+        pairedToken.setRevertApprove(true);
+
+        vm.expectEmit(true, false, false, true, address(strategy));
+        emit IUniCLStrat.ConverterAllowanceRevocationSkipped(address(pairedToken));
+        vm.prank(admin);
+        strategy.pause();
+
+        assertTrue(strategy.paused());
+        // WETH revoke is strict and independent of the paired-token try/catch
+        assertEq(weth.allowance(address(strategy), address(converter)), 0);
+        assertEq(pairedToken.allowance(address(strategy), address(converter)), _pairedAllowanceBefore);
+    }
+
+    function test_Pause_RevertsWhenWethRejectsZeroApproval() public {
+        _deposit(DEPOSIT_AMOUNT);
+
+        weth.setRevertApprove(true);
+
+        vm.prank(admin);
+        vm.expectRevert();
+        strategy.pause();
+
+        assertFalse(strategy.paused());
+    }
+
+    function test_Pause_SkippedAllowanceRevocation_DoesNotBlockEmergencyExit() public {
+        _deposit(DEPOSIT_AMOUNT);
+
+        pairedToken.setRevertApprove(true);
+
+        vm.prank(admin);
+        strategy.pause();
+
+        vm.prank(admin);
+        strategy.emergencyExit();
+
+        assertEq(weth.balanceOf(address(strategy)), 0);
+        assertEq(address(strategy).balance, 0);
+        assertGt(strategyManager.balance, 0);
+    }
+
+    function test_SelfRevokePairedTokenConverterAllowance_RevertsWhenCallerIsNotSelf() public {
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratCallerNotSelf.selector);
+        strategy.selfRevokePairedTokenConverterAllowance();
+    }
+
     // ============ EmergencyExit ============
 
     function test_EmergencyExit_ClearsPendingLpFees() public {
@@ -1210,6 +1384,44 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(pairedToken.balanceOf(address(strategyManager)), 0);
 
         pairedToken.setRevertTransfer(false);
+
+        vm.prank(admin);
+        strategy.emergencyExit();
+
+        assertEq(pairedToken.balanceOf(address(strategy)), 0);
+        assertEq(pairedToken.balanceOf(address(strategyManager)), pairedBefore);
+    }
+
+    /// @dev A reverting paired-token `balanceOf` must not hostage the WETH/ETH sweep.
+    function test_EmergencyExit_SweepsETHWhenPairedTokenBalanceOfReverts() public {
+        _deposit(DEPOSIT_AMOUNT);
+
+        vm.prank(admin);
+        strategy.pause();
+
+        uint256 wethBefore = weth.balanceOf(address(strategy));
+        uint256 pairedBefore = pairedToken.balanceOf(address(strategy));
+        uint256 nativeEthBefore = address(strategy).balance;
+        uint256 expectedEthToStrategyManager = wethBefore + nativeEthBefore;
+        assertGt(pairedBefore, 0);
+
+        pairedToken.setRevertBalanceOf(true);
+
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit IUniCLStrat.PairedTokenTransferSkipped();
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit IStrategy.EmergencyExited(expectedEthToStrategyManager);
+
+        vm.prank(admin);
+        strategy.emergencyExit();
+
+        assertEq(weth.balanceOf(address(strategy)), 0);
+        assertEq(address(strategy).balance, 0);
+        assertEq(strategyManager.balance, expectedEthToStrategyManager);
+
+        pairedToken.setRevertBalanceOf(false);
+        assertEq(pairedToken.balanceOf(address(strategy)), pairedBefore);
+        assertEq(pairedToken.balanceOf(address(strategyManager)), 0);
 
         vm.prank(admin);
         strategy.emergencyExit();
