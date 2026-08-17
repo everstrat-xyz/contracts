@@ -86,7 +86,7 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
      * @notice Mapping from user to claimable ETH amount for implementing
      * pull-over-push pattern.
      */
-    mapping(address user => uint256) public claimableBalances;
+    mapping(address user => uint256 claimableETH) public claimableBalances;
 
     // ============ Constructor ============
 
@@ -276,27 +276,132 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         _unpause();
     }
 
+    // ============ View Functions ============
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function freeBalance() external view returns (uint256) {
+        return _freeBalance();
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function eveBasePriceInETH() external view returns (uint256) {
+        return _basePriceFromNAV(_navInETH(), EVE(_registry.eve()).totalSupply());
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function evePremiumPriceInETH() external view returns (uint256) {
+        return _premiumPriceFromNAV(_navInETH(), EVE(_registry.eve()).totalSupply());
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function eveBasePriceInUSD() external view returns (uint256) {
+        return _eveBasePriceInUSD(EVE(_registry.eve()).totalSupply());
+    }
+
+    /**
+     * @inheritdoc IAMM
+     */
+    function evePremiumPriceInUSD() external view returns (uint256) {
+        return _evePremiumPriceInUSD(EVE(_registry.eve()).totalSupply());
+    }
+
     // ============ Internal Functions ============
 
     /**
-     * @notice Function to calculate amount ETH to transfer based on number of tokens and price.
-     * @param _tokensAmount Number of protocol tokens.
-     * @param _evePrice Price of the EVE token in ETH terms.
-     * @return uint256 Amount of ETH to transfer.
+     * @dev Shared body of `enter()` and `enterWithInvite()`: both wrappers apply
+     *      `whenNotPaused`/`nonReentrant` and their own whitelist check before delegating here.
+     *      Effects before interactions (AMM-3): mint EVE before `sendValue` to the Controller
+     *      so any observer during the Controller's `receive` sees supply already include the
+     *      deposit. Transfer-then-mint would leave NAV (ETH already on Controller) ahead of
+     *      supply for the duration of that external call. Bootstrap already mints before transfer.
+     * @param _minTokensToMint Minimum amount of tokens to mint.
      */
-    function _calculateETHToTransfer(uint256 _tokensAmount, uint256 _evePrice) internal pure returns (uint256) {
-        return Math.convertAssets(_tokensAmount, _evePrice);
+    function _enter(uint256 _minTokensToMint) internal {
+        if (_minTokensToMint == 0) revert AMMInvalidTokensToMintAmount();
+
+        EVE eve = EVE(_registry.eve());
+        address controller = _registry.controller();
+
+        if (!bootstrapped) {
+            _bootstrap(_minTokensToMint, address(eve), controller);
+            return;
+        }
+
+        uint256 totalSupply = eve.totalSupply();
+        uint256 nav = _navInETHPendingTransfer();
+
+        uint256 evePrice = _premiumPriceFromNAV(nav, totalSupply);
+        uint256 tokensToMint = _ethToProtocolTokens(msg.value, evePrice);
+        if (tokensToMint < _minTokensToMint) revert AMMInsufficientDeposit();
+
+        eve.mint(msg.sender, tokensToMint);
+
+        // Not re-calculating received ETH: rounding already favors the protocol; under normal
+        // conditions a re-calc would cost the user more ETH than they would get back.
+        payable(controller).sendValue(msg.value);
+
+        emit UserEntered(msg.sender, msg.value, tokensToMint, block.timestamp);
     }
 
     /**
-     * @dev Calculates the number of protocol tokens equivalent to the given ETH amount.
-     * @param _ethAmount Amount of ETH to convert to protocol tokens.
-     * @param _evePrice Price of the EVE token in ETH terms.
-     * @return uint256 Number of protocol tokens equivalent to the given ETH amount.
+     * @dev Bootstrap function for first deposit.
+     * @param _minTokensToMint Minimum amount of protocol tokens.
+     * @param eve Address of the EVE token.
+     * @param controller Address of the controller.
      */
-    function _ethToProtocolTokens(uint256 _ethAmount, uint256 _evePrice) internal pure returns (uint256) {
-        return Math.convertAssetsInverse(_ethAmount, _evePrice);
+    function _bootstrap(uint256 _minTokensToMint, address eve, address controller) internal {
+        uint256 deposit = msg.value;
+        Oracle oracle = Oracle(_registry.oracle());
+
+        uint256 depositUSD = oracle.convertTokenToUSD(address(0), deposit, Math.DECIMALS_NORMALIZED);
+        if (depositUSD < MIN_INITIAL_DEPOSIT_USD) revert AMMLessThanMinInitialDeposit();
+
+        uint256 tokensToMint = depositUSD;
+        uint256 userTokens = tokensToMint - _DEAD_SUPPLY;
+
+        if (userTokens < _minTokensToMint) revert AMMInsufficientDeposit();
+
+        EVE(eve).mint(address(0x000000000000000000000000000000000000dEaD), _DEAD_SUPPLY);
+        EVE(eve).mint(msg.sender, userTokens);
+
+        payable(controller).sendValue(deposit);
+
+        bootstrapped = true;
+
+        emit Bootstrapped(msg.sender, deposit, userTokens, block.timestamp);
     }
+
+    /**
+     * @dev Internal function to set connector weight.
+     * @param _cw Desired connector weight.
+     */
+    function _setConnectorWeight(uint256 _cw) internal {
+        if (_cw == 0) revert AMMInvalidRange();
+        if (_cw > Math.SCALE_FACTOR) revert AMMInvalidRange();
+
+        emit ConnectorWeightChanged(connectorWeight, _cw);
+        connectorWeight = _cw;
+    }
+
+    /**
+     * @dev Internal function to set minimum ETH required for batch (queued) exit.
+     * @param _minBatchExitETH Desired minimum ETH required for batch (queued) exit.
+     */
+    function _setMinBatchExitETH(uint256 _minBatchExitETH) internal {
+        if (_minBatchExitETH > MIN_BATCH_EXIT_ETH_UPPER_BOUND) revert AMMInvalidMinBatchExitETH();
+        emit MinBatchExitETHChanged(minBatchExitETH, _minBatchExitETH);
+        minBatchExitETH = _minBatchExitETH;
+    }
+
+    // ============ Internal View Functions ============
 
     /**
      * @dev Calculates the current EVE token base price in USD terms
@@ -316,20 +421,6 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
     function _evePremiumPriceInUSD(uint256 _totalSupply) internal view returns (uint256) {
         uint256 premiumPriceETH = _premiumPriceFromNAV(_navInETH(), _totalSupply);
         return Oracle(_registry.oracle()).convertTokenToUSD(address(0), premiumPriceETH, Math.DECIMALS_NORMALIZED);
-    }
-
-    /**
-     * @dev EVE base price in ETH terms from a pre-fetched NAV.
-     * Formula: base_price = NAV_total / EVE_supply (NAV_total = strategy NAVs +
-     * controller balance + AMM free balance). Callers pass the NAV explicitly so
-     * flows that need several prices read NAV only once, and flows with an in-flight
-     * deposit can pass {_navInETHPendingTransfer} instead of {_navInETH}.
-     * @return uint256 Base price of EVE token in ETH terms (18 decimals).
-     */
-    function _basePriceFromNAV(uint256 _navTotal, uint256 _totalSupply) internal pure returns (uint256) {
-        if (_totalSupply == 0) revert AMMZeroTotalSupply();
-
-        return Math.basePrice(_navTotal, _totalSupply);
     }
 
     /**
@@ -389,124 +480,39 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         return Whitelist(_registry.whitelist()).isWhitelisted(_user);
     }
 
+    // ============ Internal Pure Functions ============
+
     /**
-     * @dev Shared body of `enter()` and `enterWithInvite()`: both wrappers apply
-     * `whenNotPaused`/`nonReentrant` and their own whitelist check before delegating here.
-     * @param _minTokensToMint Minimum amount of tokens to mint.
+     * @notice Function to calculate amount ETH to transfer based on number of tokens and price.
+     * @param _tokensAmount Number of protocol tokens.
+     * @param _evePrice Price of the EVE token in ETH terms.
+     * @return uint256 Amount of ETH to transfer.
      */
-    function _enter(uint256 _minTokensToMint) internal {
-        if (_minTokensToMint == 0) revert AMMInvalidTokensToMintAmount();
-
-        EVE eve = EVE(_registry.eve());
-        address controller = _registry.controller();
-
-        if (!bootstrapped) {
-            _bootstrap(_minTokensToMint, address(eve), controller);
-            return;
-        }
-
-        uint256 totalSupply = eve.totalSupply();
-        uint256 nav = _navInETHPendingTransfer();
-
-        uint256 evePrice = _premiumPriceFromNAV(nav, totalSupply);
-        uint256 tokensToMint = _ethToProtocolTokens(msg.value, evePrice);
-        if (tokensToMint < _minTokensToMint) revert AMMInsufficientDeposit();
-
-        /* Not re-calculating received ETH here, since rounding is already favoring the protocol,
-        and under the normal conditions re-calculation will actually cost user
-        more ETH than they would get back.
-        */
-        payable(controller).sendValue(msg.value);
-
-        eve.mint(msg.sender, tokensToMint);
-
-        emit UserEntered(msg.sender, msg.value, tokensToMint, block.timestamp);
+    function _calculateETHToTransfer(uint256 _tokensAmount, uint256 _evePrice) internal pure returns (uint256) {
+        return Math.convertAssets(_tokensAmount, _evePrice);
     }
 
     /**
-     * @dev Bootstrap function for first deposit.
-     * @param _minTokensToMint Minimum amount of protocol tokens.
-     * @param eve Address of the EVE token.
-     * @param controller Address of the controller.
+     * @dev Calculates the number of protocol tokens equivalent to the given ETH amount.
+     * @param _ethAmount Amount of ETH to convert to protocol tokens.
+     * @param _evePrice Price of the EVE token in ETH terms.
+     * @return uint256 Number of protocol tokens equivalent to the given ETH amount.
      */
-    function _bootstrap(uint256 _minTokensToMint, address eve, address controller) internal {
-        uint256 deposit = msg.value;
-        Oracle oracle = Oracle(_registry.oracle());
-
-        uint256 depositUSD = oracle.convertTokenToUSD(address(0), deposit, Math.DECIMALS_NORMALIZED);
-        if (depositUSD < MIN_INITIAL_DEPOSIT_USD) revert AMMLessThanMinInitialDeposit();
-
-        uint256 tokensToMint = depositUSD;
-        uint256 userTokens = tokensToMint - _DEAD_SUPPLY;
-
-        if (userTokens < _minTokensToMint) revert AMMInsufficientDeposit();
-
-        EVE(eve).mint(address(0x000000000000000000000000000000000000dEaD), _DEAD_SUPPLY);
-        EVE(eve).mint(msg.sender, userTokens);
-
-        payable(controller).sendValue(deposit);
-
-        bootstrapped = true;
-
-        emit Bootstrapped(msg.sender, deposit, userTokens, block.timestamp);
+    function _ethToProtocolTokens(uint256 _ethAmount, uint256 _evePrice) internal pure returns (uint256) {
+        return Math.convertAssetsInverse(_ethAmount, _evePrice);
     }
 
     /**
-     * @dev Internal function to set connector weight.
-     * @param _cw Desired connector weight.
+     * @dev EVE base price in ETH terms from a pre-fetched NAV.
+     * Formula: base_price = NAV_total / EVE_supply (NAV_total = strategy NAVs +
+     * controller balance + AMM free balance). Callers pass the NAV explicitly so
+     * flows that need several prices read NAV only once, and flows with an in-flight
+     * deposit can pass {_navInETHPendingTransfer} instead of {_navInETH}.
+     * @return uint256 Base price of EVE token in ETH terms (18 decimals).
      */
-    function _setConnectorWeight(uint256 _cw) internal {
-        if (_cw == 0) revert AMMInvalidRange();
-        if (_cw > Math.SCALE_FACTOR) revert AMMInvalidRange();
+    function _basePriceFromNAV(uint256 _navTotal, uint256 _totalSupply) internal pure returns (uint256) {
+        if (_totalSupply == 0) revert AMMZeroTotalSupply();
 
-        emit ConnectorWeightChanged(connectorWeight, _cw);
-        connectorWeight = _cw;
-    }
-
-    /**
-     * @dev Internal function to set minimum ETH required for batch (queued) exit.
-     * @param _minBatchExitETH Desired minimum ETH required for batch (queued) exit.
-     */
-    function _setMinBatchExitETH(uint256 _minBatchExitETH) internal {
-        if (_minBatchExitETH > MIN_BATCH_EXIT_ETH_UPPER_BOUND) revert AMMInvalidMinBatchExitETH();
-        emit MinBatchExitETHChanged(minBatchExitETH, _minBatchExitETH);
-        minBatchExitETH = _minBatchExitETH;
-    }
-
-    // ============ View Functions ============
-
-    /**
-     * @inheritdoc IAMM
-     */
-    function freeBalance() external view returns (uint256) {
-        return _freeBalance();
-    }
-
-    /**
-     * @inheritdoc IAMM
-     */
-    function eveBasePriceInETH() external view returns (uint256) {
-        return _basePriceFromNAV(_navInETH(), EVE(_registry.eve()).totalSupply());
-    }
-
-    /**
-     * @inheritdoc IAMM
-     */
-    function evePremiumPriceInETH() external view returns (uint256) {
-        return _premiumPriceFromNAV(_navInETH(), EVE(_registry.eve()).totalSupply());
-    }
-
-    /**
-     * @inheritdoc IAMM
-     */
-    function eveBasePriceInUSD() external view returns (uint256) {
-        return _eveBasePriceInUSD(EVE(_registry.eve()).totalSupply());
-    }
-
-    /**
-     * @inheritdoc IAMM
-     */
-    function evePremiumPriceInUSD() external view returns (uint256) {
-        return _evePremiumPriceInUSD(EVE(_registry.eve()).totalSupply());
+        return Math.basePrice(_navTotal, _totalSupply);
     }
 }
