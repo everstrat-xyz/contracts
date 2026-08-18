@@ -136,14 +136,16 @@ contract Controller is
      */
     function depositToStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
         external
+        override
         onlyAuthRole(Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 actualDeposited)
     {
         _validateDeposit(_amount);
 
         _fundStrategyManagerIfNeeded(_amount);
-        uint256 actualDeposited =
+        actualDeposited =
             IStrategyManager(payable(registry().strategyManager())).depositToStrategies(_startIndex, _endIndex, _amount);
 
         emit DepositToStrategiesCompleted(_amount, actualDeposited);
@@ -152,11 +154,18 @@ contract Controller is
     /**
      * @inheritdoc IController
      */
-    function depositToStrategies(uint256 _amount) external onlyAuthRole(Auth.KEEPER_ROLE) whenNotPaused nonReentrant {
+    function depositToStrategies(uint256 _amount)
+        external
+        override
+        onlyAuthRole(Auth.KEEPER_ROLE)
+        whenNotPaused
+        nonReentrant
+        returns (uint256 actualDeposited)
+    {
         _validateDeposit(_amount);
 
         _fundStrategyManagerIfNeeded(_amount);
-        uint256 actualDeposited = IStrategyManager(payable(registry().strategyManager())).depositToStrategies(_amount);
+        actualDeposited = IStrategyManager(payable(registry().strategyManager())).depositToStrategies(_amount);
 
         emit DepositToStrategiesCompleted(_amount, actualDeposited);
     }
@@ -166,15 +175,16 @@ contract Controller is
      */
     function depositToStrategy(address _strategy, uint256 _amount)
         external
+        override
         onlyAuthRole(Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 actualDeposited)
     {
         _validateDeposit(_amount);
 
         _fundStrategyManagerIfNeeded(_amount);
-        uint256 actualDeposited =
-            IStrategyManager(payable(registry().strategyManager())).depositToStrategy(_strategy, _amount);
+        actualDeposited = IStrategyManager(payable(registry().strategyManager())).depositToStrategy(_strategy, _amount);
 
         emit DirectDepositCompleted(_strategy, _amount, actualDeposited);
     }
@@ -184,12 +194,14 @@ contract Controller is
      */
     function withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
         external
+        override
         onlyAuthRole(Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 actualWithdrawn)
     {
         _validateWithdrawalAmount(_amount);
-        uint256 actualWithdrawn = IStrategyManager(payable(registry().strategyManager())).withdrawFromStrategies(
+        actualWithdrawn = IStrategyManager(payable(registry().strategyManager())).withdrawFromStrategies(
             _startIndex, _endIndex, _amount
         );
         emit WithdrawalCompleted(_amount, actualWithdrawn);
@@ -200,13 +212,14 @@ contract Controller is
      */
     function withdrawFromStrategies(uint256 _amount)
         external
+        override
         onlyAuthRole(Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 actualWithdrawn)
     {
         _validateWithdrawalAmount(_amount);
-        uint256 actualWithdrawn =
-            IStrategyManager(payable(registry().strategyManager())).withdrawFromStrategies(_amount);
+        actualWithdrawn = IStrategyManager(payable(registry().strategyManager())).withdrawFromStrategies(_amount);
         emit WithdrawalCompleted(_amount, actualWithdrawn);
     }
 
@@ -215,12 +228,14 @@ contract Controller is
      */
     function withdrawFromStrategy(address _strategy, uint256 _amount)
         external
+        override
         onlyAuthRole(Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 actualWithdrawn)
     {
         _validateWithdrawalAmount(_amount);
-        uint256 actualWithdrawn =
+        actualWithdrawn =
             IStrategyManager(payable(registry().strategyManager())).withdrawFromStrategy(_strategy, _amount);
         emit DirectWithdrawalCompleted(_strategy, _amount, actualWithdrawn);
     }
@@ -287,11 +302,13 @@ contract Controller is
      */
     function harvestPerformanceFeeFromStrategy(address _strategy)
         external
+        override
         onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 eveAmount, uint256 feeETHEquivalent)
     {
-        (uint256 eveAmount, uint256 feeETHEquivalent) =
+        (eveAmount, feeETHEquivalent) =
             IStrategyManager(payable(registry().strategyManager())).harvestPerformanceFeeFromStrategy(_strategy);
         emit DirectPerformanceFeeHarvestCompleted(_strategy, eveAmount, feeETHEquivalent);
     }
@@ -301,13 +318,15 @@ contract Controller is
      */
     function harvestPerformanceFeeFromStrategies()
         external
+        override
         onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 eveAmount, uint256 feeETHEquivalent)
     {
         IStrategyManager strategyManager_ = IStrategyManager(payable(registry().strategyManager()));
         uint256 endIndex = strategyManager_.strategyCount();
-        (uint256 eveAmount, uint256 feeETHEquivalent) = strategyManager_.harvestPerformanceFeeFromStrategies();
+        (eveAmount, feeETHEquivalent) = strategyManager_.harvestPerformanceFeeFromStrategies();
         emit PerformanceFeeHarvestCompleted(0, endIndex, eveAmount, feeETHEquivalent);
     }
 
@@ -316,11 +335,13 @@ contract Controller is
      */
     function harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex)
         external
+        override
         onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
+        returns (uint256 eveAmount, uint256 feeETHEquivalent)
     {
-        (uint256 eveAmount, uint256 feeETHEquivalent) = IStrategyManager(payable(registry().strategyManager()))
+        (eveAmount, feeETHEquivalent) = IStrategyManager(payable(registry().strategyManager()))
             .harvestPerformanceFeeFromStrategies(_startIndex, _endIndex);
         emit PerformanceFeeHarvestCompleted(_startIndex, _endIndex, eveAmount, feeETHEquivalent);
     }
@@ -350,10 +371,16 @@ contract Controller is
 
     /**
      * @inheritdoc IController
+     * @dev "Process whatever remains" is idempotent: an already-settled (or never-queued)
+     *      batch is a no-op. Passing `(0, 0)` into {_processRequests} would hit
+     *      {IExitQueue-unprocessedUsers}'s `startIndex >= endIndex` revert — that is the
+     *      correct error for the *ranged* overload, not for this convenience wrapper.
      */
     function processRequests(uint256 _batchId) external onlyAuthRole(Auth.KEEPER_ROLE) whenNotPaused nonReentrant {
         ExitQueue exitQueue = ExitQueue(payable(registry().exitQueue()));
-        _processRequests(_batchId, 0, exitQueue.unprocessedUsersCount(_batchId));
+        uint256 count = exitQueue.unprocessedUsersCount(_batchId);
+        if (count == 0) return;
+        _processRequests(_batchId, 0, count);
     }
 
     /**

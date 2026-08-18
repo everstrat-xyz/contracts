@@ -7,6 +7,9 @@ import {ICREReceiverBase} from "./ICREReceiverBase.sol";
  * @title ICREStrategyExecutor
  * @notice CRE receiver for strategy keeper actions.
  * @dev Amounts are never taken from the report — recomputed at execution time.
+ *      `StrategyUpkeepPerformed.amount` is the Controller return (achieved) for
+ *      deposit/withdraw/harvest; ProvideExitLiquidity emits the recomputed top-up
+ *      (`sendValue` is all-or-nothing). A 0 amount is a successful no-op, not a revert.
  */
 interface ICREStrategyExecutor is ICREReceiverBase {
     enum StrategyAction {
@@ -26,6 +29,11 @@ interface ICREStrategyExecutor is ICREReceiverBase {
     event SyncIntervalChanged(uint256 oldInterval, uint256 newInterval);
     event ExitLiquidityTargetETHChanged(uint256 oldTarget, uint256 newTarget);
     event MinExitLiquidityTopUpETHChanged(uint256 oldMin, uint256 newMin);
+    /// @notice Emitted after a strategy upkeep succeeds.
+    /// @param action The action executed.
+    /// @param amount ETH actually moved (0 for Rebalance/Sync). Harvest emits the settled
+    ///        `feeETHEquivalent`. A zero amount is a successful no-op (partial/empty SM
+    ///        batch), not a revert.
     event StrategyUpkeepPerformed(StrategyAction indexed action, uint256 amount);
 
     error KeeperExecutorNoUpkeepNeeded();
@@ -44,6 +52,8 @@ interface ICREStrategyExecutor is ICREReceiverBase {
     function lastSyncAt() external view returns (uint256);
     function exitLiquidityTargetETH() external view returns (uint256);
     function minExitLiquidityTopUpETH() external view returns (uint256);
+    /// @notice ETH the Controller must hold to settle in-window priced batches.
+    ///         The current unpriced batch is excluded (cancellable equity).
     function pendingRedemptionNeedsETH() external view returns (uint256 needsETH);
 
     /**

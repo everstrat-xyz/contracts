@@ -44,6 +44,8 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
 
     uint8 public constant DEPOSIT_WEIGHT = 100;
     uint8 public constant WITHDRAWAL_WEIGHT = 100;
+    uint8 public constant ZERO_DEPOSIT_WEIGHT = 0;
+    uint256 public constant CAPPED_MAX_DEPOSIT = 1 ether;
 
     uint256 public constant PERFORMANCE_FEE_BPS = 1_000; // 10%
     uint256 public constant UNCHARGED_LP_FEES = 1 ether; // → 0.1 ETH pending fee
@@ -167,6 +169,12 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         token.approve(address(amm), type(uint256).max);
         batchId = amm.exit(_requestedETH, token.balanceOf(_user), PRICE_TOLERANCE);
         vm.stopPrank();
+    }
+
+    /// @dev `priceBatch` is Controller/KEEPER-gated; the strategy executor already holds the role.
+    function _priceQueuedBatch() internal {
+        vm.prank(address(executor));
+        controller.priceBatch();
     }
 
     function _enablePerformanceFees() internal {
@@ -369,11 +377,40 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.DepositExcess);
     }
 
+    function test_DepositExcess_NoUpkeepWhenDepositWeightZero() public {
+        strategyManager.setDepositWeight(address(strategy), ZERO_DEPOSIT_WEIGHT);
+
+        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertTrue(action != ICREStrategyExecutor.StrategyAction.DepositExcess);
+        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.DepositExcess);
+    }
+
+    function test_DepositExcess_EmitsActualWhenCappedByMaxDeposit() public {
+        strategy.setMaxDeposit(CAPPED_MAX_DEPOSIT);
+
+        uint256 controllerBalance = address(controller).balance;
+        assertGt(controllerBalance, CAPPED_MAX_DEPOSIT);
+
+        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.DepositExcess));
+        assertEq(amount, controllerBalance);
+
+        vm.expectEmit(true, false, false, true, address(executor));
+        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
+            ICREStrategyExecutor.StrategyAction.DepositExcess, CAPPED_MAX_DEPOSIT
+        );
+        _onReport(ICREStrategyExecutor.StrategyAction.DepositExcess);
+
+        assertEq(address(strategy).balance, CAPPED_MAX_DEPOSIT);
+        assertEq(address(controller).balance, controllerBalance - CAPPED_MAX_DEPOSIT);
+    }
+
     // ============ WithdrawShortfall ============
 
     function test_WithdrawShortfall_PullsFromStrategies() public {
         _deployCapitalToStrategy();
         _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
 
         uint256 needsETH = executor.pendingRedemptionNeedsETH();
         uint256 controllerBalance = address(controller).balance;
@@ -393,9 +430,17 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         assertEq(address(controller).balance, controllerBalance + shortfall);
     }
 
+    function test_WithdrawShortfall_NoUpkeepWhenUnpriced() public {
+        _deployCapitalToStrategy();
+        _queueExit(user, EXIT_ETH);
+        assertEq(executor.pendingRedemptionNeedsETH(), 0);
+        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.WithdrawShortfall);
+    }
+
     function test_WithdrawShortfall_NoUpkeepWhenCovered() public {
         // Controller still holds the full bootstrap deposit — nothing to pull.
         _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
         assertLe(executor.pendingRedemptionNeedsETH(), address(controller).balance);
         _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.WithdrawShortfall);
     }
@@ -403,6 +448,7 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
     function test_WithdrawShortfall_IgnoresReportParams() public {
         _deployCapitalToStrategy();
         _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
 
         uint256 shortfall = executor.pendingRedemptionNeedsETH() - address(controller).balance;
 
@@ -571,8 +617,14 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         assertEq(executor.pendingRedemptionNeedsETH(), 0);
     }
 
-    function test_PendingRedemptionNeedsETH_CountsCurrentBatch() public {
+    function test_PendingRedemptionNeedsETH_DoesNotCountUnpricedCurrentBatch() public {
         _queueExit(user, EXIT_ETH);
+        assertEq(executor.pendingRedemptionNeedsETH(), 0);
+    }
+
+    function test_PendingRedemptionNeedsETH_CountsPricedInWindowBatch() public {
+        _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
         assertApproxEqAbs(executor.pendingRedemptionNeedsETH(), EXIT_ETH, 1);
     }
 
@@ -581,6 +633,11 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
     function test_PendingRedemptionNeedsETH_AnchoredAtQueueCursor() public {
         _queueExit(user, EXIT_ETH);
         assertEq(queueExecutor.nextLiveBatchIdToProcess(), exitQueue.currentBatchId());
+        assertEq(executor.pendingRedemptionNeedsETH(), 0);
+
+        uint256 pricedBatchId = exitQueue.currentBatchId();
+        _priceQueuedBatch();
+        assertEq(queueExecutor.nextLiveBatchIdToProcess(), pricedBatchId);
         assertGt(executor.pendingRedemptionNeedsETH(), 0);
     }
 

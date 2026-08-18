@@ -27,6 +27,11 @@ import {CREReceiverBase} from "./CREReceiverBase.sol";
  *
  * Report params are ignored for amounts — every ETH quantity is recomputed
  * from live Controller / StrategyManager / ExitQueue / AMM state.
+ * `StrategyUpkeepPerformed` then emits the Controller return (ETH actually
+ * moved / harvest `feeETHEquivalent`), which may be less than that estimate
+ * on StrategyManager try/catch underfill. A 0 actual is a successful no-op.
+ * ProvideExitLiquidity has no return (`sendValue` is all-or-nothing) — the
+ * event uses the recomputed `topUp`.
  *
  * Couples to the registered queue keeper via Registry `QUEUE_KEEPER_EXECUTOR`
  * and `nextLiveBatchIdToProcess()`.
@@ -186,8 +191,8 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
                 revert KeeperExecutorNoUpkeepNeeded();
             }
             uint256 shortfall = needsETH - controllerBalance;
-            controller.withdrawFromStrategies(shortfall);
-            emit StrategyUpkeepPerformed(strategyAction, shortfall);
+            uint256 actualWithdrawn = controller.withdrawFromStrategies(shortfall);
+            emit StrategyUpkeepPerformed(strategyAction, actualWithdrawn);
         } else if (strategyAction == StrategyAction.ProvideExitLiquidity) {
             uint256 topUp =
                 _exitLiquidityTopUp(registry_, address(controller).balance, _pendingRedemptionNeedsETH(registry_));
@@ -199,13 +204,13 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
             if (excess < minDepositETH || !_depositCapacityAvailable(strategyManager_)) {
                 revert KeeperExecutorNoUpkeepNeeded();
             }
-            controller.depositToStrategies(excess);
-            emit StrategyUpkeepPerformed(strategyAction, excess);
+            uint256 actualDeposited = controller.depositToStrategies(excess);
+            emit StrategyUpkeepPerformed(strategyAction, actualDeposited);
         } else if (strategyAction == StrategyAction.HarvestPerformanceFees) {
             uint256 feeETH = _pendingPerformanceFeeETH(strategyManager_);
             if (feeETH < minHarvestETH) revert KeeperExecutorNoUpkeepNeeded();
-            controller.harvestPerformanceFeeFromStrategies();
-            emit StrategyUpkeepPerformed(strategyAction, feeETH);
+            (, uint256 feeETHEquivalent) = controller.harvestPerformanceFeeFromStrategies();
+            emit StrategyUpkeepPerformed(strategyAction, feeETHEquivalent);
         } else if (strategyAction == StrategyAction.Sync) {
             if (syncInterval == 0 || block.timestamp - lastSyncAt < syncInterval) {
                 revert KeeperExecutorNoUpkeepNeeded();
@@ -241,7 +246,7 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
             IStrategy strategy = IStrategy(strategies[i]);
             if (
                 !_strategyManager.isStrategyInDepositCooldown(address(strategy)) && strategy.isHealthy()
-                    && strategy.maxDeposit() > 0
+                    && strategy.maxDeposit() > 0 && _strategyManager.depositWeight(address(strategy)) > 0
             ) return true;
         }
         return false;
@@ -277,6 +282,12 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         return shortfall < excess ? shortfall : excess;
     }
 
+    /// @dev ETH the Controller must hold to settle in-window priced batches. Matches
+    ///      share-price accounting: the current unpriced batch is still cancellable
+    ///      equity (`liveRedemptionOffsets` is 0), so counting it here would let a
+    ///      queue-then-cancel loop pull LP (`WithdrawShortfall`) and re-deposit
+    ///      (`DepositExcess`). After `priceBatch` the batch is in
+    ///      `[cursor, currentBatchId)` and is costed at `finalEvePrice`.
     function _pendingRedemptionNeedsETH(IRegistry _registry) internal view returns (uint256 needsETH) {
         IExitQueue queue = IExitQueue(_registry.exitQueue());
         uint256 currentBatchId = queue.currentBatchId();
@@ -286,13 +297,6 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         uint256 scanLimit = cursor + MAX_BATCH_SCAN;
         for (uint256 batchId = cursor; batchId < currentBatchId && batchId < scanLimit; batchId++) {
             needsETH += _batchSettlementCost(queue, batchId);
-        }
-
-        (,, uint256 totalTokensToBurn,,) = queue.batchInfo(currentBatchId);
-        if (totalTokensToBurn > 0) {
-            // Current (unpriced) batch is still cancellable equity. Size residual need
-            // at the live base price, which is already net of in-window priced liability.
-            needsETH += totalTokensToBurn.convertAssets(IAMM(_registry.amm()).eveBasePriceInETH());
         }
     }
 

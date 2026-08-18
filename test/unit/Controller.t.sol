@@ -10,6 +10,7 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import {IController} from "../../src/interfaces/IController.sol";
+import {IExitQueue} from "../../src/interfaces/IExitQueue.sol";
 
 import {Controller} from "../../src/contracts/Controller.sol";
 import {AMM} from "../../src/contracts/AMM.sol";
@@ -54,6 +55,9 @@ contract ControllerTest is ProtocolTestBase {
     uint256 public constant MINT_AMOUNT = 100;
     uint256 public constant LIQUIDITY_AMOUNT = 500;
     uint256 public constant LIQUIDITY_AMOUNT_ZERO = 0;
+    uint256 public constant ZERO_WEIGHT_DEPOSIT_AMOUNT = 1 ether;
+    uint8 public constant ZERO_DEPOSIT_WEIGHT = 0;
+    uint8 public constant UNUSED_WITHDRAWAL_WEIGHT = 70;
 
     event Upgraded(address indexed implementation);
 
@@ -269,6 +273,51 @@ contract ControllerTest is ProtocolTestBase {
     }
 
     /*//////////////////////////////////////////////////////////////
+                    PROCESS REQUESTS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    uint256 internal constant QUEUE_ENTER_ETH = 1 ether;
+    uint256 internal constant QUEUE_EXIT_ETH = 0.5 ether;
+    uint256 internal constant QUEUE_MIN_TOKENS = 1;
+    uint256 internal constant QUEUE_PRICE_TOLERANCE = 0;
+
+    function test_ProcessRequests_NoOpWhenBatchEmpty() public {
+        uint256 batchId = exitQueue.currentBatchId();
+        assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
+
+        controller.processRequests(batchId);
+
+        assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
+    }
+
+    function test_ProcessRequests_NoOpWhenAlreadySettled() public {
+        vm.deal(user, QUEUE_ENTER_ETH);
+        vm.prank(user);
+        amm.enter{value: QUEUE_ENTER_ETH}(QUEUE_MIN_TOKENS);
+
+        vm.startPrank(user);
+        token.approve(address(amm), type(uint256).max);
+        uint256 batchId = amm.exit(QUEUE_EXIT_ETH, token.balanceOf(user), QUEUE_PRICE_TOLERANCE);
+        vm.stopPrank();
+
+        assertGt(batchId, 0);
+        controller.priceBatch();
+        controller.processRequests(batchId);
+        assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
+
+        // Second call is a keeper race against an already-settled batch — no-op, not InvalidRange.
+        controller.processRequests(batchId);
+        (bool processed,,,,) = exitQueue.requestInfo(batchId, user);
+        assertTrue(processed);
+    }
+
+    function test_ProcessRequests_RangedEmptyReverts() public {
+        uint256 batchId = exitQueue.currentBatchId();
+        vm.expectRevert(IExitQueue.ExitQueueInvalidRange.selector);
+        controller.processRequests(batchId, 0, 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                     LIQUIDITY PROVISIONING TESTS
     //////////////////////////////////////////////////////////////*/
 
@@ -450,7 +499,8 @@ contract ControllerTest is ProtocolTestBase {
         emit IController.DepositToStrategiesCompleted(amount, amount);
 
         // Distribute funds
-        controller.depositToStrategies(amount);
+        uint256 actualDeposited = controller.depositToStrategies(amount);
+        assertEq(actualDeposited, amount);
 
         // Verify funds were distributed to strategies
         uint256 totalInStrategies = address(mockStrategy1).balance + address(mockStrategy2).balance;
@@ -489,6 +539,19 @@ contract ControllerTest is ProtocolTestBase {
         mockStrategy1.setMaxDeposit(1 ether);
         // This should not revert (deficit = 0.3 ETH == controller balance)
         controller.depositToStrategies(1 ether);
+    }
+
+    function test_DepositToStrategies_ReturnsZeroWhenDepositWeightZero() public {
+        strategyManager.addStrategy(address(mockStrategy1), ZERO_DEPOSIT_WEIGHT, UNUSED_WITHDRAWAL_WEIGHT);
+        vm.deal(address(controller), ZERO_WEIGHT_DEPOSIT_AMOUNT);
+
+        vm.expectEmit(true, false, false, true);
+        emit IController.DepositToStrategiesCompleted(ZERO_WEIGHT_DEPOSIT_AMOUNT, 0);
+        uint256 actualDeposited = controller.depositToStrategies(ZERO_WEIGHT_DEPOSIT_AMOUNT);
+
+        assertEq(actualDeposited, 0);
+        assertEq(address(mockStrategy1).balance, 0);
+        assertEq(address(controller).balance, ZERO_WEIGHT_DEPOSIT_AMOUNT);
     }
 
     function test_DepositToStrategies_WhenPaused() public {
@@ -605,7 +668,8 @@ contract ControllerTest is ProtocolTestBase {
         emit IController.DirectDepositCompleted(address(mockStrategy1), amount, amount);
 
         // Deposit to strategy
-        controller.depositToStrategy(address(mockStrategy1), amount);
+        uint256 actualDeposited = controller.depositToStrategy(address(mockStrategy1), amount);
+        assertEq(actualDeposited, amount);
 
         // Verify funds were deposited to strategy
         assertEq(address(mockStrategy1).balance, amount);
@@ -647,7 +711,8 @@ contract ControllerTest is ProtocolTestBase {
         emit IController.WithdrawalCompleted(amount, amount);
 
         // Withdraw from strategies
-        controller.withdrawFromStrategies(amount);
+        uint256 actualWithdrawn = controller.withdrawFromStrategies(amount);
+        assertEq(actualWithdrawn, amount);
 
         // Controller should receive funds
         assertGt(address(controller).balance, initialControllerBalance);
@@ -693,7 +758,8 @@ contract ControllerTest is ProtocolTestBase {
         uint256 initialControllerBalance = address(controller).balance;
 
         // Withdraw from strategy
-        controller.withdrawFromStrategy(address(mockStrategy1), amount);
+        uint256 actualWithdrawn = controller.withdrawFromStrategy(address(mockStrategy1), amount);
+        assertEq(actualWithdrawn, amount);
 
         // Controller should receive funds
         assertEq(address(controller).balance, initialControllerBalance + amount);
@@ -887,7 +953,10 @@ contract ControllerTest is ProtocolTestBase {
         uint256 treasuryBefore = token.balanceOf(DAO_TREASURY);
         vm.expectEmit(true, true, false, true);
         emit IController.DirectPerformanceFeeHarvestCompleted(address(mockStrategy1), expectedEves, feeETH);
-        controller.harvestPerformanceFeeFromStrategy(address(mockStrategy1));
+        (uint256 eveAmount, uint256 feeETHEquivalent) =
+            controller.harvestPerformanceFeeFromStrategy(address(mockStrategy1));
+        assertEq(eveAmount, expectedEves);
+        assertEq(feeETHEquivalent, feeETH);
         assertEq(token.balanceOf(DAO_TREASURY) - treasuryBefore, expectedEves);
         assertEq(strategyManager.pendingPerformanceFeeInETH(address(mockStrategy1)), 0);
     }
@@ -901,7 +970,9 @@ contract ControllerTest is ProtocolTestBase {
         _accrueMockLpFees(mockStrategy2, LP_FEE_BASE_2);
 
         uint256 treasuryBefore = token.balanceOf(DAO_TREASURY);
-        controller.harvestPerformanceFeeFromStrategies();
+        (uint256 eveAmount, uint256 feeETHEquivalent) = controller.harvestPerformanceFeeFromStrategies();
+        assertGt(eveAmount, 0);
+        assertGt(feeETHEquivalent, 0);
         assertGt(token.balanceOf(DAO_TREASURY), treasuryBefore);
         assertEq(strategyManager.pendingPerformanceFeeInETH(address(mockStrategy1)), 0);
         assertEq(strategyManager.pendingPerformanceFeeInETH(address(mockStrategy2)), 0);

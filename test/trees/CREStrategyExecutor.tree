@@ -28,6 +28,8 @@ CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
 │       ├── It should call Controller.checkAndRebalanceStrategies()
 │       └── It should emit StrategyUpkeepPerformed(Rebalance, 0)
 ├── Given action is StrategyAction.WithdrawShortfall
+│   ├── When the only queued batch is the current unpriced batch
+│   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (cancellable equity is not a liability)
 │   ├── When pending redemption needs are already covered by the Controller balance
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
 │   ├── When the shortfall is below minWithdrawETH
@@ -35,7 +37,8 @@ CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
 │   └── When the shortfall is at least minWithdrawETH
 │       ├── It should call Controller.withdrawFromStrategies(shortfall) with the recomputed
 │       │   amount, not any amount from the report
-│       └── It should emit StrategyUpkeepPerformed(WithdrawShortfall, shortfall)
+│       └── It should emit StrategyUpkeepPerformed(WithdrawShortfall, actualWithdrawn)
+│           from the Controller return (underfill is a successful no-op, not a revert)
 ├── Given action is StrategyAction.ProvideExitLiquidity
 │   ├── When exitLiquidityTargetETH is 0
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (action disabled by policy)
@@ -52,12 +55,13 @@ CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
 │   ├── When idle excess is below minDepositETH
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
 │   ├── When no strategy can currently take a deposit (all paused, unhealthy, in deposit
-│   │   cooldown, or at maxDeposit == 0)
+│   │   cooldown, at maxDeposit == 0, or depositWeight == 0)
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
 │   └── When excess >= minDepositETH and some strategy has capacity
 │       ├── It should deposit only the excess over controllerReserveETH + pending needs
 │       ├── It should call Controller.depositToStrategies(excess)
-│       └── It should emit StrategyUpkeepPerformed(DepositExcess, excess)
+│       └── It should emit StrategyUpkeepPerformed(DepositExcess, actualDeposited)
+│           from the Controller return (underfill is a successful no-op, not a revert)
 ├── Given action is StrategyAction.HarvestPerformanceFees
 │   ├── When StrategyManager.performanceFeeBps() == 0
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (fees disabled ⇒ pending is 0)
@@ -65,7 +69,8 @@ CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (harvest not worth the gas)
 │   └── When total pending fee ETH is at least minHarvestETH
 │       ├── It should call Controller.harvestPerformanceFeeFromStrategies()
-│       └── It should emit StrategyUpkeepPerformed(HarvestPerformanceFees, feeETH)
+│       └── It should emit StrategyUpkeepPerformed(HarvestPerformanceFees, feeETHEquivalent)
+│           from the Controller harvest return, not the pre-call pending view
 └── Given action is StrategyAction.Sync
     ├── When syncInterval is 0
     │   └── It should revert with KeeperExecutorNoUpkeepNeeded (sync disabled)
@@ -107,9 +112,8 @@ CREStrategyExecutor::pendingRedemptionNeedsETH()
 ├── Given a batch has more unprocessed users than MAX_USERS_COST_SCAN (50)
 │   └── It should cost at most the first 50 (may under-report; the shortfall is topped up on
 │       the next upkeep rather than reverting)
-└── It should always add the current batch's totalTokensToBurn priced at
-    AMM.eveBasePriceInETH() — the batch is not yet priced (cancellable equity);
-    the live base price is already net of in-window priced liability
+└── Given the current batch is unpriced
+    └── It should contribute 0 (still cancellable equity; not a keeper liability until priceBatch)
 
 CREStrategyExecutor::setControllerReserveETH / setExitLiquidityTargetETH / setSyncInterval / setMinWithdrawETH
 ├── Given caller does not have ADMIN_ROLE
