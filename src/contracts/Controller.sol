@@ -350,10 +350,16 @@ contract Controller is
 
     /**
      * @inheritdoc IController
+     * @dev "Process whatever remains" is idempotent: an already-settled (or never-queued)
+     *      batch is a no-op. Passing `(0, 0)` into {_processRequests} would hit
+     *      {IExitQueue-unprocessedUsers}'s `startIndex >= endIndex` revert — that is the
+     *      correct error for the *ranged* overload, not for this convenience wrapper.
      */
     function processRequests(uint256 _batchId) external onlyAuthRole(Auth.KEEPER_ROLE) whenNotPaused nonReentrant {
         ExitQueue exitQueue = ExitQueue(payable(registry().exitQueue()));
-        _processRequests(_batchId, 0, exitQueue.unprocessedUsersCount(_batchId));
+        uint256 count = exitQueue.unprocessedUsersCount(_batchId);
+        if (count == 0) return;
+        _processRequests(_batchId, 0, count);
     }
 
     /**

@@ -168,7 +168,7 @@ interface IController {
     /// @dev Range is [startIndex, endIndex), meaning users from startIndex up to but not including endIndex
     function processRequests(uint256 _batchId, uint256 _startIndex, uint256 _endIndex) external;
 
-    /// @notice Processes all redemption requests from a batch
+    /// @notice Processes all remaining redemption requests from a batch
     /// @param _batchId The ID of the batch
     function processRequests(uint256 _batchId) external;
 

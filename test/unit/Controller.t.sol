@@ -10,6 +10,7 @@ import {PausableUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/Pau
 import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 import {IController} from "../../src/interfaces/IController.sol";
+import {IExitQueue} from "../../src/interfaces/IExitQueue.sol";
 
 import {Controller} from "../../src/contracts/Controller.sol";
 import {AMM} from "../../src/contracts/AMM.sol";
@@ -266,6 +267,51 @@ contract ControllerTest is ProtocolTestBase {
 
         vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
         controller.priceBatch();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    PROCESS REQUESTS TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    uint256 internal constant QUEUE_ENTER_ETH = 1 ether;
+    uint256 internal constant QUEUE_EXIT_ETH = 0.5 ether;
+    uint256 internal constant QUEUE_MIN_TOKENS = 1;
+    uint256 internal constant QUEUE_PRICE_TOLERANCE = 0;
+
+    function test_ProcessRequests_NoOpWhenBatchEmpty() public {
+        uint256 batchId = exitQueue.currentBatchId();
+        assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
+
+        controller.processRequests(batchId);
+
+        assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
+    }
+
+    function test_ProcessRequests_NoOpWhenAlreadySettled() public {
+        vm.deal(user, QUEUE_ENTER_ETH);
+        vm.prank(user);
+        amm.enter{value: QUEUE_ENTER_ETH}(QUEUE_MIN_TOKENS);
+
+        vm.startPrank(user);
+        token.approve(address(amm), type(uint256).max);
+        uint256 batchId = amm.exit(QUEUE_EXIT_ETH, token.balanceOf(user), QUEUE_PRICE_TOLERANCE);
+        vm.stopPrank();
+
+        assertGt(batchId, 0);
+        controller.priceBatch();
+        controller.processRequests(batchId);
+        assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
+
+        // Second call is a keeper race against an already-settled batch — no-op, not InvalidRange.
+        controller.processRequests(batchId);
+        (bool processed,,,,) = exitQueue.requestInfo(batchId, user);
+        assertTrue(processed);
+    }
+
+    function test_ProcessRequests_RangedEmptyReverts() public {
+        uint256 batchId = exitQueue.currentBatchId();
+        vm.expectRevert(IExitQueue.ExitQueueInvalidRange.selector);
+        controller.processRequests(batchId, 0, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
