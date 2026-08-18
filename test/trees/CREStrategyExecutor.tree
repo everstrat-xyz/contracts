@@ -37,7 +37,8 @@ CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
 │   └── When the shortfall is at least minWithdrawETH
 │       ├── It should call Controller.withdrawFromStrategies(shortfall) with the recomputed
 │       │   amount, not any amount from the report
-│       └── It should emit StrategyUpkeepPerformed(WithdrawShortfall, shortfall)
+│       └── It should emit StrategyUpkeepPerformed(WithdrawShortfall, actualWithdrawn)
+│           from the Controller return (underfill is a successful no-op, not a revert)
 ├── Given action is StrategyAction.ProvideExitLiquidity
 │   ├── When exitLiquidityTargetETH is 0
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (action disabled by policy)
@@ -54,12 +55,13 @@ CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
 │   ├── When idle excess is below minDepositETH
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
 │   ├── When no strategy can currently take a deposit (all paused, unhealthy, in deposit
-│   │   cooldown, or at maxDeposit == 0)
+│   │   cooldown, at maxDeposit == 0, or depositWeight == 0)
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded
 │   └── When excess >= minDepositETH and some strategy has capacity
 │       ├── It should deposit only the excess over controllerReserveETH + pending needs
 │       ├── It should call Controller.depositToStrategies(excess)
-│       └── It should emit StrategyUpkeepPerformed(DepositExcess, excess)
+│       └── It should emit StrategyUpkeepPerformed(DepositExcess, actualDeposited)
+│           from the Controller return (underfill is a successful no-op, not a revert)
 ├── Given action is StrategyAction.HarvestPerformanceFees
 │   ├── When StrategyManager.performanceFeeBps() == 0
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (fees disabled ⇒ pending is 0)
@@ -67,7 +69,8 @@ CREStrategyExecutor::_processReport(uint8 action, bytes params) — via onReport
 │   │   └── It should revert with KeeperExecutorNoUpkeepNeeded (harvest not worth the gas)
 │   └── When total pending fee ETH is at least minHarvestETH
 │       ├── It should call Controller.harvestPerformanceFeeFromStrategies()
-│       └── It should emit StrategyUpkeepPerformed(HarvestPerformanceFees, feeETH)
+│       └── It should emit StrategyUpkeepPerformed(HarvestPerformanceFees, feeETHEquivalent)
+│           from the Controller harvest return, not the pre-call pending view
 └── Given action is StrategyAction.Sync
     ├── When syncInterval is 0
     │   └── It should revert with KeeperExecutorNoUpkeepNeeded (sync disabled)

@@ -44,6 +44,8 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
 
     uint8 public constant DEPOSIT_WEIGHT = 100;
     uint8 public constant WITHDRAWAL_WEIGHT = 100;
+    uint8 public constant ZERO_DEPOSIT_WEIGHT = 0;
+    uint256 public constant CAPPED_MAX_DEPOSIT = 1 ether;
 
     uint256 public constant PERFORMANCE_FEE_BPS = 1_000; // 10%
     uint256 public constant UNCHARGED_LP_FEES = 1 ether; // → 0.1 ETH pending fee
@@ -373,6 +375,34 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
         assertTrue(action != ICREStrategyExecutor.StrategyAction.DepositExcess);
         _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.DepositExcess);
+    }
+
+    function test_DepositExcess_NoUpkeepWhenDepositWeightZero() public {
+        strategyManager.setDepositWeight(address(strategy), ZERO_DEPOSIT_WEIGHT);
+
+        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertTrue(action != ICREStrategyExecutor.StrategyAction.DepositExcess);
+        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.DepositExcess);
+    }
+
+    function test_DepositExcess_EmitsActualWhenCappedByMaxDeposit() public {
+        strategy.setMaxDeposit(CAPPED_MAX_DEPOSIT);
+
+        uint256 controllerBalance = address(controller).balance;
+        assertGt(controllerBalance, CAPPED_MAX_DEPOSIT);
+
+        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.DepositExcess));
+        assertEq(amount, controllerBalance);
+
+        vm.expectEmit(true, false, false, true, address(executor));
+        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
+            ICREStrategyExecutor.StrategyAction.DepositExcess, CAPPED_MAX_DEPOSIT
+        );
+        _onReport(ICREStrategyExecutor.StrategyAction.DepositExcess);
+
+        assertEq(address(strategy).balance, CAPPED_MAX_DEPOSIT);
+        assertEq(address(controller).balance, controllerBalance - CAPPED_MAX_DEPOSIT);
     }
 
     // ============ WithdrawShortfall ============

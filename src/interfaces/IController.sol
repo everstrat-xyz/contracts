@@ -81,35 +81,49 @@ interface IController {
     /// @param _startIndex The start index (inclusive) of the strategies to deposit to
     /// @param _endIndex The end index (exclusive) of the strategies to deposit to
     /// @param _amount The amount of ETH to deposit
+    /// @return actualDeposited ETH actually deposited; may be less than `_amount` on `maxDeposit`
+    ///         caps or try/catch skips, or zero when no strategy qualifies
     /// @dev Range is [startIndex, endIndex), meaning strategies from startIndex up to but not including endIndex
-    function depositToStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount) external;
+    function depositToStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
+        external
+        returns (uint256 actualDeposited);
 
     /// @notice Deposits ETH to all strategies proportionally by safety level
     /// @param _amount The amount of ETH to deposit
-    function depositToStrategies(uint256 _amount) external;
+    /// @return actualDeposited ETH actually deposited; may be less than `_amount` on `maxDeposit`
+    ///         caps or try/catch skips, or zero when no strategy qualifies
+    function depositToStrategies(uint256 _amount) external returns (uint256 actualDeposited);
 
     /// @notice Deposits ETH to a specific strategy
     /// @param _strategy The address of the strategy to deposit to
     /// @param _amount The amount of ETH to deposit
-    function depositToStrategy(address _strategy, uint256 _amount) external;
+    /// @return actualDeposited ETH actually deposited; zero when `maxDeposit() == 0`
+    function depositToStrategy(address _strategy, uint256 _amount) external returns (uint256 actualDeposited);
 
     /// @notice Withdraws ETH from a range of strategies proportionally by withdrawal priority
     /// to the controller
     /// @param _startIndex The start index (inclusive) of the strategies to withdraw from
     /// @param _endIndex The end index (exclusive) of the strategies to withdraw from
     /// @param _amount The amount of ETH to withdraw
+    /// @return actualWithdrawn ETH actually withdrawn; may be less than `_amount` on try/catch
+    ///         skips or when no strategy has `maxWithdrawal() > 0`
     /// @dev Range is [startIndex, endIndex), meaning strategies from startIndex up to but not including endIndex
-    function withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount) external;
+    function withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
+        external
+        returns (uint256 actualWithdrawn);
 
     /// @notice Withdraws ETH from all strategies proportionally by withdrawal priority
     /// to the controller
     /// @param _amount The amount of ETH to withdraw
-    function withdrawFromStrategies(uint256 _amount) external;
+    /// @return actualWithdrawn ETH actually withdrawn; may be less than `_amount` on try/catch
+    ///         skips or when no strategy has `maxWithdrawal() > 0`
+    function withdrawFromStrategies(uint256 _amount) external returns (uint256 actualWithdrawn);
 
     /// @notice Withdraws ETH from a specific strategy to the controller
     /// @param _strategy The address of the strategy to withdraw from
     /// @param _amount The amount of ETH to withdraw
-    function withdrawFromStrategy(address _strategy, uint256 _amount) external;
+    /// @return actualWithdrawn ETH actually withdrawn
+    function withdrawFromStrategy(address _strategy, uint256 _amount) external returns (uint256 actualWithdrawn);
 
     /// @notice Checks and rebalances a range of strategies
     /// @param _startIndex The start index (inclusive) of the strategies to check and rebalance
@@ -143,17 +157,27 @@ interface IController {
     /// @notice Harvests performance fees for a single strategy via StrategyManager
     /// @dev Callable by `ADMIN_ROLE` or `KEEPER_ROLE` on Registry. Emits `DirectPerformanceFeeHarvestCompleted`.
     /// @param _strategy The address of the strategy to harvest fees for
-    function harvestPerformanceFeeFromStrategy(address _strategy) external;
+    /// @return eveAmount EVE minted to the DAO treasury
+    /// @return feeETHEquivalent ETH-equivalent performance fee settled
+    function harvestPerformanceFeeFromStrategy(address _strategy)
+        external
+        returns (uint256 eveAmount, uint256 feeETHEquivalent);
 
     /// @notice Harvests performance fees for all registered strategies via StrategyManager
     /// @dev Callable by `ADMIN_ROLE` or `KEEPER_ROLE` on Registry. Emits `PerformanceFeeHarvestCompleted`.
-    function harvestPerformanceFeeFromStrategies() external;
+    /// @return eveAmount Total EVE minted to the DAO treasury
+    /// @return feeETHEquivalent Total ETH-equivalent performance fee settled
+    function harvestPerformanceFeeFromStrategies() external returns (uint256 eveAmount, uint256 feeETHEquivalent);
 
     /// @notice Harvests performance fees for a range of registered strategies via StrategyManager
     /// @dev Callable by `ADMIN_ROLE` or `KEEPER_ROLE` on Registry. Emits `PerformanceFeeHarvestCompleted`.
     /// @param _startIndex The start index (inclusive) of the strategies to harvest
     /// @param _endIndex The end index (exclusive) of the strategies to harvest
-    function harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex) external;
+    /// @return eveAmount Total EVE minted to the DAO treasury
+    /// @return feeETHEquivalent Total ETH-equivalent performance fee settled
+    function harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex)
+        external
+        returns (uint256 eveAmount, uint256 feeETHEquivalent);
 
     /// @notice Prices the current ExitQueue batch at the live AMM base price.
     /// @dev Reads `eveBasePriceInETH()` before marking this batch priced, so the

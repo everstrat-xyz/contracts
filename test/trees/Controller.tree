@@ -78,9 +78,13 @@ Controller::depositToStrategies(uint256 _amount)
 │   ├── When amount is valid and StrategyManager balance is zero
 │   │   ├── It should transfer full _amount to StrategyManager
 │   │   ├── It should update controller balance (decrease)
-│   │   ├── It should emit DepositToStrategiesCompleted event (with requested amount)
+│   │   ├── It should emit DepositToStrategiesCompleted event (with requested and actual amounts)
+│   │   ├── It should return actualDeposited
 │   │   ├── It should call strategyManager.depositToStrategies(_amount)
 │   │   └── It should deposit funds proportionally to healthy strategies based on safety levels
+│   ├── When all qualifying strategies have depositWeight == 0
+│   │   ├── It should emit DepositToStrategiesCompleted(_amount, 0)
+│   │   └── It should return 0 (unused ETH stays on the Controller)
 │   ├── When StrategyManager already holds ETH (top-up path)
 │   │   ├── It should validate only against the deficit (controller.balance >= targetAmount - SM.balance)
 │   │   ├── It should send only the deficit to StrategyManager
@@ -105,7 +109,8 @@ Controller::depositToStrategies(uint256 _startIndex, uint256 _endIndex, uint256 
 │   ├── When amount and range are valid
 │   │   ├── It should transfer ETH to StrategyManager (via deposit with indices)
 │   │   ├── It should update controller balance (decrease)
-│   │   ├── It should emit DepositToStrategiesCompleted event (with requested amount)
+│   │   ├── It should emit DepositToStrategiesCompleted event (with requested and actual amounts)
+│   │   ├── It should return actualDeposited
 │   │   ├── It should call strategyManager.depositToStrategies(_startIndex, _endIndex, _amount)
 │   │   ├── It should deposit funds only to strategies in the specified range
 │   │   └── It should deposit funds proportionally based on safety levels within the range
@@ -125,7 +130,8 @@ Controller::depositToStrategy(address _strategy, uint256 _amount)
 │   ├── When amount is valid and StrategyManager balance is zero
 │   │   ├── It should transfer full _amount to StrategyManager
 │   │   ├── It should update controller balance (decrease)
-│   │   ├── It should emit DirectDepositCompleted event (with strategy and requested amount)
+│   │   ├── It should emit DirectDepositCompleted event (with strategy, requested, and actual amounts)
+│   │   ├── It should return actualDeposited
 │   │   ├── It should call strategyManager.depositToStrategy(_strategy, _amount)
 │   │   └── It should deposit funds to the specified strategy
 │   ├── When StrategyManager already holds ETH (top-up path)
@@ -148,7 +154,8 @@ Controller::withdrawFromStrategies(uint256 _amount)
 │   │   ├── It should call strategyManager.withdrawFromStrategies(_amount)
 │   │   ├── It should receive ETH from strategies (via controller receive function)
 │   │   ├── It should update controller balance (increase)
-│   │   ├── It should emit WithdrawalCompleted event (with requested amount)
+│   │   ├── It should emit WithdrawalCompleted event (with requested and actual amounts)
+│   │   ├── It should return actualWithdrawn
 │   │   └── It should withdraw funds proportionally from strategies based on withdrawal priorities
 │   ├── When contract is paused
 │   │   └── It should revert with EnforcedPause
@@ -167,7 +174,8 @@ Controller::withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint2
 │   │   ├── It should call strategyManager.withdrawFromStrategies(_startIndex, _endIndex, _amount)
 │   │   ├── It should receive ETH from strategies in the specified range (via controller receive function)
 │   │   ├── It should update controller balance (increase)
-│   │   ├── It should emit WithdrawalCompleted event (with requested amount)
+│   │   ├── It should emit WithdrawalCompleted event (with requested and actual amounts)
+│   │   ├── It should return actualWithdrawn
 │   │   ├── It should withdraw funds only from strategies in the specified range
 │   │   └── It should withdraw funds proportionally based on withdrawal priorities within the range
 │   ├── When contract is paused
@@ -185,7 +193,8 @@ Controller::withdrawFromStrategy(address _strategy, uint256 _amount)
 │   │   ├── It should call strategyManager.withdrawFromStrategy(_strategy, _amount)
 │   │   ├── It should receive ETH from strategy (via controller receive function)
 │   │   ├── It should update controller balance (increase)
-│   │   ├── It should emit DirectWithdrawalCompleted event (with strategy and requested amount)
+│   │   ├── It should emit DirectWithdrawalCompleted event (with strategy, requested, and actual amounts)
+│   │   ├── It should return actualWithdrawn
 │   │   └── It should withdraw funds from the specified strategy
 │   ├── When contract is paused
 │   │   └── It should revert with EnforcedPause
@@ -277,7 +286,8 @@ Controller::harvestPerformanceFeeFromStrategy(address _strategy)
 ├── Given caller has ADMIN_ROLE or KEEPER_ROLE
 │   ├── When contract is not paused
 │   │   ├── It should call strategyManager.harvestPerformanceFeeFromStrategy(_strategy)
-│   │   └── It should emit DirectPerformanceFeeHarvestCompleted
+│   │   ├── It should emit DirectPerformanceFeeHarvestCompleted
+│   │   └── It should return (eveAmount, feeETHEquivalent)
 │   └── When contract is paused
 │       └── It should revert with EnforcedPause
 └── Given caller has neither ADMIN_ROLE nor KEEPER_ROLE
@@ -287,7 +297,8 @@ Controller::harvestPerformanceFeeFromStrategies()
 ├── Given caller has ADMIN_ROLE or KEEPER_ROLE
 │   ├── When contract is not paused
 │   │   ├── It should call strategyManager.harvestPerformanceFeeFromStrategies()
-│   │   └── It should emit PerformanceFeeHarvestCompleted
+│   │   ├── It should emit PerformanceFeeHarvestCompleted
+│   │   └── It should return (eveAmount, feeETHEquivalent)
 │   └── When contract is paused
 │       └── It should revert with EnforcedPause
 └── Given caller has neither ADMIN_ROLE nor KEEPER_ROLE
@@ -297,7 +308,8 @@ Controller::harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _en
 ├── Given caller has ADMIN_ROLE or KEEPER_ROLE
 │   ├── When contract is not paused
 │   │   ├── It should call strategyManager.harvestPerformanceFeeFromStrategies(_startIndex, _endIndex)
-│   │   └── It should emit PerformanceFeeHarvestCompleted
+│   │   ├── It should emit PerformanceFeeHarvestCompleted
+│   │   └── It should return (eveAmount, feeETHEquivalent)
 │   └── When contract is paused
 │       └── It should revert with EnforcedPause
 └── Given caller has neither ADMIN_ROLE nor KEEPER_ROLE
