@@ -31,7 +31,8 @@ contract CREKeystoneMetadataTest is Test, CRETestUtils {
         assertGt(SEPOLIA_KEYSTONE_FORWARDER.code.length, 0, "Sepolia KeystoneForwarder missing code");
 
         // Local consumer accepts the documented 64-byte metadata layout.
-        Registry registry = new Registry(address(this));
+        // Designated admin must differ from the deployer (`RegistryAdminIsDeployer`).
+        Registry registry = new Registry(makeAddr("admin"));
         CREQueueExecutor executor = new CREQueueExecutor(
             address(registry), SEPOLIA_KEYSTONE_FORWARDER, TEST_CHAIN_SELECTOR, TEST_MAX_REPORT_AGE
         );
