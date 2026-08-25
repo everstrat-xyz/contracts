@@ -206,7 +206,9 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     }
 
     function test_AllowExecutorCaller_RejectsZeroAddress() public {
-        vm.expectRevert(abi.encodeWithSelector(IKeeperExecutorBase.KeeperExecutorUnauthorizedCaller.selector, address(0)));
+        vm.expectRevert(
+            abi.encodeWithSelector(IKeeperExecutorBase.KeeperExecutorUnauthorizedCaller.selector, address(0))
+        );
         executor.allowExecutorCaller(address(0));
     }
 

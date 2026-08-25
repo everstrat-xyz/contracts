@@ -124,7 +124,9 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
     }
 
     function test_AllowExecutorCaller_RejectsZeroAddress() public {
-        vm.expectRevert(abi.encodeWithSelector(IKeeperExecutorBase.KeeperExecutorUnauthorizedCaller.selector, address(0)));
+        vm.expectRevert(
+            abi.encodeWithSelector(IKeeperExecutorBase.KeeperExecutorUnauthorizedCaller.selector, address(0))
+        );
         executor.allowExecutorCaller(address(0));
     }
 
@@ -146,9 +148,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
         _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
-        _perform(
-            uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1))
-        );
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
 
         (IQueueKeeperExecutor.QueueAction action,,) = executor.queueUpkeepStatus();
         assertEq(uint8(action), uint8(IQueueKeeperExecutor.QueueAction.None));
@@ -198,9 +198,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
         _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
-        _perform(
-            uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1))
-        );
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
 
         assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
         assertGt(executor.nextLiveBatchIdToProcess(), batchId);
@@ -265,9 +263,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         );
 
         // Exact claim succeeds (pull-over-push: ETH lands in AMM claimableBalances)
-        _perform(
-            uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1))
-        );
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
         assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
         assertApproxEqAbs(amm.claimableBalances(user), EXIT_ETH, 1);
     }

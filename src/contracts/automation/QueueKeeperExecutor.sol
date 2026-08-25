@@ -108,12 +108,7 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
      * @notice Keeper execution entrypoint. Untrusted payload from an allowlisted
      *         automation caller; every claim re-validated against live state.
      */
-    function perform(uint8 action, bytes calldata params)
-        external
-        onlyExecutorCaller
-        whenNotPaused
-        nonReentrant
-    {
+    function perform(uint8 action, bytes calldata params) external onlyExecutorCaller whenNotPaused nonReentrant {
         _processReport(action, params);
     }
 
