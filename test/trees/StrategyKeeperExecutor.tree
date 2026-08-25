@@ -1,9 +1,9 @@
 Keeper auth / caller-allowlist / pause branches live in KeeperExecutorBase.tree.
 
 StrategyKeeperExecutor::constructor(address registry_)
-└── It should default policy knobs, lastSyncAt = block.timestamp, and version "2.0.0-gelato"
+└── It should default policy knobs, lastSyncAt = block.timestamp, and version "2.1.0-mimic"
 
-StrategyKeeperExecutor::perform(uint8 action) — called by the allowlisted Gelato proxy
+StrategyKeeperExecutor::perform(uint8 action) — called by the allowlisted automation account
 ├── Given action is Rebalance
 │   ├── It should rebalance when a strategy reports unhealthy
 │   └── It should revert with KeeperExecutorNoUpkeepNeeded when all strategies are healthy

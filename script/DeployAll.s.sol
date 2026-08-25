@@ -43,9 +43,9 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      `DeployUniCLStrat` — with `setAllowedAdapter` / `addStrategy` always scheduled on the
  *      48h admin timelock after this script.
  *
- *      Post-deployment: create the Gelato tasks (W2 Solidity Function via
- *      `checker()`, W1 Web3 Function), then `allowExecutorCaller(dedicatedMsgSender)`
- *      on each executor via ADMIN.
+ *      Post-deployment: deploy the Mimic functions (W2 checker relay, W1
+ *      queue-keeper), create their triggers, then
+ *      `allowExecutorCaller(smartAccount)` on each executor via ADMIN.
  */
 contract DeployAll is ProtocolDeployBase {
     struct DeploymentResult {
@@ -100,7 +100,7 @@ contract DeployAll is ProtocolDeployBase {
 
         // Keepers are a dedicated step: deploy executors, register on the Registry
         // address book, and grant KEEPER_ROLE. Executors start inert — perform is
-        // rejected until the Gelato dedicated msg.sender is ADMIN-allowlisted.
+        // rejected until the automation operator's smart account is ADMIN-allowlisted.
         KeeperExecutors memory executors = _deployKeeperExecutors(protocol.registry, true);
 
         Oracle(protocol.oracle).updateUsdFeedInfo(address(0), priceFeed, STALENESS_INTERVAL);
@@ -200,8 +200,8 @@ contract DeployAll is ProtocolDeployBase {
 
         console.log("ETH price feed:", priceFeed);
         console.log("All deployment checks passed");
-        console.log("Next steps: create the Gelato tasks (W2 Solidity Function checker,");
-        console.log("W1 Web3 Function), then allowExecutorCaller(dedicatedMsgSender).");
+        console.log("Next steps: deploy the Mimic functions (W2 checker relay,");
+        console.log("W1 queue-keeper), create triggers, then allowExecutorCaller(smartAccount).");
         console.log("KEEPER_ROLE is now held by the two keeper executors and nothing else.");
         console.log("A manual break-glass keeper is OPT-IN: see docs/FREEZE_RUNBOOK.md 0.1");
         console.log("before proposing that grant (risks, containment, signer policy).");

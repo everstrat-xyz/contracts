@@ -34,13 +34,13 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
     QueueKeeperExecutor public executor;
 
     address public admin;
-    address public gelatoProxy;
+    address public automationAccount;
     address public user;
     address public stranger;
 
     function setUp() public {
         admin = address(this);
-        gelatoProxy = makeAddr("gelatoDedicatedMsgSender");
+        automationAccount = makeAddr("mimicSmartAccount");
         user = makeAddr("user");
         stranger = makeAddr("stranger");
 
@@ -57,9 +57,9 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
 
         executor = new QueueKeeperExecutor(address(registry));
         registry.grantRole(Auth.KEEPER_ROLE, address(executor));
-        // Executors start inert; the Gelato task's dedicated msg.sender is bound
+        // Executors start inert; the automation operator's smart account is bound
         // after task creation (the address only exists then).
-        executor.allowExecutorCaller(gelatoProxy);
+        executor.allowExecutorCaller(automationAccount);
 
         vm.deal(user, BOOTSTRAP_DEPOSIT);
         vm.prank(user);
@@ -76,7 +76,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
     }
 
     function _perform(uint8 action, bytes memory params) internal {
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         executor.perform(action, params);
     }
 
@@ -89,7 +89,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
     function test_Perform_InertUntilCallerAllowed() public {
         QueueKeeperExecutor fresh = new QueueKeeperExecutor(address(registry));
         vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         fresh.perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(uint256(1)));
     }
 
@@ -114,12 +114,12 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
     }
 
     function test_RemoveExecutorCaller_RestoresInert() public {
-        executor.removeExecutorCaller(gelatoProxy);
+        executor.removeExecutorCaller(automationAccount);
         assertEq(executor.executorCallerCount(), 0);
-        assertTrue(!executor.isExecutorCaller(gelatoProxy));
+        assertTrue(!executor.isExecutorCaller(automationAccount));
 
         vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         executor.perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(uint256(1)));
     }
 
@@ -138,7 +138,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         executor.pause();
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         executor.perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
     }
 
@@ -155,7 +155,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
 
         (bool canExec, bytes memory execPayload) = executor.checker();
         assertTrue(!canExec);
-        // Not empty: Gelato expects a human-readable reason string when canExec=false.
+        // Not empty: the checker returns a human-readable reason string when canExec=false.
         assertTrue(execPayload.length > 0);
     }
 
@@ -169,7 +169,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
 
         // execPayload is the exact calldata for perform: submitting it as the
         // allowlisted proxy must price the batch.
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         (bool ok,) = address(executor).call(execPayload);
         assertTrue(ok);
         (bool canBeProcessed,,,,) = exitQueue.batchInfo(batchId);
@@ -219,7 +219,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         assertGt(executor.nextLiveBatchIdToProcess(), batchId);
         assertEq(executor.affordableRequests(batchId), 0);
 
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         vm.expectRevert(IQueueKeeperExecutor.KeeperExecutorNoUpkeepNeeded.selector);
         executor.perform(
             uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1))
@@ -256,7 +256,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         assertEq(count, 1);
 
         // Over-claim reverts
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         vm.expectRevert(IQueueKeeperExecutor.KeeperExecutorNoUpkeepNeeded.selector);
         executor.perform(
             uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(2))

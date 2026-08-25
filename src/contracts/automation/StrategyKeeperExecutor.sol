@@ -20,16 +20,18 @@ import {KeeperExecutorBase} from "./KeeperExecutorBase.sol";
 
 /**
  * @title StrategyKeeperExecutor
- * @notice Gelato keeper executor for strategy actions.
+ * @notice Keeper executor for strategy actions, driven by an external
+ *         automation network (Mimic).
  *
  * Priority order (unchanged from CLA): Rebalance → WithdrawShortfall →
  * ProvideExitLiquidity → DepositExcess → HarvestPerformanceFees → Sync.
  *
- * Gelato surface:
- *   - `checker()` — the on-chain resolver Gelato polls. W2 is a pure Solidity
- *     Function task: its decision logic was always pinned to these bounded
- *     helpers (mirrored off-chain for cross-checking), so the on-chain checker
- *     loses nothing versus an off-chain decider.
+ * Automation surface:
+ *   - `checker()` — the on-chain decision view. W2's off-chain function is a
+ *     thin relay: it reads this view through an oracle and forwards the
+ *     execPayload verbatim. The decision logic was always pinned to these
+ *     bounded helpers (mirrored off-chain for cross-checking), so keeping it
+ *     on-chain loses nothing versus an off-chain decider.
  *   - `perform(uint8)` — execution target; allowlisted caller only.
  *
  * performData never carries an amount — every ETH quantity is recomputed from
@@ -177,13 +179,14 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
     }
 
     function version() external pure returns (string memory) {
-        return "2.0.0-gelato";
+        return "2.1.0-mimic";
     }
 
-    // ============ Gelato surface ============
+    // ============ Automation surface ============
 
     /**
-     * @notice Gelato checker. execPayload is the full calldata for `perform`.
+     * @notice On-chain checker. execPayload is the full calldata for `perform`;
+     *         W2's off-chain function relays it verbatim.
      * @dev `None` yields canExec=false, never a perform call.
      */
     function checker() external view returns (bool canExec, bytes memory execPayload) {

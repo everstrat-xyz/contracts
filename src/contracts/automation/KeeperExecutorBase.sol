@@ -13,11 +13,12 @@ import {IKeeperExecutorBase} from "../../interfaces/automation/IKeeperExecutorBa
 
 /**
  * @title KeeperExecutorBase
- * @notice Gelato-driven keeper executor base for EverStrat.
+ * @notice Keeper executor base for EverStrat, driven by an external automation
+ *         network (Mimic).
  *
  * Auth: an explicit allowlist of executor callers, managed by Registry
- * ADMIN_ROLE. Gelato tasks execute through a dedicated msg.sender proxy that
- * is per task-creator and per chain, and is only known after the task exists —
+ * ADMIN_ROLE. Automation executors call perform() from a per-operator smart
+ * account whose address is only known after the automation task exists —
  * so the gate is admin-settable rather than constructor-immutable. Executors
  * start inert (zero allowed callers) and accept no work until one is allowed.
  *
@@ -31,7 +32,7 @@ abstract contract KeeperExecutorBase is IKeeperExecutorBase, RegistryClient, Pau
 
     // ============ State ============
 
-    /// @notice Allowed automation callers (Gelato dedicated msg.sender proxies)
+    /// @notice Allowed automation callers (Mimic smart accounts / relays)
     EnumerableSet.AddressSet private _executorCallers;
 
     // ============ Constructor ============

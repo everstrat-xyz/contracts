@@ -16,11 +16,12 @@ import {KeeperExecutorBase} from "./KeeperExecutorBase.sol";
 
 /**
  * @title QueueKeeperExecutor
- * @notice Gelato keeper executor for redemption-queue actions.
+ * @notice Keeper executor for redemption-queue actions, driven by an external
+ *         automation network (Mimic).
  *
- * Gelato surface:
- *   - `checker()` — on-chain resolver returning canExec + calldata for `perform`.
- *     Gas-bounded to MAX_BATCH_SCAN; the TypeScript function (W1) is the
+ * Automation surface:
+ *   - `checker()` — on-chain view returning canExec + calldata for `perform`.
+ *     Gas-bounded to MAX_BATCH_SCAN; the off-chain function (W1) is the
  *     deep-scan path and produces the same perform calldata.
  *   - `perform(uint8,bytes)` — execution target; allowlisted caller only.
  *
@@ -86,11 +87,12 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         emit BatchCursorAdvanced(cursor, _toBatchId);
     }
 
-    // ============ Gelato surface ============
+    // ============ Automation surface ============
 
     /**
-     * @notice Gelato checker. execPayload is the full calldata for `perform`,
-     *         so an on-chain-driven task and the TS function emit byte-identical calls.
+     * @notice On-chain checker. execPayload is the full calldata for `perform`,
+     *         so an automation function reading this view and the off-chain
+     *         deep-scan function emit byte-identical calls.
      * @dev `None` yields canExec=false, never a perform call.
      */
     function checker() external view returns (bool canExec, bytes memory execPayload) {
@@ -167,7 +169,7 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
     }
 
     function version() external pure returns (string memory) {
-        return "2.0.0-gelato";
+        return "2.1.0-mimic";
     }
 
     // ============ Processing ============

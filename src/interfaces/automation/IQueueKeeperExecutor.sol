@@ -5,7 +5,8 @@ import {IKeeperExecutorBase} from "./IKeeperExecutorBase.sol";
 
 /**
  * @title IQueueKeeperExecutor
- * @notice Gelato keeper executor for redemption-queue actions.
+ * @notice Keeper executor for redemption-queue actions, driven by an external
+ *         automation network.
  */
 interface IQueueKeeperExecutor is IKeeperExecutorBase {
     enum QueueAction {
@@ -47,7 +48,7 @@ interface IQueueKeeperExecutor is IKeeperExecutorBase {
      */
     function queueUpkeepStatus() external view returns (QueueAction action, uint256 batchId, uint256 count);
 
-    /// @notice Gelato Solidity Function resolver; execPayload targets `perform`
+    /// @notice On-chain checker; execPayload targets `perform`
     function checker() external view returns (bool canExec, bytes memory execPayload);
 
     /// @notice Keeper execution entrypoint (allowlisted caller; untrusted payload)

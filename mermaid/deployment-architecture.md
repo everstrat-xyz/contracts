@@ -30,7 +30,7 @@ graph TB
     UniCLStrat["UniCLStrat<br/>Static"]
 
     FinalizeDeployer["Finalize deployer ADMIN<br/>(always renounce)"]
-    BindTasks["Post-deploy: create Gelato tasks +<br/>allowExecutorCaller(dedicatedMsgSender)"]
+    BindTasks["Post-deploy: deploy Mimic functions, create triggers,<br/>allowExecutorCaller(smartAccount)"]
     AllowAdapter["Timelock: setAllowedAdapter"]
     PairedFeed["Timelock: paired Oracle feed +<br/>optional addSupportedERC20"]
     AddStrategy["Timelock:<br/>StrategyManager.addStrategy"]
@@ -95,7 +95,7 @@ graph TB
 | `DeployAMM.s.sol` | StrategyManager + AMM | `STRATEGY_MANAGER`, `AMM` | Initializes SM with `FeeConfig` (`DAO_TREASURY_ADDRESS`, `PERFORMANCE_FEE_BPS`); grants `MINTER_ROLE` to BOTH the AMM and the StrategyManager (deployer keeps ADMIN for later steps) |
 | `DeployWhitelist.s.sol` | Whitelist | `WHITELIST` | Requires `REGISTRY_ADDRESS`, `WHITELIST_SIGNER_ADDRESS` (explicit `address(0)` postpones invite-signer seeding); redeploys start empty |
 | `DeployAll.s.sol` | Full stack incl. Whitelist + both keeper executors | All keys + keeper keys | Grants protocol roles; `KEEPER_ROLE` only to keeper executors; initializes SM fee config; seeds Whitelist signer when non-zero; unconditionally renounces deployer admin |
-| `DeployKeeperExecutors.s.sol` | QueueKeeperExecutor + StrategyKeeperExecutor | `QUEUE_KEEPER_EXECUTOR`, `STRATEGY_KEEPER_EXECUTOR` | Requires `REGISTRY_ADDRESS`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE`; run before finalize; executors stay inert until `allowExecutorCaller(dedicatedMsgSender)` after Gelato task creation |
+| `DeployKeeperExecutors.s.sol` | QueueKeeperExecutor + StrategyKeeperExecutor | `QUEUE_KEEPER_EXECUTOR`, `STRATEGY_KEEPER_EXECUTOR` | Requires `REGISTRY_ADDRESS`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE`; run before finalize; executors stay inert until `allowExecutorCaller(smartAccount)` after the Mimic triggers are created |
 | `FinalizeProtocolDeploy.s.sol` | — | — | Unconditionally renounces deployer ADMIN (required final modular step; requires `TIMELOCK_ADDRESS`, `SECURITY_ADDRESS`); VERIFIES every critical grant (`SECURITY_ROLE` → security, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors) and every module registration including `WHITELIST`; reverts loudly on any skipped/mis-granted step |
 | `DeployUniCLStrat.s.sol` | UniCLStrat | — | Deploy-only after timelocked `setAllowedAdapter`. No `addStrategy` — schedule that on the admin timelock (with paired-token feed / optional `addSupportedERC20` typically in the allowlist batch) |
 
@@ -171,7 +171,7 @@ oracle.updateUsdFeedInfo(address(0), priceFeed, stalenessInterval);
 if (whitelistSigner != address(0)) whitelist.addSigner(whitelistSigner);
 registry.renounceRole(ADMIN_ROLE, deployer); // always — ADMIN ends held only by the timelock
 // UniCL adapter / strategy / setAllowedAdapter / addStrategy are NOT part of DeployAll
-// Then: create Gelato tasks and ADMIN calls allowExecutorCaller(dedicatedMsgSender)
+// Then: deploy Mimic functions, create triggers, ADMIN calls allowExecutorCaller(smartAccount)
 ```
 
 ### Option B: Modular (recommended order)
@@ -212,7 +212,7 @@ forge script script/DeployUniswapV3ConverterAdapter.s.sol:DeployUniswapV3Convert
 # 3) Deploy strategy bytecode (constructor requires adapter already allowed)
 forge script script/DeployUniCLStrat.s.sol:DeployUniCLStrat --broadcast
 # 4) Timelock: StrategyManager.addStrategy
-# Then: create Gelato tasks + allowExecutorCaller(dedicatedMsgSender) on each executor
+# Then: deploy Mimic functions + create triggers + allowExecutorCaller(smartAccount) on each executor
 ```
 
 Each partial script calls `_registerAndVerify` so the contract is live on Registry before the script finishes.

@@ -22,7 +22,7 @@ enforced on-chain.
 | **Security multisig** | holds `SECURITY_ROLE` on the Registry directly | none | `pause()` on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, Converter, and Registry; `Controller.emergencyExitToAMM()`; `StrategyManager.emergencyWithdrawToController()`; `UniCLStrat.emergencyExit()`; `StrategyManager.removeSupportedERC20()` (instant stale-feed / dust-NAV unfreeze; `addSupportedERC20` stays ADMIN-only); `CANCELLER_ROLE` on the admin timelock. **Cannot** unpause, configure, or upgrade. |
 | **ADMIN timelock** | 48h OpenZeppelin `TimelockController` holding `ADMIN_ROLE` on the Registry | 48h minimum | All configuration: Oracle feed/token setters, `unpause()` everywhere (including Converter), strategy add/remove, Registry contract registration and role management, all `set*` functions, UUPS upgrades, Converter adapter allowlist. ADMIN can also `pause()` (same gate as SECURITY). |
 | **DAO multisig** | `PROPOSER_ROLE` (and `CANCELLER_ROLE`) on the admin timelock | schedules ops | Holds **no direct protocol role**. Every ADMIN action below is: DAO proposes on the timelock → 48h elapses → anyone executes (executor is `address(0)`, open execution). |
-| **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `priceBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup `KEEPER_ROLE` is held by the two Gelato keeper executors (`QueueKeeperExecutor`, `StrategyKeeperExecutor`) and by nothing else; a manual break-glass multisig is an **optional, opt-in** additional holder — see §0.1 for the decision, risks, and policy. `StrategyKeeperExecutor` funds the AMM immediate-exit float via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
+| **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `priceBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup `KEEPER_ROLE` is held by the two Mimic-driven keeper executors (`QueueKeeperExecutor`, `StrategyKeeperExecutor`) and by nothing else; a manual break-glass multisig is an **optional, opt-in** additional holder — see §0.1 for the decision, risks, and policy. `StrategyKeeperExecutor` funds the AMM immediate-exit float via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
 | **Anyone** | — | none | `AMM.claim()`, `AMM.cancelRedemption()`, timelock execution after delay, Uniswap `pool.increaseObservationCardinalityNext()`. |
 
 Key asymmetries to remember under incident pressure:
@@ -52,8 +52,8 @@ holder is a deliberate, separately proposed governance action — never a
 deployment side effect. This section is the single source of truth for that
 decision; every other mention in the repo points here.
 
-**Why it exists as an option.** The Gelato tasks are a *liveness* dependency:
-if Gelato stops executing, or a task is misconfigured, or the executor caller
+**Why it exists as an option.** The Mimic functions are a *liveness* dependency:
+if Mimic stops executing, or a trigger is misconfigured, or the executor caller
 allowlist is emptied, every keeper path stops — `priceBatch()`,
 `processRequests()`, `provideExitLiquidity()`, strategy deposits/withdrawals and
 rebalances. The protocol keeps working for users on the paths that need no
@@ -113,7 +113,7 @@ execute.
 5. Monitored like an operator, not like a contract: alert on **any** transaction
    from the break-glass address (in steady state there should be none), and page
    on the keeper-failure selectors in §7.3.
-6. Reviewed at every governance cycle: if the Gelato tasks have been healthy,
+6. Reviewed at every governance cycle: if the Mimic functions have been healthy,
    the standing recommendation is to revoke and re-grant on demand, accepting the
    48h latency.
 
@@ -944,12 +944,12 @@ Do not page on moves with an obvious on-chain explanation:
 `ControllerInsufficientBalance()`, `EnforcedPause()` (OpenZeppelin).
 
 Keeper executors (`QueueKeeperExecutor` / `StrategyKeeperExecutor`) — these tell you *why* a
-Gelato execution bounced, which is the difference between a task bug and an outage:
+Mimic execution bounced, which is the difference between a trigger bug and an outage:
 
 | Selector | Reading |
 |---|---|
-| `KeeperExecutorUnauthorizedCaller(address)` | Something other than an allowlisted Gelato proxy called `perform` — **page**, this is an attempted forgery (or a misconfigured task using the wrong dedicated msg.sender) |
-| `KeeperExecutorNoAllowedCallers()` | The executor caller allowlist is empty. Expected before task binding; **page after** — every keeper path for this executor is down |
+| `KeeperExecutorUnauthorizedCaller(address)` | Something other than an allowlisted Mimic smart account called `perform` — **page**, this is an attempted forgery (or a misconfigured trigger using the wrong smart account) |
+| `KeeperExecutorNoAllowedCallers()` | The executor caller allowlist is empty. Expected before trigger binding; **page after** — every keeper path for this executor is down |
 | `EnforcedPause()` | The executor is paused (ADMIN or SECURITY) — deliberate kill switch, cross-reference governance logs |
 | `KeeperExecutorNoUpkeepNeeded()` | The payload's claim did not survive re-validation against live state. Normal at low rates (races between checker and perform); a sustained stream means the task's view has drifted |
 | `KeeperExecutorUnknownAction()` | Action byte outside the executor's enum — task/contract version mismatch |

@@ -11,7 +11,7 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
 
 /**
  * @title DeployKeeperExecutors
- * @notice Modular deploy step: deploys both Gelato keeper executors, registers them
+ * @notice Modular deploy step: deploys both keeper executors, registers them
  *         on the Registry address book, and optionally grants KEEPER_ROLE.
  *
  * @dev Shared implementation lives in {ProtocolDeployBase-_deployKeeperExecutors};
@@ -32,19 +32,19 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *          those grants have executed).
  *
  *      Post-deployment (per executor):
- *        1. Create the Gelato tasks:
- *           - W2: Solidity Function task with resolver = StrategyKeeperExecutor.checker
- *             (exec address = the executor itself).
- *           - W1: Web3 Function task running queue-keeper (exec address = the executor,
- *             perform calldata built by the function).
- *        2. Read each task's dedicated msg.sender (per chain) from the Gelato dashboard
- *           or `automate.getDedicatedMsgSender()`.
- *        3. Bind it: ADMIN `allowExecutorCaller(proxy)`. Executors are inert until
- *           this lands (perform reverts KeeperExecutorNoAllowedCallers).
- *        4. Fund the Gelato 1Balance / Gas Tank for executions.
+ *        1. Deploy the Mimic functions (see the keepers repo, mimic-functions/):
+ *           - W2: reads StrategyKeeperExecutor.checker() via oracle and relays
+ *             execPayload verbatim as an EvmCall intent.
+ *           - W1: queue-keeper deep-scan function building perform calldata
+ *             off-chain.
+ *        2. Create triggers (cron) for each function in the Mimic explorer;
+ *           note the operator's smart account address (per chain).
+ *        3. Bind it: ADMIN `allowExecutorCaller(smartAccount)`. Executors are
+ *           inert until this lands (perform reverts KeeperExecutorNoAllowedCallers).
+ *        4. Fund Mimic credits for executions.
  *        5. Before granting KEEPER_ROLE to anything new: set `strategyDepositCooldown` > 0.
  *
- *      SECURITY: never grant KEEPER_ROLE to Gelato infrastructure or a deployer EOA in
+ *      SECURITY: never grant KEEPER_ROLE to automation infrastructure or a deployer EOA in
  *      production. This script grants it to the two executor contracts and to nothing
  *      else. A manual break-glass keeper multisig is NOT deployed here and is NOT a
  *      default: it is an opt-in governance decision with its own timelocked proposal —

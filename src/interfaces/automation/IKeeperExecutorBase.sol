@@ -3,11 +3,12 @@ pragma solidity ^0.8.13;
 
 /**
  * @title IKeeperExecutorBase
- * @notice Shared interface for Gelato-driven keeper executors.
+ * @notice Shared interface for keeper executors driven by an external
+ *         automation network (Mimic).
  *
  * Auth model: an explicit, admin-managed allowlist of executor callers.
- * Gelato executes tasks through a dedicated msg.sender proxy per task creator
- * (per chain), and that address is only known after task creation — so the
+ * Automation executors call perform() from a per-operator smart account,
+ * and that address is only known after the automation task exists — so the
  * gate must be settable, not constructor-immutable. Executors remain
  * inert until at least one caller is allowed, preserving the unbound-inert
  * property of the previous report-driven receivers.
@@ -31,7 +32,7 @@ interface IKeeperExecutorBase {
 
     // ============ Admin ============
 
-    /// @notice Allows a Gelato dedicated msg.sender (or other approved automation caller)
+    /// @notice Allows a Mimic smart account (or other approved automation caller)
     function allowExecutorCaller(address _caller) external;
     /// @notice Removes a caller; removing the last one returns the executor to inert
     function removeExecutorCaller(address _caller) external;

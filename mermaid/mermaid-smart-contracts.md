@@ -22,8 +22,8 @@ graph TB
     SwapRouter["Uniswap V3<br/>Swap Router"]
     UniswapFactory["Uniswap V3<br/>Factory"]
     WETH["WETH<br/>Native Wrapper"]
-    CREDon["Gelato Network<br/>Ops (Web3 Functions<br/>+ Solidity Functions)"]
-    GelatoProxy["Gelato Dedicated<br/>msg.sender Proxies"]
+    MimicNetwork["Mimic Protocol<br/>(functions → intents →<br/>solvers → settlers)"]
+    MimicAccount["Mimic Smart Accounts<br/>(per-operator, allowlisted)"]
 
     %% Proxy Layer (Only for upgradeable contracts)
     ControllerProxy["Controller<br/>Proxy"]
@@ -62,7 +62,7 @@ graph TB
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
 
-    %% Automation Subsystem (Gelato)
+    %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
     IQueueKeeperExecutor["IQueueKeeperExecutor<br/>Interface"]
     IStrategyKeeperExecutor["IStrategyKeeperExecutor<br/>Interface"]
@@ -204,7 +204,7 @@ graph TB
     UniCLStrat -.->|"emergency weth.withdraw"| WETH
     UniCLStrat -.->|"NAV valuation"| OracleProxy
 
-    %% Automation Subsystem (Gelato)
+    %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
     IQueueKeeperExecutor --> IKeeperExecutorBase
     IStrategyKeeperExecutor --> IKeeperExecutorBase
@@ -220,8 +220,8 @@ graph TB
     StrategyKeeperExecutor --> ExitQueueLimits
     CREDon -.->|"polls checker() (Solidity Function)"| StrategyKeeperExecutor
     CREDon -.->|"TS Web3 Function: deep scan"| QueueKeeperExecutor
-    GelatoProxy -.->|"perform (only allowlisted caller)"| QueueKeeperExecutor
-    GelatoProxy -.->|"perform (only allowlisted caller)"| StrategyKeeperExecutor
+    MimicAccount -.->|"perform (only allowlisted caller)"| QueueKeeperExecutor
+    MimicAccount -.->|"perform (only allowlisted caller)"| StrategyKeeperExecutor
     QueueKeeperExecutor -.->|"priceBatch / processRequests (KEEPER_ROLE)"| ControllerProxy
     QueueKeeperExecutor -.->|"Reads batches"| ExitQueueProxy
     StrategyKeeperExecutor -.->|"deposit / withdraw / rebalance / sync / harvestFees / exitLiquidity (KEEPER_ROLE)"| ControllerProxy
@@ -261,7 +261,7 @@ graph TB
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
     class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,GelatoProxy external
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,MimicNetwork,MimicAccount external
     class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
     class Tests,Mocks,Helpers,Trees test
     class KeeperExecutorBase,QueueKeeperExecutor,StrategyKeeperExecutor static
@@ -477,11 +477,11 @@ graph TB
     Pause -.->|"freezes"| AMMCore
 ```
 
-#### **Gelato Keepers (Keeper Executors)**
-- **Purpose**: `QueueKeeperExecutor` and `StrategyKeeperExecutor` (static contracts, `src/contracts/automation/`) drive protocol keepers via Gelato — replacing retired Chainlink Automation / CRE (CRE was permissioned; Gelato is permissionless)
-- **Trust Chain**: `Gelato task (dedicated msg.sender proxy) → Keeper*Executor (KEEPER_ROLE) → Controller` — Gelato infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE` by deployment (an opt-in manual break-glass keeper is a separate governance decision — see `docs/FREEZE_RUNBOOK.md` §0.1)
-- **KeeperExecutorBase** (abstract mixin): RegistryClient + OZ Pausable + ReentrancyGuard. `perform` gated to an ADMIN-managed allowlist of executor callers (`allowExecutorCaller` / `removeExecutorCaller`, `EnumerableSet`), populated with each Gelato task's dedicated msg.sender after task creation. An empty allowlist makes the executor inert (`KeeperExecutorNoAllowedCallers`). `pause()` ADMIN or SECURITY, `unpause()` ADMIN
-- **Gelato surfaces**: `StrategyKeeperExecutor` is a Solidity Function task — Gelato polls `checker()`, which mirrors `strategyUpkeepStatus()` and returns the exact `perform` calldata. `QueueKeeperExecutor` additionally has a TypeScript Web3 Function (W1, `keepers/` repo) for the deep queue scan; it emits the same `perform` calldata as the on-chain `checker()`
+#### **Mimic Keepers (Keeper Executors)**
+- **Purpose**: `QueueKeeperExecutor` and `StrategyKeeperExecutor` (static contracts, `src/contracts/automation/`) drive protocol keepers via Mimic — replacing retired Chainlink CRE and Gelato automation (both sunset; Mimic is permissionless)
+- **Trust Chain**: `Mimic smart account → Keeper*Executor (KEEPER_ROLE) → Controller` — Mimic infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE` by deployment (an opt-in manual break-glass keeper is a separate governance decision — see `docs/FREEZE_RUNBOOK.md` §0.1)
+- **KeeperExecutorBase** (abstract mixin): RegistryClient + OZ Pausable + ReentrancyGuard. `perform` gated to an ADMIN-managed allowlist of executor callers (`allowExecutorCaller` / `removeExecutorCaller`, `EnumerableSet`), populated with the automation operator's smart account after the triggers are created. An empty allowlist makes the executor inert (`KeeperExecutorNoAllowedCallers`). `pause()` ADMIN or SECURITY, `unpause()` ADMIN
+- **Mimic surfaces**: W2 (`StrategyKeeperExecutor`) has a thin Mimic function that reads `checker()` via oracle and relays `execPayload` verbatim. W1 (`QueueKeeperExecutor`) has a Mimic function (keepers repo, `mimic-functions/queue-keeper`) performing the deep queue scan; it emits the same `perform` calldata as the on-chain `checker()`
 - **Untrusted payload**: the payload only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
 
 **`perform` guard pipeline** (order is the security argument — cheapest, most authoritative check first; every branch is a revert, never a silent no-op):
@@ -489,7 +489,7 @@ graph TB
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': { 'fontSize': '26px', 'primaryTextColor': '#000000'}, 'flowchart': {'nodeSpacing': 90, 'rankSpacing': 80, 'padding': 25}}}%%
 graph TB
-    Exec["Gelato proxy<br/>perform(action, params)"]
+    Exec["Mimic smart account<br/>perform(action, params)"]
 
     subgraph Template["Allowlist auth"]
         G1{"allowlist non-empty?"}
@@ -536,7 +536,7 @@ graph TB
   - **Cursor skippability rule**: a batch is skippable only if it is priced AND (fully settled OR past `MAX_BATCH_PROCESSING_TIME`, where users self-serve via `AMM.cancelRedemption` and `pullRequest` is forbidden). Unpriced batches — the current one and any future id — are never skipped, even when empty, since they can still receive requests. `ExitQueue.priceBatch` writes `canBeProcessed` and `pricedAt` together, so `canBeProcessed` alone is the "is priced" predicate
 - **StrategyKeeperExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the payload — recomputed at execution. `StrategyUpkeepPerformed` emits the Controller return (achieved ETH / harvest `feeETHEquivalent`) for deposit/withdraw/harvest; ProvideExitLiquidity emits the recomputed `topUp` (`sendValue` is all-or-nothing). A 0 actual is a successful no-op. DepositExcess capacity also requires `depositWeight > 0`. Status view: `strategyUpkeepStatus()`. Priced in-window batches cost `finalEvePrice`; expired contribute 0. The current **unpriced** batch is not counted (cancellable equity, matching `liveRedemptionOffsets`) so a queue-then-cancel cannot pull LP.
 - **Interfaces**: `src/interfaces/automation/` (`IKeeperExecutorBase`, `IQueueKeeperExecutor`, `IStrategyKeeperExecutor`)
-- **Deployment**: `script/DeployKeeperExecutors.s.sol` / `DeployAll` via `ProtocolDeployBase._deployKeeperExecutors` — requires `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → create Gelato tasks → `allowExecutorCaller(dedicatedMsgSender)` on each executor (ADMIN/timelock). Set `strategyDepositCooldown` > 0 before granting keeper roles to new addresses
+- **Deployment**: `script/DeployKeeperExecutors.s.sol` / `DeployAll` via `ProtocolDeployBase._deployKeeperExecutors` — requires `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → deploy Mimic functions + create triggers → `allowExecutorCaller(smartAccount)` on each executor (ADMIN/timelock). Set `strategyDepositCooldown` > 0 before granting keeper roles to new addresses
 
 #### **Testing Infrastructure**
 - **Unit Tests**: Individual contract testing with mocking (`test/unit/`)
@@ -574,8 +574,8 @@ graph TB
 | UniswapV3ConverterAdapter | ✅ Complete | Static/Immutable | Shared UniswapV3Path encoding/validation, exactInput/exactOutput swaps via SwapRouter (delegatecalled from Converter; exact-output paths reversed internally), TWAP + Chainlink quoting via Oracle.convert (flash-loan resistant, gross-amount deviation check) |
 | UniCLStrat | ✅ Complete | Static/Immutable Strategy | Uniswap V3 concentrated liquidity, TWAP NAV, Converter-delegated swaps with oracle-bounded quotes, exact-output WETH top-ups with balance fallback |
 | Oracle | ✅ Complete | Upgradeable | Price feeds, staleness checks, token management, direct token-to-token convert() cross-rate |
-| QueueKeeperExecutor | ✅ Complete | Static/Immutable | Gelato keeper for the redemption queue: affordable-prefix batch processing (expired batches → 0) + guarded batch pricing, allowlist-gated perform, untrusted payload re-validation; MAX_BATCH_SCAN aliased from ExitQueueLimits.MAX_LIVE_PRICED_BATCHES; on-chain checker + TS Web3 Function |
-| StrategyKeeperExecutor | ✅ Complete | Static/Immutable | Gelato keeper for strategies: rebalance / withdraw-shortfall / provide-exit-liquidity / deposit-excess / harvest / sync with on-chain recomputed amounts, allowlist-gated perform, on-chain checker |
+| QueueKeeperExecutor | ✅ Complete | Static/Immutable | Mimic-driven keeper for the redemption queue: affordable-prefix batch processing (expired batches → 0) + guarded batch pricing, allowlist-gated perform, untrusted payload re-validation; MAX_BATCH_SCAN aliased from ExitQueueLimits.MAX_LIVE_PRICED_BATCHES; on-chain checker + Mimic deep-scan function |
+| StrategyKeeperExecutor | ✅ Complete | Static/Immutable | Mimic-driven keeper for strategies: rebalance / withdraw-shortfall / provide-exit-liquidity / deposit-excess / harvest / sync with on-chain recomputed amounts, allowlist-gated perform, on-chain checker |
 | Testing | ✅ Complete | Comprehensive | Unit, integration, fuzzing, mocking |
 
 ## Future Architecture Overview
@@ -650,15 +650,15 @@ graph TB
     IRegistryClient["IRegistryClient<br/>Interface"]
     IUniswapV3ConverterAdapter["IUniswapV3ConverterAdapter<br/>Interface"]
     
-    %% Keeper Automation (Gelato)
+    %% Keeper Automation (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
     IQueueKeeperExecutor["IQueueKeeperExecutor<br/>Interface"]
     IStrategyKeeperExecutor["IStrategyKeeperExecutor<br/>Interface"]
     KeeperExecutorBase["KeeperExecutorBase<br/>Abstract Mixin"]
     QueueKeeperExecutor["QueueKeeperExecutor<br/>Static Contract"]
     StrategyKeeperExecutor["StrategyKeeperExecutor<br/>Static Contract"]
-    GelatoNetwork["Gelato<br/>Automation Network"]
-    GelatoProxy["Gelato Dedicated<br/>msg.sender Proxy"]
+    MimicNetwork["Mimic Protocol<br/>(functions → intents)"]
+    MimicAccount["Mimic Smart Account<br/>(allowlisted caller)"]
     
     %% Future Contracts
     Vault["Vault<br/>Implementation"]
@@ -800,7 +800,7 @@ graph TB
     ConverterProxy -.->|"Resolves peers & roles via"| Registry
     VaultProxy -.->|"Resolves peers & roles via"| Registry
 
-    %% Keeper Automation (Gelato)
+    %% Keeper Automation (Mimic)
     IQueueKeeperExecutor --> IKeeperExecutorBase
     IStrategyKeeperExecutor --> IKeeperExecutorBase
     KeeperExecutorBase --> IKeeperExecutorBase
@@ -814,10 +814,10 @@ graph TB
     StrategyKeeperExecutor --> IStrategyKeeperExecutor
     StrategyKeeperExecutor --> ControllerProxy
     StrategyKeeperExecutor --> StrategyManagerProxy
-    GelatoNetwork -->|"checker() polls / W3F ticks"| QueueKeeperExecutor
-    GelatoNetwork -->|"checker() polls"| StrategyKeeperExecutor
-    GelatoProxy -->|"perform() — allowlisted caller"| QueueKeeperExecutor
-    GelatoProxy -->|"perform() — allowlisted caller"| StrategyKeeperExecutor
+    MimicNetwork -->|"function ticks (deep scan)"| QueueKeeperExecutor
+    MimicNetwork -->|"function relays checker()"| StrategyKeeperExecutor
+    MimicAccount -->|"perform() — allowlisted caller"| QueueKeeperExecutor
+    MimicAccount -->|"perform() — allowlisted caller"| StrategyKeeperExecutor
 
     ConverterProxy --> Proxy
     ConverterProxy --> Converter
@@ -882,7 +882,7 @@ graph TB
     class IRegistry,IRegistryClient,IUniswapV3ConverterAdapter interface
     class IKeeperExecutorBase,IQueueKeeperExecutor,IStrategyKeeperExecutor interface
     class KeeperExecutorBase,QueueKeeperExecutor,StrategyKeeperExecutor static
-    class GelatoNetwork,GelatoProxy external
+    class MimicNetwork,MimicAccount external
 ```
 
 

@@ -1,9 +1,9 @@
 Keeper auth / caller-allowlist / pause branches live in KeeperExecutorBase.tree.
 
 QueueKeeperExecutor::constructor(address registry_)
-└── It should default policy knobs (minBatchAge, maxUsersPerUpkeep, GAS_INTENSIVE_ACTION_*) and version "2.0.0-gelato"
+└── It should default policy knobs (minBatchAge, maxUsersPerUpkeep, GAS_INTENSIVE_ACTION_*) and version "2.1.0-mimic"
 
-QueueKeeperExecutor::perform(uint8 action, bytes params) — called by the allowlisted Gelato proxy
+QueueKeeperExecutor::perform(uint8 action, bytes params) — called by the allowlisted automation account
 ├── Given action is PriceBatch
 │   ├── It should price the batch when it is mature and unpriced
 │   └── It should revert with KeeperExecutorNoUpkeepNeeded otherwise

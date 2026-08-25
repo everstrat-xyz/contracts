@@ -5,7 +5,8 @@ import {IKeeperExecutorBase} from "./IKeeperExecutorBase.sol";
 
 /**
  * @title IStrategyKeeperExecutor
- * @notice Gelato keeper executor for strategy actions.
+ * @notice Keeper executor for strategy actions, driven by an external
+ *         automation network.
  * @dev Amounts are never taken from performData — recomputed at execution time.
  *      `StrategyUpkeepPerformed.amount` is the Controller return (achieved) for
  *      deposit/withdraw/harvest; ProvideExitLiquidity emits the recomputed top-up
@@ -64,7 +65,7 @@ interface IStrategyKeeperExecutor is IKeeperExecutorBase {
      */
     function strategyUpkeepStatus() external view returns (StrategyAction action, uint256 amount);
 
-    /// @notice Gelato Solidity Function resolver; execPayload targets `perform`
+    /// @notice On-chain checker; execPayload targets `perform`
     function checker() external view returns (bool canExec, bytes memory execPayload);
 
     /// @notice Keeper execution entrypoint (allowlisted caller; no params by design)

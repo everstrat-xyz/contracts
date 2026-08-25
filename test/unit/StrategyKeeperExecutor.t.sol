@@ -24,7 +24,7 @@ import {ProtocolTestBase} from "../helpers/ProtocolTestBase.sol";
 
 /**
  * @title StrategyKeeperExecutorTest
- * @notice Unit tests for the Gelato strategy keeper executor (on-chain checker + perform).
+ * @notice Unit tests for the strategy keeper executor (on-chain checker + perform).
  */
 contract StrategyKeeperExecutorTest is ProtocolTestBase {
     uint256 public constant ETH_PRICE = 4000e8;
@@ -65,13 +65,13 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     MockStrategy public strategy;
 
     address public admin;
-    address public gelatoProxy;
+    address public automationAccount;
     address public user;
     address public outsider;
 
     function setUp() public {
         admin = address(this);
-        gelatoProxy = makeAddr("gelatoDedicatedMsgSender");
+        automationAccount = makeAddr("mimicSmartAccount");
         user = makeAddr("user");
         outsider = makeAddr("outsider");
 
@@ -101,9 +101,9 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         registry.grantRole(Auth.KEEPER_ROLE, address(queueExecutor));
         registry.grantRole(Auth.KEEPER_ROLE, address(executor));
 
-        // Executors start inert; the Gelato task's dedicated msg.sender is bound
+        // Executors start inert; the automation operator's smart account is bound
         // after task creation (the address only exists then).
-        executor.allowExecutorCaller(gelatoProxy);
+        executor.allowExecutorCaller(automationAccount);
 
         strategy = new MockStrategy("Mock Strategy", address(controller), address(strategyManager));
         strategyManager.addStrategy(address(strategy), DEPOSIT_WEIGHT, WITHDRAWAL_WEIGHT);
@@ -118,12 +118,12 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     // ============ Helpers ============
 
     function _perform(IStrategyKeeperExecutor.StrategyAction action) internal {
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         executor.perform(uint8(action));
     }
 
     function _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction action) internal {
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         vm.expectRevert(IStrategyKeeperExecutor.KeeperExecutorNoUpkeepNeeded.selector);
         executor.perform(uint8(action));
     }
@@ -169,13 +169,13 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         // Explicit deploy-time policy knobs — never defaulted to a non-zero value.
         assertEq(executor.controllerReserveETH(), 0);
         assertEq(executor.exitLiquidityTargetETH(), 0);
-        assertEq(executor.version(), "2.0.0-gelato");
+        assertEq(executor.version(), "2.1.0-mimic");
     }
 
     function test_Perform_InertUntilCallerAllowed() public {
         StrategyKeeperExecutor fresh = new StrategyKeeperExecutor(address(registry));
         vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         fresh.perform(uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
     }
 
@@ -197,11 +197,11 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     }
 
     function test_RemoveExecutorCaller_RestoresInert() public {
-        executor.removeExecutorCaller(gelatoProxy);
+        executor.removeExecutorCaller(automationAccount);
         vm.warp(block.timestamp + DEFAULT_SYNC_INTERVAL);
 
         vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
     }
 
@@ -219,7 +219,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         vm.warp(block.timestamp + DEFAULT_SYNC_INTERVAL);
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
     }
 
@@ -234,7 +234,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
 
         (bool canExec, bytes memory execPayload) = executor.checker();
         assertTrue(!canExec);
-        // Not empty: Gelato expects a human-readable reason string when canExec=false.
+        // Not empty: the checker returns a human-readable reason string when canExec=false.
         assertTrue(execPayload.length > 0);
     }
 
@@ -252,7 +252,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
 
         // execPayload is the exact calldata for perform: submitting it as the
         // allowlisted proxy must run the sync.
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         (bool ok,) = address(executor).call(execPayload);
         assertTrue(ok);
         assertEq(executor.lastSyncAt(), block.timestamp);
@@ -266,7 +266,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         assertEq(uint8(statusAction), uint8(IStrategyKeeperExecutor.StrategyAction.Rebalance));
         assertTrue(canExec);
 
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         (bool ok,) = address(executor).call(execPayload);
         assertTrue(ok);
         assertTrue(strategy.isHealthy());
@@ -275,7 +275,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     // ============ Unknown action ============
 
     function test_Perform_UnknownAction() public {
-        vm.prank(gelatoProxy);
+        vm.prank(automationAccount);
         vm.expectRevert(IStrategyKeeperExecutor.KeeperExecutorUnknownAction.selector);
         executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.None));
     }

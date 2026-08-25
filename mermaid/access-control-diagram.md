@@ -13,7 +13,7 @@ graph TB
     BreakGlass["Break-glass multisig<br/>OPT-IN, off by default<br/>(FREEZE_RUNBOOK §0.1)"]
     Security["Security multisig<br/>(SECURITY_ROLE)"]
     Deployer["Deployer<br/>(temporary ADMIN at init)"]
-    Gelato["Gelato dedicated msg.sender<br/>(no protocol role —<br/>allowlisted on executors)"]
+    Mimic["Mimic smart account<br/>(no protocol role —<br/>allowlisted on executors)"]
     
     Registry["Registry<br/>Static"]
     
@@ -31,8 +31,8 @@ graph TB
     BreakGlass -.->|"KEEPER_ROLE only if DAO opts in"| Registry
     Security --> Registry
     Deployer -.->|"renounce after deploy"| Registry
-    Gelato -.->|"perform only"| QueueKeeper
-    Gelato -.->|"perform only"| StrategyKeeper
+    Mimic -.->|"perform only"| QueueKeeper
+    Mimic -.->|"perform only"| StrategyKeeper
     
     Registry -.->|"MINTER_ROLE check"| EVE
     Registry -.->|"ADMIN / peer keys"| AMM
@@ -56,7 +56,7 @@ graph TB
     class BreakGlass optin
     class Registry hub
     class EVE,AMM,Controller,ExitQueue,StrategyManager,Oracle,UniCLStrat contract
-    class Gelato external
+    class Mimic external
 ```
 
 ## Access Control Matrix (via Registry)
@@ -86,7 +86,7 @@ graph TB
 | Role | Typical grantee | Purpose |
 |------|-----------------|----------|
 | `ADMIN_ROLE` | DAO | Register contracts, grant/revoke roles, Oracle feed configuration, pause/upgrade modules |
-| `KEEPER_ROLE` | QueueKeeperExecutor + StrategyKeeperExecutor. A manual break-glass multisig is **opt-in and off by default** — see [FREEZE_RUNBOOK §0.1](../docs/FREEZE_RUNBOOK.md) | Controller automation via Gelato-driven `perform` → recomputed keeper calls |
+| `KEEPER_ROLE` | QueueKeeperExecutor + StrategyKeeperExecutor. A manual break-glass multisig is **opt-in and off by default** — see [FREEZE_RUNBOOK §0.1](../docs/FREEZE_RUNBOOK.md) | Controller automation via Mimic-driven `perform` → recomputed keeper calls |
 | `SECURITY_ROLE` | Security multisig | Instant `pause()` everywhere (which is also the containment path for a compromised keeper — every Controller keeper function is `whenNotPaused`), emergency capital recovery, timelock `CANCELLER_ROLE`. Cannot unpause, configure, or upgrade |
 | `MINTER_ROLE` | AMM, StrategyManager | EVE mint/burn (AMM enter/exit; SM performance-fee harvest) |
 
