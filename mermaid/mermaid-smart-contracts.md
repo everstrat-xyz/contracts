@@ -650,6 +650,16 @@ graph TB
     IRegistryClient["IRegistryClient<br/>Interface"]
     IUniswapV3ConverterAdapter["IUniswapV3ConverterAdapter<br/>Interface"]
     
+    %% Keeper Automation (Gelato)
+    IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
+    IQueueKeeperExecutor["IQueueKeeperExecutor<br/>Interface"]
+    IStrategyKeeperExecutor["IStrategyKeeperExecutor<br/>Interface"]
+    KeeperExecutorBase["KeeperExecutorBase<br/>Abstract Mixin"]
+    QueueKeeperExecutor["QueueKeeperExecutor<br/>Static Contract"]
+    StrategyKeeperExecutor["StrategyKeeperExecutor<br/>Static Contract"]
+    GelatoNetwork["Gelato<br/>Automation Network"]
+    GelatoProxy["Gelato Dedicated<br/>msg.sender Proxy"]
+    
     %% Future Contracts
     Vault["Vault<br/>Implementation"]
     FutureStrategy["Strategy<br/>Static Contract"]
@@ -790,6 +800,25 @@ graph TB
     ConverterProxy -.->|"Resolves peers & roles via"| Registry
     VaultProxy -.->|"Resolves peers & roles via"| Registry
 
+    %% Keeper Automation (Gelato)
+    IQueueKeeperExecutor --> IKeeperExecutorBase
+    IStrategyKeeperExecutor --> IKeeperExecutorBase
+    KeeperExecutorBase --> IKeeperExecutorBase
+    KeeperExecutorBase --> RegistryClient
+    KeeperExecutorBase --> Pausable
+    KeeperExecutorBase --> AccessControl
+    QueueKeeperExecutor --> KeeperExecutorBase
+    QueueKeeperExecutor --> IQueueKeeperExecutor
+    QueueKeeperExecutor --> ExitQueueProxy
+    StrategyKeeperExecutor --> KeeperExecutorBase
+    StrategyKeeperExecutor --> IStrategyKeeperExecutor
+    StrategyKeeperExecutor --> ControllerProxy
+    StrategyKeeperExecutor --> StrategyManagerProxy
+    GelatoNetwork -->|"checker() polls / W3F ticks"| QueueKeeperExecutor
+    GelatoNetwork -->|"checker() polls"| StrategyKeeperExecutor
+    GelatoProxy -->|"perform() — allowlisted caller"| QueueKeeperExecutor
+    GelatoProxy -->|"perform() — allowlisted caller"| StrategyKeeperExecutor
+
     ConverterProxy --> Proxy
     ConverterProxy --> Converter
     ConverterProxy -.->|"Whitelists"| UniswapV3ConverterAdapter
@@ -851,6 +880,9 @@ graph TB
     class Vault,FutureStrategy,FutureDEXAdapter,IVault,VaultProxy future
     class Registry,RegistryClient,RegistryClientUpgradeable,RegistryClientBase static
     class IRegistry,IRegistryClient,IUniswapV3ConverterAdapter interface
+    class IKeeperExecutorBase,IQueueKeeperExecutor,IStrategyKeeperExecutor interface
+    class KeeperExecutorBase,QueueKeeperExecutor,StrategyKeeperExecutor static
+    class GelatoNetwork,GelatoProxy external
 ```
 
 
