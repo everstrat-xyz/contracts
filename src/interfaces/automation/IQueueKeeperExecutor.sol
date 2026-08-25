@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {ICREReceiverBase} from "./ICREReceiverBase.sol";
+import {IKeeperExecutorBase} from "./IKeeperExecutorBase.sol";
 
 /**
- * @title ICREQueueExecutor
- * @notice CRE receiver for redemption-queue keeper actions.
+ * @title IQueueKeeperExecutor
+ * @notice Gelato keeper executor for redemption-queue actions.
  */
-interface ICREQueueExecutor is ICREReceiverBase {
+interface IQueueKeeperExecutor is IKeeperExecutorBase {
     enum QueueAction {
         None,
         PriceBatch,
@@ -23,8 +23,8 @@ interface ICREQueueExecutor is ICREReceiverBase {
     error KeeperExecutorNoUpkeepNeeded();
     error KeeperExecutorUnknownAction();
     error KeeperExecutorInvalidConfig();
-    error CREQueueExecutorBatchCursorPrecedesCurrent();
-    error CREQueueExecutorBatchCursorPastCurrent();
+    error QueueKeeperExecutorBatchCursorPrecedesCurrent();
+    error QueueKeeperExecutorBatchCursorPastCurrent();
 
     /// @notice Gas-bounded scan width. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
     function MAX_BATCH_SCAN() external pure returns (uint256);
@@ -39,12 +39,19 @@ interface ICREQueueExecutor is ICREReceiverBase {
     function affordableRequests(uint256 _batchId) external view returns (uint256 count);
 
     /**
-     * @notice Fallback / cross-check view for CRE workflows (gas-bounded scan)
+     * @notice Fallback / cross-check view (gas-bounded scan). Also the decision
+     *         engine behind `checker()`.
      * @return action Recommended action
      * @return batchId Target batch (or advanced cursor for AdvanceCursor)
      * @return count Affordable user count for ProcessRequests; else 0
      */
     function queueUpkeepStatus() external view returns (QueueAction action, uint256 batchId, uint256 count);
+
+    /// @notice Gelato Solidity Function resolver; execPayload targets `perform`
+    function checker() external view returns (bool canExec, bytes memory execPayload);
+
+    /// @notice Keeper execution entrypoint (allowlisted caller; untrusted payload)
+    function perform(uint8 action, bytes calldata params) external;
 
     function setMinBatchAge(uint256 _minBatchAge) external;
     function setMaxUsersPerUpkeep(uint256 _maxUsersPerUpkeep) external;

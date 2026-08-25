@@ -13,36 +13,43 @@ import {IController} from "../../interfaces/IController.sol";
 import {IExitQueue} from "../../interfaces/IExitQueue.sol";
 import {IStrategy} from "../../interfaces/IStrategy.sol";
 import {IStrategyManager} from "../../interfaces/IStrategyManager.sol";
-import {ICREQueueExecutor} from "../../interfaces/automation/ICREQueueExecutor.sol";
-import {ICREStrategyExecutor} from "../../interfaces/automation/ICREStrategyExecutor.sol";
+import {IQueueKeeperExecutor} from "../../interfaces/automation/IQueueKeeperExecutor.sol";
+import {IStrategyKeeperExecutor} from "../../interfaces/automation/IStrategyKeeperExecutor.sol";
 
-import {CREReceiverBase} from "./CREReceiverBase.sol";
+import {KeeperExecutorBase} from "./KeeperExecutorBase.sol";
 
 /**
- * @title CREStrategyExecutor
- * @notice CRE / Keystone receiver for strategy keeper actions.
+ * @title StrategyKeeperExecutor
+ * @notice Gelato keeper executor for strategy actions.
  *
  * Priority order (unchanged from CLA): Rebalance → WithdrawShortfall →
  * ProvideExitLiquidity → DepositExcess → HarvestPerformanceFees → Sync.
  *
- * Report params are ignored for amounts — every ETH quantity is recomputed
- * from live Controller / StrategyManager / ExitQueue / AMM state.
- * `StrategyUpkeepPerformed` then emits the Controller return (ETH actually
- * moved / harvest `feeETHEquivalent`), which may be less than that estimate
- * on StrategyManager try/catch underfill. A 0 actual is a successful no-op.
- * ProvideExitLiquidity has no return (`sendValue` is all-or-nothing) — the
- * event uses the recomputed `topUp`.
+ * Gelato surface:
+ *   - `checker()` — the on-chain resolver Gelato polls. W2 is a pure Solidity
+ *     Function task: its decision logic was always pinned to these bounded
+ *     helpers (mirrored off-chain for cross-checking), so the on-chain checker
+ *     loses nothing versus an off-chain decider.
+ *   - `perform(uint8)` — execution target; allowlisted caller only.
+ *
+ * performData never carries an amount — every ETH quantity is recomputed from
+ * live Controller / StrategyManager / ExitQueue / AMM state.
+ * `StrategyUpkeepPerformed` emits the Controller return (ETH actually
+ * moved / harvest `feeETHEquivalent`), which may be less than the checker's
+ * estimate on StrategyManager try/catch underfill. A 0 actual is a successful
+ * no-op. ProvideExitLiquidity has no return (`sendValue` is all-or-nothing) —
+ * the event uses the recomputed `topUp`.
  *
  * Couples to the registered queue keeper via Registry `QUEUE_KEEPER_EXECUTOR`
  * and `nextLiveBatchIdToProcess()`.
  */
-contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
+contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
     using Math for uint256;
     using Auth for IRegistry;
 
     /// @dev Gas-bounded scan of priced batches. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
     ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
-    ///      desync the keeper. A DoS bound, not cadence — CRE `minBatchAge` vs
+    ///      desync the keeper. A DoS bound, not cadence — `minBatchAge` vs
     ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping batches.
     uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
     uint256 public constant MAX_USERS_COST_SCAN = 50;
@@ -62,9 +69,7 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
     uint256 public exitLiquidityTargetETH;
     uint256 public minExitLiquidityTopUpETH;
 
-    constructor(address registry_, address forwarder_, uint64 chainSelector_, uint64 maxReportAge_)
-        CREReceiverBase(registry_, forwarder_, chainSelector_, maxReportAge_)
-    {
+    constructor(address registry_) KeeperExecutorBase(registry_) {
         minDepositETH = _DEFAULT_MIN_DEPOSIT_ETH;
         minWithdrawETH = _DEFAULT_MIN_WITHDRAW_ETH;
         minHarvestETH = _DEFAULT_MIN_HARVEST_ETH;
@@ -116,6 +121,10 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
     // ============ Views ============
 
     function strategyUpkeepStatus() external view returns (StrategyAction action, uint256 amount) {
+        return _strategyUpkeepStatus();
+    }
+
+    function _strategyUpkeepStatus() internal view returns (StrategyAction action, uint256 amount) {
         if (paused()) return (StrategyAction.None, 0);
 
         IRegistry registry_ = registry();
@@ -168,12 +177,35 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
     }
 
     function version() external pure returns (string memory) {
-        return "1.0.0-cre";
+        return "2.0.0-gelato";
     }
 
-    // ============ CRE processing ============
+    // ============ Gelato surface ============
 
-    function _processReport(uint8 action, bytes memory /* params */ ) internal override {
+    /**
+     * @notice Gelato checker. execPayload is the full calldata for `perform`.
+     * @dev `None` yields canExec=false, never a perform call.
+     */
+    function checker() external view returns (bool canExec, bytes memory execPayload) {
+        (StrategyAction action,) = _strategyUpkeepStatus();
+        if (action == StrategyAction.None) {
+            return (false, bytes("no strategy upkeep needed"));
+        }
+        return (true, abi.encodeCall(this.perform, (uint8(action))));
+    }
+
+    /**
+     * @notice Keeper execution entrypoint. Untrusted action id from an
+     *         allowlisted automation caller; every amount is recomputed from
+     *         live state at execution time.
+     */
+    function perform(uint8 action) external onlyExecutorCaller whenNotPaused nonReentrant {
+        _processReport(action, "");
+    }
+
+    // ============ Processing ============
+
+    function _processReport(uint8 action, bytes memory /* params */ ) internal {
         StrategyAction strategyAction = StrategyAction(action);
 
         IRegistry registry_ = registry();
@@ -222,6 +254,7 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
             revert KeeperExecutorUnknownAction();
         }
     }
+
     // ============ Internal ============
 
     function _rebalanceNeeded(IStrategyManager _strategyManager) internal view returns (bool) {
@@ -292,7 +325,7 @@ contract CREStrategyExecutor is ICREStrategyExecutor, CREReceiverBase {
         IExitQueue queue = IExitQueue(_registry.exitQueue());
         uint256 currentBatchId = queue.currentBatchId();
 
-        uint256 cursor = ICREQueueExecutor(_registry.queueKeeperExecutor()).nextLiveBatchIdToProcess();
+        uint256 cursor = IQueueKeeperExecutor(_registry.queueKeeperExecutor()).nextLiveBatchIdToProcess();
 
         uint256 scanLimit = cursor + MAX_BATCH_SCAN;
         for (uint256 batchId = cursor; batchId < currentBatchId && batchId < scanLimit; batchId++) {

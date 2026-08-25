@@ -1,0 +1,24 @@
+KeeperExecutorBase::constructor(address registry_)
+└── It should initialize with no allowed executor callers (unbound-inert: perform reverts)
+
+KeeperExecutorBase::allowExecutorCaller(address _caller)
+├── Given caller is ADMIN_ROLE
+│   ├── It should add the caller and emit ExecutorCallerAllowed(_caller)
+│   └── Given _caller is address(0)
+│       └── It should revert with KeeperExecutorUnauthorizedCaller(address(0))
+└── Given caller lacks ADMIN_ROLE
+    └── It should revert with RegistryClientMissingRole(ADMIN_ROLE)
+
+KeeperExecutorBase::removeExecutorCaller(address _caller)
+├── Given caller is ADMIN_ROLE
+│   ├── It should remove the caller and emit ExecutorCallerRemoved(_caller)
+│   └── It should return the executor to the unbound-inert state when the set empties
+└── Given caller lacks ADMIN_ROLE
+    └── It should revert with RegistryClientMissingRole(ADMIN_ROLE)
+
+KeeperExecutorBase::isExecutorCaller(address) / executorCallerCount()
+└── It should reflect the allowlist (EnumerableSet semantics: no duplicates)
+
+KeeperExecutorBase::pause() / unpause()
+├── It should gate pause to ADMIN or SECURITY, unpause to ADMIN (inherited)
+└── It should make perform revert with EnforcedPause while paused

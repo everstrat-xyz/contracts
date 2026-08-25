@@ -10,29 +10,35 @@ import {ExitQueueLimits} from "../../libraries/ExitQueueLimits.sol";
 import {IRegistry} from "interfaces/IRegistry.sol";
 import {IController} from "../../interfaces/IController.sol";
 import {IExitQueue} from "../../interfaces/IExitQueue.sol";
-import {ICREQueueExecutor} from "../../interfaces/automation/ICREQueueExecutor.sol";
+import {IQueueKeeperExecutor} from "../../interfaces/automation/IQueueKeeperExecutor.sol";
 
-import {CREReceiverBase} from "./CREReceiverBase.sol";
+import {KeeperExecutorBase} from "./KeeperExecutorBase.sol";
 
 /**
- * @title CREQueueExecutor
- * @notice CRE / Keystone receiver for redemption-queue keeper actions.
+ * @title QueueKeeperExecutor
+ * @notice Gelato keeper executor for redemption-queue actions.
  *
- * The CRE workflow may scan the full queue off-chain; on-chain {queueUpkeepStatus}
- * remains the gas-bounded fallback / cross-check. Report params are hints — every
- * action is re-validated against live state before Controller calls.
+ * Gelato surface:
+ *   - `checker()` — on-chain resolver returning canExec + calldata for `perform`.
+ *     Gas-bounded to MAX_BATCH_SCAN; the TypeScript function (W1) is the
+ *     deep-scan path and produces the same perform calldata.
+ *   - `perform(uint8,bytes)` — execution target; allowlisted caller only.
  *
- * ProcessRequests params: `abi.encode(batchId, startIndex, endIndex)` —
- * `endIndex` is exclusive (matches Controller.processRequests).
- * PriceBatch / AdvanceCursor params: `abi.encode(batchId)`.
+ * performData is a hint — every action is re-validated against live state
+ * before Controller calls.
+ *
+ * Params (identical wire shapes to the previous executor generation):
+ *   PriceBatch      abi.encode(batchId)
+ *   ProcessRequests abi.encode(batchId, startIndex, endIndex) — endIndex exclusive
+ *   AdvanceCursor   abi.encode(batchId)
  */
-contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
+contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
     using Math for uint256;
     using Auth for IRegistry;
 
     /// @dev Gas-bounded fallback scan. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
     ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
-    ///      desync the keeper. A DoS bound, not cadence — CRE `minBatchAge` vs
+    ///      desync the keeper. A DoS bound, not cadence — `minBatchAge` vs
     ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping priced batches.
     uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
     uint256 public constant MIN_BATCH_AGE_UPPER_BOUND = 7 days;
@@ -46,9 +52,7 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     uint256 public maxUsersPerUpkeep;
     uint256 public nextBatchIdToProcess;
 
-    constructor(address registry_, address forwarder_, uint64 chainSelector_, uint64 maxReportAge_)
-        CREReceiverBase(registry_, forwarder_, chainSelector_, maxReportAge_)
-    {
+    constructor(address registry_) KeeperExecutorBase(registry_) {
         nextBatchIdToProcess = 1;
         maxUsersPerUpkeep = _DEFAULT_MAX_USERS_PER_UPKEEP;
         minBatchAge = _DEFAULT_MIN_BATCH_AGE;
@@ -75,16 +79,51 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     function advanceBatchCursor(uint256 _toBatchId) external onlyAuthRole(Auth.ADMIN_ROLE) {
         uint256 cursor = nextBatchIdToProcess;
         uint256 currentBatchId = IExitQueue(registry().exitQueue()).currentBatchId();
-        if (_toBatchId <= cursor) revert CREQueueExecutorBatchCursorPrecedesCurrent();
-        if (_toBatchId > currentBatchId) revert CREQueueExecutorBatchCursorPastCurrent();
+        if (_toBatchId <= cursor) revert QueueKeeperExecutorBatchCursorPrecedesCurrent();
+        if (_toBatchId > currentBatchId) revert QueueKeeperExecutorBatchCursorPastCurrent();
 
         nextBatchIdToProcess = _toBatchId;
         emit BatchCursorAdvanced(cursor, _toBatchId);
     }
 
+    // ============ Gelato surface ============
+
+    /**
+     * @notice Gelato checker. execPayload is the full calldata for `perform`,
+     *         so an on-chain-driven task and the TS function emit byte-identical calls.
+     * @dev `None` yields canExec=false, never a perform call.
+     */
+    function checker() external view returns (bool canExec, bytes memory execPayload) {
+        (QueueAction action, uint256 batchId, uint256 count) = _queueUpkeepStatus();
+        if (action == QueueAction.None) {
+            return (false, bytes("no queue upkeep needed"));
+        }
+        if (action == QueueAction.ProcessRequests) {
+            return (true, abi.encodeCall(this.perform, (uint8(action), abi.encode(batchId, uint256(0), count))));
+        }
+        return (true, abi.encodeCall(this.perform, (uint8(action), abi.encode(batchId))));
+    }
+
+    /**
+     * @notice Keeper execution entrypoint. Untrusted payload from an allowlisted
+     *         automation caller; every claim re-validated against live state.
+     */
+    function perform(uint8 action, bytes calldata params)
+        external
+        onlyExecutorCaller
+        whenNotPaused
+        nonReentrant
+    {
+        _processReport(action, params);
+    }
+
     // ============ Views ============
 
     function queueUpkeepStatus() external view returns (QueueAction action, uint256 batchId, uint256 count) {
+        return _queueUpkeepStatus();
+    }
+
+    function _queueUpkeepStatus() internal view returns (QueueAction action, uint256 batchId, uint256 count) {
         if (paused()) return (QueueAction.None, 0, 0);
 
         IRegistry registry_ = registry();
@@ -133,12 +172,12 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     }
 
     function version() external pure returns (string memory) {
-        return "1.0.0-cre";
+        return "2.0.0-gelato";
     }
 
-    // ============ CRE processing ============
+    // ============ Processing ============
 
-    function _processReport(uint8 action, bytes memory params) internal override {
+    function _processReport(uint8 action, bytes memory params) internal {
         QueueAction queueAction = QueueAction(action);
         IRegistry registry_ = registry();
         IController controller = IController(registry_.controller());
@@ -158,7 +197,7 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
             if (endIndex <= startIndex) revert KeeperExecutorNoUpkeepNeeded();
 
             // Re-validate: claimed range must be a prefix of the affordable set
-            // starting at index 0 (workflows may claim a shorter prefix).
+            // starting at index 0 (the TS function may claim a shorter prefix).
             uint256 affordable = _affordableRequests(queue, address(controller), batchId);
             if (startIndex != 0 || endIndex > affordable) revert KeeperExecutorNoUpkeepNeeded();
 
@@ -189,11 +228,11 @@ contract CREQueueExecutor is ICREQueueExecutor, CREReceiverBase {
     /**
      * @notice Whether the cursor may advance past `_batchId` without work being lost.
      * @dev `ExitQueue.priceBatch` sets `canBeProcessed` and `pricedAt` in the same write, so
-     * `canBeProcessed` alone is the "is priced" predicate (`pricedAt == 0` is the same check
-     * and is therefore not repeated). The unpriced guard comes FIRST so the helper is correct
-     * for any `_batchId`, not just the `_batchId < currentBatchId` range the callers use: an
-     * unpriced batch — the current one, or any future id — is never skippable, even when it
-     * is still empty, because it can still receive requests and must be priced first.
+     *      `canBeProcessed` alone is the "is priced" predicate (`pricedAt == 0` is the same check
+     *      and is therefore not repeated). The unpriced guard comes FIRST so the helper is correct
+     *      for any `_batchId`, not just the `_batchId < currentBatchId` range the callers use: an
+     *      unpriced batch — the current one, or any future id — is never skippable, even when it
+     *      is still empty, because it can still receive requests and must be priced first.
      */
     function _isBatchSkippable(IExitQueue _queue, uint256 _batchId) internal view returns (bool) {
         (bool canBeProcessed,,,, uint256 pricedAt) = _queue.batchInfo(_batchId);

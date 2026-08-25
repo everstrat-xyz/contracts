@@ -22,10 +22,9 @@ graph TB
     SwapRouter["Uniswap V3<br/>Swap Router"]
     UniswapFactory["Uniswap V3<br/>Factory"]
     WETH["WETH<br/>Native Wrapper"]
-    CREDon["Chainlink CRE<br/>DON Workflows"]
-    KeystoneForwarder["KeystoneForwarder<br/>(Chainlink-managed)"]
-    IReceiver["IReceiver<br/>Interface"]
-    
+    CREDon["Gelato Network<br/>Ops (Web3 Functions<br/>+ Solidity Functions)"]
+    GelatoProxy["Gelato Dedicated<br/>msg.sender Proxies"]
+
     %% Proxy Layer (Only for upgradeable contracts)
     ControllerProxy["Controller<br/>Proxy"]
     ExitQueueProxy["ExitQueue<br/>Proxy"]
@@ -63,13 +62,13 @@ graph TB
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
 
-    %% Automation Subsystem
-    CREReceiverBase["CREReceiverBase<br/>Abstract Mixin"]
-    CREQueueExecutor["CREQueueExecutor<br/>Static Contract"]
-    CREStrategyExecutor["CREStrategyExecutor<br/>Static Contract"]
-    ICREReceiverBase["ICREReceiverBase<br/>Interface"]
-    ICREQueueExecutor["ICREQueueExecutor<br/>Interface"]
-    ICREStrategyExecutor["ICREStrategyExecutor<br/>Interface"]
+    %% Automation Subsystem (Gelato)
+    IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
+    IQueueKeeperExecutor["IQueueKeeperExecutor<br/>Interface"]
+    IStrategyKeeperExecutor["IStrategyKeeperExecutor<br/>Interface"]
+    KeeperExecutorBase["KeeperExecutorBase<br/>Abstract Mixin"]
+    QueueKeeperExecutor["QueueKeeperExecutor<br/>Static Contract"]
+    StrategyKeeperExecutor["StrategyKeeperExecutor<br/>Static Contract"]
     
     %% Registry Subsystem
     Registry["Registry<br/>Static Contract<br/>(Address Book + Roles)"]
@@ -205,33 +204,31 @@ graph TB
     UniCLStrat -.->|"emergency weth.withdraw"| WETH
     UniCLStrat -.->|"NAV valuation"| OracleProxy
 
-    %% Automation Subsystem (Chainlink CRE)
-    ICREReceiverBase --> IReceiver
-    ICREQueueExecutor --> ICREReceiverBase
-    ICREStrategyExecutor --> ICREReceiverBase
-    CREReceiverBase --> ICREReceiverBase
-    CREReceiverBase --> IReceiver
-    CREReceiverBase --> RegistryClient
-    CREReceiverBase --> Pausable
-    CREReceiverBase --> ReentrancyGuard
-    CREQueueExecutor --> CREReceiverBase
-    CREQueueExecutor --> ICREQueueExecutor
-    CREQueueExecutor --> ExitQueueLimits
-    CREStrategyExecutor --> CREReceiverBase
-    CREStrategyExecutor --> ICREStrategyExecutor
-    CREStrategyExecutor --> ExitQueueLimits
-    CREDon -.->|"runtime.report + writeReport"| KeystoneForwarder
-    KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREQueueExecutor
-    KeystoneForwarder -.->|"onReport (only FORWARDER)"| CREStrategyExecutor
-    CREDon -.->|"EVM read queueUpkeepStatus"| CREQueueExecutor
-    CREDon -.->|"EVM read strategyUpkeepStatus"| CREStrategyExecutor
-    CREQueueExecutor -.->|"priceBatch / processRequests (KEEPER_ROLE)"| ControllerProxy
-    CREQueueExecutor -.->|"Reads batches"| ExitQueueProxy
-    CREStrategyExecutor -.->|"deposit / withdraw / rebalance / sync / harvestFees / exitLiquidity (KEEPER_ROLE)"| ControllerProxy
-    CREStrategyExecutor -.->|"Reads strategies"| StrategyManagerProxy
-    CREStrategyExecutor -.->|"Reads nextLiveBatchIdToProcess cursor"| CREQueueExecutor
-    CREQueueExecutor -.->|"Resolves peers & roles via"| Registry
-    CREStrategyExecutor -.->|"Resolves peers & roles via"| Registry
+    %% Automation Subsystem (Gelato)
+    IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
+    IQueueKeeperExecutor --> IKeeperExecutorBase
+    IStrategyKeeperExecutor --> IKeeperExecutorBase
+    KeeperExecutorBase --> IKeeperExecutorBase
+    KeeperExecutorBase --> RegistryClient
+    KeeperExecutorBase --> Pausable
+    KeeperExecutorBase --> ReentrancyGuard
+    QueueKeeperExecutor --> KeeperExecutorBase
+    QueueKeeperExecutor --> IQueueKeeperExecutor
+    QueueKeeperExecutor --> ExitQueueLimits
+    StrategyKeeperExecutor --> KeeperExecutorBase
+    StrategyKeeperExecutor --> IStrategyKeeperExecutor
+    StrategyKeeperExecutor --> ExitQueueLimits
+    CREDon -.->|"polls checker() (Solidity Function)"| StrategyKeeperExecutor
+    CREDon -.->|"TS Web3 Function: deep scan"| QueueKeeperExecutor
+    GelatoProxy -.->|"perform (only allowlisted caller)"| QueueKeeperExecutor
+    GelatoProxy -.->|"perform (only allowlisted caller)"| StrategyKeeperExecutor
+    QueueKeeperExecutor -.->|"priceBatch / processRequests (KEEPER_ROLE)"| ControllerProxy
+    QueueKeeperExecutor -.->|"Reads batches"| ExitQueueProxy
+    StrategyKeeperExecutor -.->|"deposit / withdraw / rebalance / sync / harvestFees / exitLiquidity (KEEPER_ROLE)"| ControllerProxy
+    StrategyKeeperExecutor -.->|"Reads strategies"| StrategyManagerProxy
+    StrategyKeeperExecutor -.->|"Reads nextLiveBatchIdToProcess cursor"| QueueKeeperExecutor
+    QueueKeeperExecutor -.->|"Resolves peers & roles via"| Registry
+    StrategyKeeperExecutor -.->|"Resolves peers & roles via"| Registry
     
     OracleProxy --> Proxy
     OracleProxy --> Oracle
@@ -247,8 +244,8 @@ graph TB
     Tests --> ConverterProxy
     Tests --> UniswapV3ConverterAdapter
     Tests --> UniCLStrat
-    Tests --> CREQueueExecutor
-    Tests --> CREStrategyExecutor
+    Tests --> QueueKeeperExecutor
+    Tests --> StrategyKeeperExecutor
     Tests --> Mocks
     Tests --> Helpers
     Tests --> Trees
@@ -264,12 +261,12 @@ graph TB
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
     class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,KeystoneForwarder external
-    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory,IReceiver interface
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,CREDon,GelatoProxy external
+    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
     class Tests,Mocks,Helpers,Trees test
+    class KeeperExecutorBase,QueueKeeperExecutor,StrategyKeeperExecutor static
+    class IRegistry,IRegistryClient,IUniswapV3ConverterAdapter,IKeeperExecutorBase,IQueueKeeperExecutor,IStrategyKeeperExecutor interface
     class Registry,RegistryClient,RegistryClientUpgradeable,RegistryClientBase static
-    class CREReceiverBase,CREQueueExecutor,CREStrategyExecutor static
-    class IRegistry,IRegistryClient,IUniswapV3ConverterAdapter,ICREReceiverBase,ICREQueueExecutor,ICREStrategyExecutor interface
 ```
 
 ## Current Architecture Components
@@ -339,7 +336,7 @@ graph TB
 #### **ExitQueue** (Upgradeable)
 - **Purpose**: Manages queued redemption requests when AMM has insufficient liquidity
 - **Features**: Batch-based request management, slippage protection, pausable operations (`pushRequest`, `pullRequest`, and `priceBatch` gated by `whenNotPaused`; `closeRequest` works when paused for emergency withdrawals), **MAX_BATCH_PROCESSING_TIME** upper bound; implementation constructor calls `_disableInitializers()`
-- **Live share-price accounting**: Unpriced queued EVE is cancellable equity (`liveRedemptionOffsets()` = `(0, 0)`). After `priceBatch`, StrategyManager NAV deducts `liabilityETH` and AMM / fee-mint supply deducts `escrowedSupply` until pull, slippage close, or the 3-day window lapses in the view (no reset tx). `pullRequest` after expiry reverts `ExitQueueBatchExpired`. Scan window `[liveScanFromBatchId, currentBatchId)` (empty range: both equal, including at init). Cap `MAX_LIVE_PRICED_BATCHES = 25` from `ExitQueueLimits` (aliased by CRE `MAX_BATCH_SCAN`; DoS bound, not cadence). Do not use the CRE cursor for NAV.
+- **Live share-price accounting**: Unpriced queued EVE is cancellable equity (`liveRedemptionOffsets()` = `(0, 0)`). After `priceBatch`, StrategyManager NAV deducts `liabilityETH` and AMM / fee-mint supply deducts `escrowedSupply` until pull, slippage close, or the 3-day window lapses in the view (no reset tx). `pullRequest` after expiry reverts `ExitQueueBatchExpired`. Scan window `[liveScanFromBatchId, currentBatchId)` (empty range: both equal, including at init). Cap `MAX_LIVE_PRICED_BATCHES = 25` from `ExitQueueLimits` (aliased by keeper `MAX_BATCH_SCAN`; DoS bound, not cadence). Do not use the keeper cursor for NAV.
 - **batchInfo()** returns `canBeProcessed`, `finalEvePrice`, `totalTokensToBurn`, `createdAt`, and **`pricedAt`** (timestamp when the batch was priced; zero if not yet priced).
 - **requestCanBeClosed(batchId, user)** returns whether a user can close their request (true if batch not priced, or priced but past MAX_BATCH_PROCESSING_TIME; false if processed, not in batch, or within the processing window).
 - **Request Closure Restriction**: After a batch is priced (`canBeProcessed == true`), requests cannot be closed **within** MAX_BATCH_PROCESSING_TIME of `pricedAt`. Within that window they must be settled via `pullRequest()` (or wait out the window). This prevents users from gaming the system by canceling after seeing the final price.
@@ -480,63 +477,49 @@ graph TB
     Pause -.->|"freezes"| AMMCore
 ```
 
-#### **Chainlink CRE (Keeper Receivers)**
-- **Purpose**: `CREQueueExecutor` and `CREStrategyExecutor` (static contracts, `src/contracts/automation/`) drive protocol keepers via Chainlink Runtime Environment (CRE) — replacing retired Chainlink Automation
-- **Trust Chain**: `CRE DON workflows → KeystoneForwarder → CRE*Executor (KEEPER_ROLE) → Controller` — Chainlink infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE` by deployment (an opt-in manual break-glass keeper is a separate governance decision — see `docs/FREEZE_RUNBOOK.md` §0.1)
-- **CREReceiverBase** (abstract mixin): follows Chainlink `ReceiverTemplate` patterns — RegistryClient + OZ Pausable + ReentrancyGuard + `IReceiver` / ERC-165. `onReport` gated to immutable `FORWARDER`; workflow identity via `setExpectedAuthor` / `setExpectedWorkflowName` / `setExpectedWorkflowId` (ADMIN). Unbound receivers reject reports. Envelope adds `chainSelector` / `sequence` / `MAX_REPORT_AGE` replay guards. `pause()` ADMIN or SECURITY, `unpause()` ADMIN
-- **Timestamp guards are two distinct errors**: `CREReceiverFutureTimestamp()` when `observedAt > block.timestamp` (malformed report / workflow clock skew) and `CREReceiverStaleReport()` when the report is older than `MAX_REPORT_AGE` (delivery latency). Splitting them keeps the two failure modes separately alertable — see `docs/FREEZE_RUNBOOK.md` §7.3
-- **Untrusted report**: the Envelope only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
+#### **Gelato Keepers (Keeper Executors)**
+- **Purpose**: `QueueKeeperExecutor` and `StrategyKeeperExecutor` (static contracts, `src/contracts/automation/`) drive protocol keepers via Gelato — replacing retired Chainlink Automation / CRE (CRE was permissioned; Gelato is permissionless)
+- **Trust Chain**: `Gelato task (dedicated msg.sender proxy) → Keeper*Executor (KEEPER_ROLE) → Controller` — Gelato infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE` by deployment (an opt-in manual break-glass keeper is a separate governance decision — see `docs/FREEZE_RUNBOOK.md` §0.1)
+- **KeeperExecutorBase** (abstract mixin): RegistryClient + OZ Pausable + ReentrancyGuard. `perform` gated to an ADMIN-managed allowlist of executor callers (`allowExecutorCaller` / `removeExecutorCaller`, `EnumerableSet`), populated with each Gelato task's dedicated msg.sender after task creation. An empty allowlist makes the executor inert (`KeeperExecutorNoAllowedCallers`). `pause()` ADMIN or SECURITY, `unpause()` ADMIN
+- **Gelato surfaces**: `StrategyKeeperExecutor` is a Solidity Function task — Gelato polls `checker()`, which mirrors `strategyUpkeepStatus()` and returns the exact `perform` calldata. `QueueKeeperExecutor` additionally has a TypeScript Web3 Function (W1, `keepers/` repo) for the deep queue scan; it emits the same `perform` calldata as the on-chain `checker()`
+- **Untrusted payload**: the payload only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
 
-**`onReport` guard pipeline** (order is the security argument — cheapest, most authoritative check first; every branch is a revert, never a silent no-op):
+**`perform` guard pipeline** (order is the security argument — cheapest, most authoritative check first; every branch is a revert, never a silent no-op):
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': { 'fontSize': '26px', 'primaryTextColor': '#000000'}, 'flowchart': {'nodeSpacing': 90, 'rankSpacing': 80, 'padding': 25}}}%%
 graph TB
-    Report["KeystoneForwarder<br/>onReport(metadata, report)"]
+    Exec["Gelato proxy<br/>perform(action, params)"]
 
-    subgraph Template["ReceiverTemplate auth"]
-        G1{"msg.sender == FORWARDER?"}
-        G2{"workflow id / author / name<br/>match ADMIN binding?"}
-        G3{"receiver bound?<br/>(id or author set)"}
+    subgraph Template["Allowlist auth"]
+        G1{"allowlist non-empty?"}
+        G2{"msg.sender allowlisted?"}
     end
 
-    subgraph EnvelopeGuards["EverStrat Envelope guards"]
-        G4{"chainSelector == CHAIN_SELECTOR?"}
-        G5{"sequence > lastSequence?"}
-        G6{"observedAt <= block.timestamp?"}
-        G7{"age <= MAX_REPORT_AGE?"}
+    subgraph StateGuards["Liveness guards"]
+        G3{"executor not paused?"}
+        G4{"peer contracts not paused?"}
     end
 
-    Commit["lastSequence = sequence<br/>then _processReport(action, params)"]
     Revalidate{"live state still supports<br/>the claimed action?"}
     Execute["Controller keeper call<br/>amounts recomputed on-chain"]
 
-    E1["InvalidSender"]
-    E2["InvalidWorkflowId / InvalidAuthor /<br/>InvalidWorkflowName /<br/>WorkflowNameRequiresAuthorValidation"]
-    E3["CREReceiverWorkflowUnbound"]
-    E4["CREReceiverWrongChain"]
-    E5["CREReceiverReplayedSequence"]
-    E6["CREReceiverFutureTimestamp<br/>clock skew / malformed"]
-    E7["CREReceiverStaleReport<br/>delivery latency"]
-    E8["KeeperExecutorNoUpkeepNeeded"]
+    E1["KeeperExecutorNoAllowedCallers"]
+    E2["KeeperExecutorUnauthorizedCaller"]
+    E3["EnforcedPause"]
+    E4["KeeperExecutorNoUpkeepNeeded"]
+    E5["KeeperExecutorUnknownAction"]
 
-    Report --> G1
+    Exec --> G1
     G1 -->|no| E1
     G1 -->|yes| G2
     G2 -->|no| E2
     G2 -->|yes| G3
-    G3 -->|no| E3
-    G3 -->|yes| G4
-    G4 -->|no| E4
-    G4 -->|yes| G5
-    G5 -->|no| E5
-    G5 -->|yes| G6
-    G6 -->|no| E6
-    G6 -->|yes| G7
-    G7 -->|no| E7
-    G7 -->|yes| Commit
-    Commit --> Revalidate
-    Revalidate -->|no| E8
+    G3 -->|paused| E3
+    G3 -->|not paused| G4
+    G4 -->|paused| E4
+    G4 -->|live| Revalidate
+    Revalidate -->|no| E4
     Revalidate -->|yes| Execute
 
     classDef entry fill:#D3D3D3,stroke:#696969,stroke-width:3px
@@ -544,26 +527,26 @@ graph TB
     classDef err fill:#FFB6C1,stroke:#DC143C,stroke-width:3px
     classDef ok fill:#90EE90,stroke:#006400,stroke-width:3px
 
-    class Report entry
-    class G1,G2,G3,G4,G5,G6,G7,Revalidate guard
-    class E1,E2,E3,E4,E5,E6,E7,E8 err
-    class Commit,Execute ok
+    class Exec entry
+    class G1,G2,G3,G4,Revalidate guard
+    class E1,E2,E3,E4,E5 err
+    class Execute ok
 ```
-- **CREQueueExecutor**: `queueUpkeepStatus()` is the gas-bounded fallback/cross-check (`MAX_BATCH_SCAN` aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`; DoS bound, not cadence). Actions: `ProcessRequests` (affordable prefix; report params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`. After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (`pullRequest` would revert `ExitQueueBatchExpired`). **Do not use the CRE cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`.
+- **QueueKeeperExecutor**: `queueUpkeepStatus()` is the gas-bounded on-chain scan (`MAX_BATCH_SCAN` aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`; DoS bound, not cadence) — the TS Web3 Function (W1) is the deep-scan path and produces the same `perform` calldata. Actions: `ProcessRequests` (affordable prefix; params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`. After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (`pullRequest` would revert `ExitQueueBatchExpired`). **Do not use the keeper cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`.
   - **Cursor skippability rule**: a batch is skippable only if it is priced AND (fully settled OR past `MAX_BATCH_PROCESSING_TIME`, where users self-serve via `AMM.cancelRedemption` and `pullRequest` is forbidden). Unpriced batches — the current one and any future id — are never skipped, even when empty, since they can still receive requests. `ExitQueue.priceBatch` writes `canBeProcessed` and `pricedAt` together, so `canBeProcessed` alone is the "is priced" predicate
-- **CREStrategyExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the report — recomputed at execution. `StrategyUpkeepPerformed` emits the Controller return (achieved ETH / harvest `feeETHEquivalent`) for deposit/withdraw/harvest; ProvideExitLiquidity emits the recomputed `topUp` (`sendValue` is all-or-nothing). A 0 actual is a successful no-op. DepositExcess capacity also requires `depositWeight > 0`. Status view: `strategyUpkeepStatus()`. Priced in-window batches cost `finalEvePrice`; expired contribute 0. The current **unpriced** batch is not counted (cancellable equity, matching `liveRedemptionOffsets`) so a queue-then-cancel cannot pull LP.
-- **Interfaces**: `src/interfaces/automation/` (`IReceiver`, `ICREReceiverBase`, `ICREQueueExecutor`, `ICREStrategyExecutor`)
-- **Deployment**: `script/DeployCREExecutors.s.sol` / `DeployAll` via `ProtocolDeployBase._deployCREExecutors` — requires `KEYSTONE_FORWARDER`, `CHAIN_SELECTOR`, `MAX_REPORT_AGE`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → bind workflow identity → enable `writeReport`. Set `strategyDepositCooldown` > 0 before granting keeper roles to new addresses
+- **StrategyKeeperExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the payload — recomputed at execution. `StrategyUpkeepPerformed` emits the Controller return (achieved ETH / harvest `feeETHEquivalent`) for deposit/withdraw/harvest; ProvideExitLiquidity emits the recomputed `topUp` (`sendValue` is all-or-nothing). A 0 actual is a successful no-op. DepositExcess capacity also requires `depositWeight > 0`. Status view: `strategyUpkeepStatus()`. Priced in-window batches cost `finalEvePrice`; expired contribute 0. The current **unpriced** batch is not counted (cancellable equity, matching `liveRedemptionOffsets`) so a queue-then-cancel cannot pull LP.
+- **Interfaces**: `src/interfaces/automation/` (`IKeeperExecutorBase`, `IQueueKeeperExecutor`, `IStrategyKeeperExecutor`)
+- **Deployment**: `script/DeployKeeperExecutors.s.sol` / `DeployAll` via `ProtocolDeployBase._deployKeeperExecutors` — requires `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE` → register `QUEUE_KEEPER_EXECUTOR` + `STRATEGY_KEEPER_EXECUTOR` → grant `KEEPER_ROLE` → create Gelato tasks → `allowExecutorCaller(dedicatedMsgSender)` on each executor (ADMIN/timelock). Set `strategyDepositCooldown` > 0 before granting keeper roles to new addresses
 
 #### **Testing Infrastructure**
 - **Unit Tests**: Individual contract testing with mocking (`test/unit/`)
-  - `AMM.t.sol`, `Controller.t.sol`, `EVE.t.sol`, `ExitQueue.t.sol`, `StrategyManager.t.sol`, `Oracle.t.sol`, `Converter.t.sol`, `UniCLStrat.t.sol`, `CREQueueExecutor.t.sol`, `CREStrategyExecutor.t.sol`; fork: `CREKeystoneMetadata.t.sol`
+  - `AMM.t.sol`, `Controller.t.sol`, `EVE.t.sol`, `ExitQueue.t.sol`, `StrategyManager.t.sol`, `Oracle.t.sol`, `Converter.t.sol`, `UniCLStrat.t.sol`, `QueueKeeperExecutor.t.sol`, `StrategyKeeperExecutor.t.sol`
 - **Integration Tests**: Cross-contract interaction testing (`test/integration/`)
   - `DeploymentTest.t.sol`, `ETHFlowTest.t.sol`, `UpgradeSimulation.t.sol`, `ConverterStrategyManagerIntegration.t.sol`
 - **Fuzzing**: Bounded input testing for edge cases (`test/fuzz/`)
   - `OracleFuzz.t.sol`, `UniCLStratFuzz.t.sol`, `ControllerFuzz.t.sol`
 - **Test Trees**: Bulloak tree files for systematic test organization (`test/trees/`)
-  - `AMM.tree`, `Controller.tree`, `EVE.tree`, `ExitQueue.tree`, `Oracle.tree`, `Converter.tree`, `StrategyManager.tree`, `UniCLStrat.tree`, `CREReceiverBase.tree` (shared `onReport` branches), `CREQueueExecutor.tree`, `CREStrategyExecutor.tree`
+  - `AMM.tree`, `Controller.tree`, `EVE.tree`, `ExitQueue.tree`, `Oracle.tree`, `Converter.tree`, `StrategyManager.tree`, `UniCLStrat.tree`, `KeeperExecutorBase.tree` (shared allowlist/pause branches), `QueueKeeperExecutor.tree`, `StrategyKeeperExecutor.tree`
 - **Mock Contracts**: `MockController`, `MockERC20`, `MockPriceFeed`, `MockStrategy`, `MockConverter`, `MockConverterAdapter`, `UniCLStratMocks`
 - **Helper Libraries**: `Halp` for systematic mocking
 - **Test Naming Conventions**:
@@ -591,8 +574,8 @@ graph TB
 | UniswapV3ConverterAdapter | ✅ Complete | Static/Immutable | Shared UniswapV3Path encoding/validation, exactInput/exactOutput swaps via SwapRouter (delegatecalled from Converter; exact-output paths reversed internally), TWAP + Chainlink quoting via Oracle.convert (flash-loan resistant, gross-amount deviation check) |
 | UniCLStrat | ✅ Complete | Static/Immutable Strategy | Uniswap V3 concentrated liquidity, TWAP NAV, Converter-delegated swaps with oracle-bounded quotes, exact-output WETH top-ups with balance fallback |
 | Oracle | ✅ Complete | Upgradeable | Price feeds, staleness checks, token management, direct token-to-token convert() cross-rate |
-| CREQueueExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for the redemption queue: affordable-prefix batch processing (expired batches → 0) + guarded batch pricing, Keystone-gated onReport, untrusted report re-validation; MAX_BATCH_SCAN aliased from ExitQueueLimits.MAX_LIVE_PRICED_BATCHES |
-| CREStrategyExecutor | ✅ Complete | Static/Immutable | Chainlink CRE for strategies: rebalance / withdraw-shortfall / provide-exit-liquidity / deposit-excess / harvest / sync with on-chain recomputed amounts, Keystone-gated onReport |
+| QueueKeeperExecutor | ✅ Complete | Static/Immutable | Gelato keeper for the redemption queue: affordable-prefix batch processing (expired batches → 0) + guarded batch pricing, allowlist-gated perform, untrusted payload re-validation; MAX_BATCH_SCAN aliased from ExitQueueLimits.MAX_LIVE_PRICED_BATCHES; on-chain checker + TS Web3 Function |
+| StrategyKeeperExecutor | ✅ Complete | Static/Immutable | Gelato keeper for strategies: rebalance / withdraw-shortfall / provide-exit-liquidity / deposit-excess / harvest / sync with on-chain recomputed amounts, allowlist-gated perform, on-chain checker |
 | Testing | ✅ Complete | Comprehensive | Unit, integration, fuzzing, mocking |
 
 ## Future Architecture Overview

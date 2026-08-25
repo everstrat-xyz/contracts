@@ -172,7 +172,7 @@ An upgradeable controller contract that orchestrates protocol operations, receiv
 - **Access:** `KEEPER_ROLE` and `ADMIN_ROLE` on Registry; resolves AMM, StrategyManager, ExitQueue, and EVE via `Auth`
 - **Keeper Functionality:** Deposit/withdraw/rebalance, redemption queue, `provideExitLiquidity`
 - **AMM / ExitQueue / StrategyManager:** Caller must be the registered `CONTROLLER` address on Registry for cross-contract ops
-- **Exit Liquidity:** KEEPER_ROLE can route Controller ETH to the AMM via `provideExitLiquidity()`; in the automated trust model the `CREStrategyExecutor` does this via its `ProvideExitLiquidity` action, which tops the AMM immediate-exit float up to `exitLiquidityTargetETH` (default `0` = disabled until admin-set, same pattern as `controllerReserveETH`) from idle Controller ETH above the reserve and pending redemption needs; ADMIN_ROLE can sweep all Controller ETH to the AMM via `emergencyExitToAMM()` during emergencies
+- **Exit Liquidity:** KEEPER_ROLE can route Controller ETH to the AMM via `provideExitLiquidity()`; in the automated trust model the `StrategyKeeperExecutor` does this via its `ProvideExitLiquidity` action, which tops the AMM immediate-exit float up to `exitLiquidityTargetETH` (default `0` = disabled until admin-set, same pattern as `controllerReserveETH`) from idle Controller ETH above the reserve and pending redemption needs; ADMIN_ROLE can sweep all Controller ETH to the AMM via `emergencyExitToAMM()` during emergencies
 - **Version Tracking:** Returns "1.0.0"
 - **Upgrade Safety:** Includes storage gaps to prevent storage collisions
 - **Security:** Only ADMIN_ROLE can authorize upgrades
@@ -224,7 +224,7 @@ Peers (AMM, StrategyManager, ExitQueue, EVE) are resolved via Registry at call t
 - `harvestPerformanceFeeFromStrategy(address _strategy)`: Harvests accrued performance fees for one strategy via StrategyManager; emits `DirectPerformanceFeeHarvestCompleted`
 - `harvestPerformanceFeeFromStrategies()`: Harvests all registered strategies in one EVE mint; emits `PerformanceFeeHarvestCompleted(0, strategyCount, …)`
 - `harvestPerformanceFeeFromStrategies(uint256 _startIndex, uint256 _endIndex)`: Paginated harvest with one EVE mint; emits `PerformanceFeeHarvestCompleted(startIndex, endIndex, …)`
-- `provideExitLiquidity(uint256 _amount)`: Sends ETH from Controller to the AMM to fund immediate redemptions; reverts with `ControllerInsufficientBalance` when `_amount > controller.balance`. Driven automatically by the `CREStrategyExecutor`'s `ProvideExitLiquidity` action (AMM float below `exitLiquidityTargetETH` → top up from idle Controller ETH, minimum top-up `minExitLiquidityTopUpETH`)
+- `provideExitLiquidity(uint256 _amount)`: Sends ETH from Controller to the AMM to fund immediate redemptions; reverts with `ControllerInsufficientBalance` when `_amount > controller.balance`. Driven automatically by the `StrategyKeeperExecutor`'s `ProvideExitLiquidity` action (AMM float below `exitLiquidityTargetETH` → top up from idle Controller ETH, minimum top-up `minExitLiquidityTopUpETH`)
 
 **Redemption Queue Operations:**
 - `priceBatch()`: Prices the current batch using AMM's live base EVE price (`eveBasePriceInETH()`, already net of previously priced in-window batches; this batch is still equity at the read), making it processable
@@ -274,8 +274,8 @@ An upgradeable contract that manages queued redemption requests, allowing users 
 - **Access:** `ADMIN_ROLE` on Registry for pause/unpause/upgrade
 - **Slippage Protection:** Price tolerance checks to protect users from unfavorable price movements
 - **Pausable:** Can be paused by ADMIN_ROLE or SECURITY_ROLE (`pushRequest`, `pullRequest`, and `priceBatch` are paused; `closeRequest` works when paused for emergency withdrawals)
-- **Live share-price offsets:** `liveRedemptionOffsets()` returns `(liabilityETH, escrowedSupply)` for in-window priced, unfinished batches. StrategyManager deducts liability from NAV; AMM and fee mint deduct escrowed supply. Unpriced requests and batches past `MAX_BATCH_PROCESSING_TIME` contribute `(0, 0)` — liability lapses on the clock with no reset tx. Scan window is `[liveScanFromBatchId, currentBatchId)` (equals `currentBatchId` when empty, including at init). Do not use the CRE batch cursor for NAV.
-- **Live-priced batch cap:** `MAX_LIVE_PRICED_BATCHES = 25` from `ExitQueueLimits` (aliased by ExitQueue and both CRE `MAX_BATCH_SCAN` constants). `priceBatch` reverts `ExitQueueTooManyLivePricedBatches` if the live-scan width would exceed it. A DoS / `enter()` gas bound, not a cadence target — CRE `minBatchAge` vs the 3-day window implies ~3 overlapping batches.
+- **Live share-price offsets:** `liveRedemptionOffsets()` returns `(liabilityETH, escrowedSupply)` for in-window priced, unfinished batches. StrategyManager deducts liability from NAV; AMM and fee mint deduct escrowed supply. Unpriced requests and batches past `MAX_BATCH_PROCESSING_TIME` contribute `(0, 0)` — liability lapses on the clock with no reset tx. Scan window is `[liveScanFromBatchId, currentBatchId)` (equals `currentBatchId` when empty, including at init). Do not use the keeper batch cursor for NAV.
+- **Live-priced batch cap:** `MAX_LIVE_PRICED_BATCHES = 25` from `ExitQueueLimits` (aliased by ExitQueue and both keeper `MAX_BATCH_SCAN` constants). `priceBatch` reverts `ExitQueueTooManyLivePricedBatches` if the live-scan width would exceed it. A DoS / `enter()` gas bound, not a cadence target — keeper `minBatchAge` vs the 3-day window implies ~3 overlapping batches.
 - **Version Tracking:** Returns "1.0.0"
 - **Upgrade Safety:** Includes storage gaps to prevent storage collisions
 
@@ -648,7 +648,7 @@ smart-contracts/
 │   └── libraries/
 │       ├── Math.sol              # Protocol-wide math (decimals, slippage)
 │       ├── Auth.sol              # Registry contract keys and role identifiers
-│       ├── ExitQueueLimits.sol   # Shared live-priced batch cap (ExitQueue + CRE scanners)
+│       ├── ExitQueueLimits.sol   # Shared live-priced batch cap (ExitQueue + keeper scanners)
 │       └── strategies/
 │           └── uni-cl-strategy/  # UniCL-only V3 math (TickMath, LiquidityAmounts, …)
 ├── test/                          # Test files
@@ -702,7 +702,7 @@ smart-contracts/
 │   ├── DeployOracle.s.sol
 │   ├── DeployConverter.s.sol
 │   ├── DeployUniswapV3ConverterAdapter.s.sol  # Optional UniCL path (not in DeployAll)
-│   ├── DeployCREExecutors.s.sol
+│   ├── DeployKeeperExecutors.s.sol
 │   ├── DeployUniCLStrat.s.sol
 │   └── FinalizeProtocolDeploy.s.sol
 ├── lib/                          # Dependencies
@@ -841,12 +841,9 @@ Registry-centric deployment is documented in [`mermaid/deployment-architecture.m
 | `DAO_TREASURY_ADDRESS` | `DeployAll`, `DeployAMM` | **Required.** Performance-fee EVE recipient |
 | `PERFORMANCE_FEE_BPS` | `DeployAll`, `DeployAMM` | **Required.** Initial fee rate in bps; `0` disables fees |
 | `TIMELOCK_ADMIN_DELAY` | `DeployRegistry`, `DeployAll` | Optional. Admin timelock min delay in seconds; defaults to 48h, rejects values below 48h (sole `envOr` exception) |
-| `EXIT_LIQUIDITY_TARGET_ETH` | `DeployAll`, `DeployCREExecutors` | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
-| `CONTROLLER_RESERVE_ETH` | `DeployAll`, `DeployCREExecutors` | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
-| `KEYSTONE_FORWARDER` | `DeployAll`, `DeployCREExecutors` | **Required.** Chainlink-managed KeystoneForwarder (immutable on CRE receivers) |
-| `CHAIN_SELECTOR` | `DeployAll`, `DeployCREExecutors` | **Required** (uint64). CCIP chain selector for the CRE Envelope |
-| `MAX_REPORT_AGE` | `DeployAll`, `DeployCREExecutors` | **Required** (uint64, > 0). Max Envelope `observedAt` age in seconds |
-| `GRANT_KEEPER_ROLE` | `DeployCREExecutors` | **Required** bool. `true` grants KEEPER_ROLE in-script; `false` defers to timelock |
+| `EXIT_LIQUIDITY_TARGET_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
+| `CONTROLLER_RESERVE_ETH` | `DeployAll`, `DeployKeeperExecutors` | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
+| `GRANT_KEEPER_ROLE` | `DeployKeeperExecutors` | **Required** bool. `true` grants KEEPER_ROLE in-script; `false` defers to timelock |
 | `PRICE_FEED` | `DeployAll`, `DeployOracle` | Chainlink ETH/USD feed — must be USD-quoted; scripts assert `description()` ends with `" / USD"` |
 | `WHITELIST_SIGNER_ADDRESS` | `DeployAll`, `DeployWhitelist` | **Required.** Initial invite-signer key; explicit `address(0)` postpones seeding |
 | `WETH_ADDRESS` | `DeployAll`, `DeployConverter`, … | **Required.** WETH |
@@ -865,16 +862,13 @@ export PERFORMANCE_FEE_BPS=0         # 0 = fees disabled
 # optional: export TIMELOCK_ADMIN_DELAY=172800  # defaults to 48h; values below 48h revert
 export EXIT_LIQUIDITY_TARGET_ETH=0   # wei; 0 = immediate exits disabled
 export CONTROLLER_RESERVE_ETH=0      # wei; 0 = no Controller float
-export KEYSTONE_FORWARDER=<keystone_forwarder>
-export CHAIN_SELECTOR=<ccip_chain_selector>
-export MAX_REPORT_AGE=<max_report_age_seconds>
 export WHITELIST_SIGNER_ADDRESS=<invite_signer_or_zero>
 export WETH_ADDRESS=<weth>
 
 forge script script/DeployAll.s.sol:DeployAll --rpc-url $RPC_URL --broadcast
 ```
 
-Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter, Whitelist, and AMM; registers all `Auth` (including `WHITELIST`); grants `KEEPER_ROLE`, `MINTER_ROLE` (AMM + StrategyManager), and `CONVERTER_CALLER_MANAGER_ROLE`; initializes StrategyManager with fee config; configures the ETH/USD feed; seeds the initial Whitelist invite signer when `WHITELIST_SIGNER_ADDRESS` is non-zero; applies CREStrategyExecutor policy knobs from required env; renounces the deployer's bootstrap Registry admin (ADMIN_ROLE ends held only by the admin timelock). **Core-only:** does not deploy DEX adapters or strategies (`DeployUniswapV3ConverterAdapter` / `DeployUniCLStrat` are modular follow-ups).
+Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter, Whitelist, AMM, and both keeper executors; registers all `Auth` (including `WHITELIST`); grants `KEEPER_ROLE`, `MINTER_ROLE` (AMM + StrategyManager), and `CONVERTER_CALLER_MANAGER_ROLE`; initializes StrategyManager with fee config; configures the ETH/USD feed; seeds the initial Whitelist invite signer when `WHITELIST_SIGNER_ADDRESS` is non-zero; applies StrategyKeeperExecutor policy knobs from required env; renounces the deployer's bootstrap Registry admin (ADMIN_ROLE ends held only by the admin timelock). Executors deploy **inert** — `allowExecutorCaller(gelatoDedicatedMsgSender)` is a separate post-task-creation step. **Core-only:** does not deploy DEX adapters or strategies (`DeployUniswapV3ConverterAdapter` / `DeployUniCLStrat` are modular follow-ups).
 
 ### Modular deployment order
 
@@ -883,13 +877,13 @@ Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter
 3. `DeployConverter.s.sol` — registers the Converter, grants `CONVERTER_CALLER_MANAGER_ROLE` (required by `StrategyManager.addStrategy`). Does **not** call `setAllowedAdapter`
 4. `DeployWhitelist.s.sol` — registers `WHITELIST`, optionally seeds `WHITELIST_SIGNER_ADDRESS` (required env; `address(0)` postpones seeding)
 5. `DeployAMM.s.sol` — registers StrategyManager + AMM, grants `MINTER_ROLE` to BOTH (deployer keeps ADMIN for remaining steps)
-6. `DeployCREExecutors.s.sol` — deploys CRE receivers with `KEYSTONE_FORWARDER` / `CHAIN_SELECTOR` / `MAX_REPORT_AGE`, registers both under `QUEUE_KEEPER_EXECUTOR` / `STRATEGY_KEEPER_EXECUTOR`, applies `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH`; required `GRANT_KEEPER_ROLE` (`true` grants in-script, `false` defers grants to the admin timelock before finalize)
+6. `DeployKeeperExecutors.s.sol` — deploys `QueueKeeperExecutor` and `StrategyKeeperExecutor`, registers both under `QUEUE_KEEPER_EXECUTOR` / `STRATEGY_KEEPER_EXECUTOR`, applies `EXIT_LIQUIDITY_TARGET_ETH` / `CONTROLLER_RESERVE_ETH`; required `GRANT_KEEPER_ROLE` (`true` grants in-script, `false` defers grants to the admin timelock before finalize). Executors stay inert until `allowExecutorCaller` is called with the Gelato task's dedicated msg.sender (post task creation; see `docs/GELATO_RUNBOOK.md`)
 7. `FinalizeProtocolDeploy.s.sol` — required final step; unconditionally renounces the deployer's bootstrap Registry ADMIN and VERIFIES every critical grant (`SECURITY_ROLE` → security, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors) and every module registration including `WHITELIST`, failing loudly on any skipped or mis-granted step
 8. Optional UniCL path (same after `DeployAll`):
    - `DeployUniswapV3ConverterAdapter.s.sol` — adapter bytecode only (needs Oracle; no ADMIN); export `SWAP_ADAPTER_ADDRESS`
    - Admin timelock: `Converter.setAllowedAdapter`, paired-token `Oracle.updateUsdFeedInfo`, optional `addSupportedERC20(pairedToken)`
    - `DeployUniCLStrat.s.sol` — strategy bytecode only (constructor requires the adapter already allowed); does **not** call `addStrategy`
-   - Admin timelock: `StrategyManager.addStrategy` — see `DeployUniCLStrat` NatSpec / `docs/STRATEGY_GUARDRAILS.md`
+   - Admin timelock: `StrategyManager.addStrategy` — see `DeployUniCLStrat` NatSpec / `docs/STRATEGY_GUARDRAILS.md`; pool selection and launch parameters are documented in [`docs/UNICL_STRATEGY_SETUP.md`](docs/UNICL_STRATEGY_SETUP.md)
 
 ```bash
 # After DeployRegistry: export REGISTRY_ADDRESS and TIMELOCK_ADDRESS from logs.
@@ -905,7 +899,7 @@ forge script script/DeployOracle.s.sol:DeployOracle --rpc-url $RPC_URL --broadca
 forge script script/DeployConverter.s.sol:DeployConverter --rpc-url $RPC_URL --broadcast
 forge script script/DeployWhitelist.s.sol:DeployWhitelist --rpc-url $RPC_URL --broadcast
 forge script script/DeployAMM.s.sol:DeployAMM --rpc-url $RPC_URL --broadcast
-forge script script/DeployCREExecutors.s.sol:DeployCREExecutors --rpc-url $RPC_URL --broadcast
+forge script script/DeployKeeperExecutors.s.sol:DeployKeeperExecutors --rpc-url $RPC_URL --broadcast
 forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-url $RPC_URL --broadcast
 # UniCL: DeployUniswapV3ConverterAdapter → timelock setAllowedAdapter (+ paired feed /
 # optional addSupportedERC20) → DeployUniCLStrat → timelock addStrategy
@@ -933,7 +927,7 @@ forge script script/FinalizeProtocolDeploy.s.sol:FinalizeProtocolDeploy --rpc-ur
 
 - **Registry ADMIN_ROLE**: Register contracts (`Auth`), grant/revoke roles, Oracle feed configuration, Whitelist invite-period admin, pause/upgrade modules
 - **SECURITY_ROLE** (on Registry): Instant pause / emergency unwind / `Whitelist.removeSigner`
-- **KEEPER_ROLE** (on Registry): Controller keeper automation. Deployment grants it to `CREQueueExecutor` and `CREStrategyExecutor` and to nothing else. A manual break-glass keeper multisig is **opt-in only** — its rationale, risk surface, containment path, and signer policy live in [`docs/FREEZE_RUNBOOK.md` §0.1](docs/FREEZE_RUNBOOK.md)
+- **KEEPER_ROLE** (on Registry): Controller keeper automation. Deployment grants it to `QueueKeeperExecutor` and `StrategyKeeperExecutor` and to nothing else. A manual break-glass keeper multisig is **opt-in only** — its rationale, risk surface, containment path, and signer policy live in [`docs/FREEZE_RUNBOOK.md` §0.1](docs/FREEZE_RUNBOOK.md)
 - **MINTER_ROLE** (on Registry): EVE mint/burn (granted to AMM)
 - **Registered callers**: ExitQueue accepts registered AMM/Controller; StrategyManager accepts registered Controller; AMM resolves registered `WHITELIST` for entry gating
 - **Deployer cleanup**: Registry constructor grants temporary ADMIN to deployer; always renounced via `FinalizeProtocolDeploy` or `DeployAll` so ADMIN_ROLE ends held only by the admin timelock
