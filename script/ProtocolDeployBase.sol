@@ -15,8 +15,8 @@ import {StrategyManager} from "../src/contracts/StrategyManager.sol";
 import {Oracle} from "../src/contracts/Oracle.sol";
 import {ExitQueue} from "../src/contracts/ExitQueue.sol";
 import {Whitelist} from "../src/contracts/Whitelist.sol";
-import {CREQueueExecutor} from "../src/contracts/automation/CREQueueExecutor.sol";
-import {CREStrategyExecutor} from "../src/contracts/automation/CREStrategyExecutor.sol";
+import {QueueKeeperExecutor} from "../src/contracts/automation/QueueKeeperExecutor.sol";
+import {StrategyKeeperExecutor} from "../src/contracts/automation/StrategyKeeperExecutor.sol";
 
 import {Auth} from "../src/libraries/Auth.sol";
 import {IStrategyManager} from "../src/interfaces/IStrategyManager.sol";
@@ -57,9 +57,9 @@ abstract contract ProtocolDeployBase is Script {
         TimelockController adminTimelock; // 48h — holds ADMIN_ROLE (incl. oracle feeds and UUPS upgrades)
     }
 
-    struct CREExecutors {
-        CREQueueExecutor queueExecutor;
-        CREStrategyExecutor strategyExecutor;
+    struct KeeperExecutors {
+        QueueKeeperExecutor queueExecutor;
+        StrategyKeeperExecutor strategyExecutor;
     }
 
     function _deployRegistry(address _admin) internal returns (Registry registry) {
@@ -298,19 +298,14 @@ abstract contract ProtocolDeployBase is Script {
     }
 
     /**
-     * @notice Deploys both CRE keeper executors, registers them on the Registry address
+     * @notice Deploys both keeper executors, registers them on the Registry address
      *         book, optionally grants them KEEPER_ROLE, and applies Strategy executor
      *         policy knobs from required env.
      * @dev In the automated trust model the executors are the ONLY KEEPER_ROLE holders —
-     *      Chainlink infrastructure never receives a protocol role. The KeystoneForwarder
-     *      is immutable at construction; workflow identity is bound afterward via ADMIN
-     *      `setExpectedAuthor` / `setExpectedWorkflowName` / `setExpectedWorkflowId`
-     *      (ReceiverTemplate setters; Registry ADMIN instead of Ownable).
-     *
-     *      Required CRE env:
-     *        - KEYSTONE_FORWARDER: Chainlink-managed KeystoneForwarder address
-     *        - CHAIN_SELECTOR: CCIP chain selector for this deployment (uint64)
-     *        - MAX_REPORT_AGE: max report age in seconds (uint64, must be > 0)
+     *      automation infrastructure never receives a protocol role. Executors start
+     *      inert (zero allowed executor callers); the Mimic smart account for each
+     *      trigger is bound afterward via ADMIN `allowExecutorCaller` (Registry
+     *      ADMIN instead of Ownable).
      *
      *      Policy knobs (`EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`) are REQUIRED
      *      env (wei) — `vm.envUint` reverts when unset. Zero is a valid explicit choice.
@@ -318,16 +313,12 @@ abstract contract ProtocolDeployBase is Script {
      * @param _grantKeeperRole Whether to grant KEEPER_ROLE to both executors (false in
      *        production when the grant must be scheduled through the 48h admin timelock)
      */
-    function _deployCREExecutors(Registry _registry, bool _grantKeeperRole)
+    function _deployKeeperExecutors(Registry _registry, bool _grantKeeperRole)
         internal
-        returns (CREExecutors memory executors)
+        returns (KeeperExecutors memory executors)
     {
-        address forwarder = vm.envAddress("KEYSTONE_FORWARDER");
-        uint64 chainSelector = uint64(vm.envUint("CHAIN_SELECTOR"));
-        uint64 maxReportAge = uint64(vm.envUint("MAX_REPORT_AGE"));
-
-        executors.queueExecutor = new CREQueueExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
-        executors.strategyExecutor = new CREStrategyExecutor(address(_registry), forwarder, chainSelector, maxReportAge);
+        executors.queueExecutor = new QueueKeeperExecutor(address(_registry));
+        executors.strategyExecutor = new StrategyKeeperExecutor(address(_registry));
 
         bytes32[] memory keys = new bytes32[](2);
         address[] memory addresses = new address[](2);
@@ -413,7 +404,7 @@ abstract contract ProtocolDeployBase is Script {
      * @notice Grants the tiered protocol roles: every privileged role goes to its
      *         timelock, never to an EOA/multisig directly. The security gets the
      *         (pause-only) SECURITY_ROLE. KEEPER_ROLE is granted separately to the
-     *         keeper executors via {_deployCREExecutors}. The deployer retains its
+     *         keeper executors via {_deployKeeperExecutors}. The deployer retains its
      *         bootstrap ADMIN_ROLE (from the Registry constructor) to register the
      *         initial Oracle feeds in the same deployment batch — renounced in
      *         {_finalizeDeployerTieredAccess}.
@@ -513,10 +504,10 @@ abstract contract ProtocolDeployBase is Script {
      *         wiring — see {_verifyTimelockWiring}). DeployAll verifies the same grants
      *         inline rather than calling this helper (no skipped-step surface to catch).
      * @dev Resolving each Registry key reverts when the module was never registered, so a
-     *      skipped modular step (e.g. DeployWhitelist, DeployConverter, or DeployCREExecutors)
+     *      skipped modular step (e.g. DeployWhitelist, DeployConverter, or DeployKeeperExecutors)
      *      fails here with a clear `RegistryContractNotRegistered` and the finalize script
      *      reverts (the ADMIN renounce does not land). KEEPER_ROLE is verified strictly: when
-     *      DeployCREExecutors runs with GRANT_KEEPER_ROLE=false the grants must land (via the
+     *      DeployKeeperExecutors runs with GRANT_KEEPER_ROLE=false the grants must land (via the
      *      admin timelock) BEFORE FinalizeProtocolDeploy runs.
      */
     function _verifyCriticalRoleGrants(Registry _registry, address _security) internal view {
@@ -539,9 +530,10 @@ abstract contract ProtocolDeployBase is Script {
             _registry.hasRole(Auth.CONVERTER_CALLER_MANAGER_ROLE, converter),
             "CRITICAL: Converter missing CONVERTER_CALLER_MANAGER_ROLE"
         );
-        require(_registry.hasRole(Auth.KEEPER_ROLE, queueExecutor), "CRITICAL: CREQueueExecutor missing KEEPER_ROLE");
+        require(_registry.hasRole(Auth.KEEPER_ROLE, queueExecutor), "CRITICAL: QueueKeeperExecutor missing KEEPER_ROLE");
         require(
-            _registry.hasRole(Auth.KEEPER_ROLE, strategyExecutor), "CRITICAL: CREStrategyExecutor missing KEEPER_ROLE"
+            _registry.hasRole(Auth.KEEPER_ROLE, strategyExecutor),
+            "CRITICAL: StrategyKeeperExecutor missing KEEPER_ROLE"
         );
     }
 
@@ -573,7 +565,7 @@ abstract contract ProtocolDeployBase is Script {
         );
     }
 
-    function _verifyCREExecutors(Registry _registry, CREExecutors memory _executors, bool _expectKeeperRole)
+    function _verifyKeeperExecutors(Registry _registry, KeeperExecutors memory _executors, bool _expectKeeperRole)
         internal
         view
     {
@@ -587,20 +579,20 @@ abstract contract ProtocolDeployBase is Script {
         );
         require(
             address(_executors.queueExecutor.registry()) == address(_registry),
-            "CRITICAL: CREQueueExecutor registry() mismatch"
+            "CRITICAL: QueueKeeperExecutor registry() mismatch"
         );
         require(
             address(_executors.strategyExecutor.registry()) == address(_registry),
-            "CRITICAL: CREStrategyExecutor registry() mismatch"
+            "CRITICAL: StrategyKeeperExecutor registry() mismatch"
         );
         if (_expectKeeperRole) {
             require(
                 _registry.hasRole(Auth.KEEPER_ROLE, address(_executors.queueExecutor)),
-                "CRITICAL: CREQueueExecutor missing KEEPER_ROLE"
+                "CRITICAL: QueueKeeperExecutor missing KEEPER_ROLE"
             );
             require(
                 _registry.hasRole(Auth.KEEPER_ROLE, address(_executors.strategyExecutor)),
-                "CRITICAL: CREStrategyExecutor missing KEEPER_ROLE"
+                "CRITICAL: StrategyKeeperExecutor missing KEEPER_ROLE"
             );
         }
 

@@ -13,7 +13,7 @@ import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
 
 import {AMM} from "../../src/contracts/AMM.sol";
 import {Converter} from "../../src/contracts/Converter.sol";
-import {CREStrategyExecutor} from "../../src/contracts/automation/CREStrategyExecutor.sol";
+import {StrategyKeeperExecutor} from "../../src/contracts/automation/StrategyKeeperExecutor.sol";
 import {Registry} from "registry/Registry.sol";
 import {IRegistry} from "interfaces/IRegistry.sol";
 
@@ -28,7 +28,7 @@ import {DeployEVE} from "../../script/DeployEVE.sol";
 import {DeployAMM} from "../../script/DeployAMM.s.sol";
 import {DeployConverter} from "../../script/DeployConverter.s.sol";
 import {DeployWhitelist} from "../../script/DeployWhitelist.s.sol";
-import {DeployCREExecutors} from "../../script/DeployCREExecutors.s.sol";
+import {DeployKeeperExecutors} from "../../script/DeployKeeperExecutors.s.sol";
 import {FinalizeProtocolDeploy} from "../../script/FinalizeProtocolDeploy.s.sol";
 
 /**
@@ -136,16 +136,12 @@ contract DeployScriptsTest is Test {
         // Explicit zero postpones invite-signer seeding (required env; never silently omitted).
         vm.setEnv("WHITELIST_SIGNER_ADDRESS", vm.toString(address(0)));
         vm.setEnv("PERFORMANCE_FEE_BPS", "0");
-        // Explicit CREStrategyExecutor policy knobs (wei) — required by deploy scripts;
+        // Explicit StrategyKeeperExecutor policy knobs (wei) — required by deploy scripts;
         // 0 is a valid bootstrap choice (immediate exits disabled / no Controller float).
         vm.setEnv("EXIT_LIQUIDITY_TARGET_ETH", "0");
         vm.setEnv("CONTROLLER_RESERVE_ETH", "0");
         vm.setEnv("TIMELOCK_ADMIN_DELAY", vm.toString(ADMIN_TIMELOCK_DELAY));
         vm.setEnv("GRANT_KEEPER_ROLE", "true");
-        // CRE / Keystone constructor immutables (Sepolia forwarder used as a stand-in).
-        vm.setEnv("KEYSTONE_FORWARDER", vm.toString(makeAddr("keystoneForwarder")));
-        vm.setEnv("CHAIN_SELECTOR", "16015286601757825753"); // Ethereum Sepolia
-        vm.setEnv("MAX_REPORT_AGE", "3600");
     }
 
     function test_DeployAll_RegistryAdminIsTimelockWithDaoProposer() public {
@@ -174,16 +170,17 @@ contract DeployScriptsTest is Test {
             "Converter missing CONVERTER_CALLER_MANAGER_ROLE"
         );
         assertTrue(
-            registry.hasRole(Auth.KEEPER_ROLE, result.queueKeeperExecutor), "CREQueueExecutor missing KEEPER_ROLE"
+            registry.hasRole(Auth.KEEPER_ROLE, result.queueKeeperExecutor), "QueueKeeperExecutor missing KEEPER_ROLE"
         );
         assertTrue(
-            registry.hasRole(Auth.KEEPER_ROLE, result.strategyKeeperExecutor), "CREStrategyExecutor missing KEEPER_ROLE"
+            registry.hasRole(Auth.KEEPER_ROLE, result.strategyKeeperExecutor),
+            "StrategyKeeperExecutor missing KEEPER_ROLE"
         );
         assertEq(registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR), result.queueKeeperExecutor);
         assertEq(registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR), result.strategyKeeperExecutor);
 
         // Policy knobs applied from required env (explicit 0 in setUp = bootstrap choice).
-        CREStrategyExecutor strategyExecutor = CREStrategyExecutor(result.strategyKeeperExecutor);
+        StrategyKeeperExecutor strategyExecutor = StrategyKeeperExecutor(result.strategyKeeperExecutor);
         assertEq(strategyExecutor.exitLiquidityTargetETH(), 0);
         assertEq(strategyExecutor.controllerReserveETH(), 0);
     }
@@ -214,7 +211,7 @@ contract DeployScriptsTest is Test {
         (address converterProxy,) = new DeployConverter().run();
         new DeployWhitelist().run();
         (address strategyManagerProxy,) = new DeployAMM().run();
-        (, CREStrategyExecutor strategyExecutor) = new DeployCREExecutors().run();
+        (, StrategyKeeperExecutor strategyExecutor) = new DeployKeeperExecutors().run();
         assertEq(strategyExecutor.exitLiquidityTargetETH(), 0);
         assertEq(strategyExecutor.controllerReserveETH(), 0);
 
@@ -239,11 +236,11 @@ contract DeployScriptsTest is Test {
         );
         assertTrue(
             registry.hasRole(Auth.KEEPER_ROLE, registry.getContractByKey(Auth.QUEUE_KEEPER_EXECUTOR)),
-            "CREQueueExecutor missing KEEPER_ROLE"
+            "QueueKeeperExecutor missing KEEPER_ROLE"
         );
         assertTrue(
             registry.hasRole(Auth.KEEPER_ROLE, registry.getContractByKey(Auth.STRATEGY_KEEPER_EXECUTOR)),
-            "CREStrategyExecutor missing KEEPER_ROLE"
+            "StrategyKeeperExecutor missing KEEPER_ROLE"
         );
         assertTrue(registry.getContractByKey(Auth.WHITELIST) != address(0), "WHITELIST not registered");
 
@@ -256,7 +253,7 @@ contract DeployScriptsTest is Test {
         _runCoreModuleSteps();
         new DeployWhitelist().run();
         new DeployAMM().run();
-        new DeployCREExecutors().run();
+        new DeployKeeperExecutors().run();
         // DeployConverter intentionally skipped.
 
         FinalizeProtocolDeploy finalize = new FinalizeProtocolDeploy();
@@ -269,21 +266,21 @@ contract DeployScriptsTest is Test {
         _runCoreModuleSteps();
         new DeployConverter().run();
         new DeployAMM().run();
-        new DeployCREExecutors().run();
+        new DeployKeeperExecutors().run();
         // DeployWhitelist intentionally skipped.
 
         finalize = new FinalizeProtocolDeploy();
         vm.expectRevert(abi.encodeWithSelector(IRegistry.RegistryContractNotRegistered.selector, Auth.WHITELIST));
         finalize.run();
 
-        // ============ A skipped DeployCREExecutors step fails finalization loudly ============
+        // ============ A skipped DeployKeeperExecutors step fails finalization loudly ============
         (registryAddress,) = _deployFreshRegistry();
         registry = Registry(registryAddress);
         _runCoreModuleSteps();
         new DeployConverter().run();
         new DeployWhitelist().run();
         new DeployAMM().run();
-        // DeployCREExecutors intentionally skipped.
+        // DeployKeeperExecutors intentionally skipped.
 
         finalize = new FinalizeProtocolDeploy();
         vm.expectRevert(
@@ -299,7 +296,7 @@ contract DeployScriptsTest is Test {
         new DeployConverter().run();
         new DeployWhitelist().run();
         (strategyManagerProxy,) = new DeployAMM().run();
-        new DeployCREExecutors().run();
+        new DeployKeeperExecutors().run();
 
         // Simulate the pre-fix modular flow: the deployer (still bootstrap ADMIN) revokes
         // the StrategyManager's MINTER_ROLE before finalizing.

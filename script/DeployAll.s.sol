@@ -18,7 +18,7 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *                                 feeds, unpause, UUPS upgrades — schedule upgrades with a
  *                                 longer delay by policy)
  *        - SECURITY_ROLE       -> security multisig (immediate pause + timelock canceller)
- *        - KEEPER_ROLE         -> CREQueueExecutor + CREStrategyExecutor only
+ *        - KEEPER_ROLE         -> QueueKeeperExecutor + StrategyKeeperExecutor only
  *        - DAO multisig        -> proposer/canceller on the timelock; NO direct roles
  *        - deployer            -> all bootstrap roles renounced
  *      During the run the deployer wires the protocol (contract registration, role grants,
@@ -29,7 +29,7 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      Env (required): PRIVATE_KEY, PRICE_FEED, WETH_ADDRESS, DAO_ADDRESS (non-zero — the
  *      sole timelock proposer; address(0) can never schedule), SECURITY_ADDRESS,
  *      DAO_TREASURY_ADDRESS, EXIT_LIQUIDITY_TARGET_ETH, CONTROLLER_RESERVE_ETH,
- *      WHITELIST_SIGNER_ADDRESS — critical addresses and CREStrategyExecutor policy knobs
+ *      WHITELIST_SIGNER_ADDRESS — critical addresses and StrategyKeeperExecutor policy knobs
  *      (wei) are never defaulted (in particular never to the deployer key / silent 0); a
  *      missing value reverts the deploy. Setting either policy knob to 0 is a valid explicit
  *      choice (immediate exits disabled / no Controller float). Set WHITELIST_SIGNER_ADDRESS
@@ -43,8 +43,9 @@ import {ProtocolDeployBase} from "./ProtocolDeployBase.sol";
  *      `DeployUniCLStrat` — with `setAllowedAdapter` / `addStrategy` always scheduled on the
  *      48h admin timelock after this script.
  *
- *      Post-deployment: bind CRE workflow identity on each executor
- *      (`setExpectedAuthor` / name / id), then enable workflow `writeReport`.
+ *      Post-deployment: deploy the Mimic functions (W2 checker relay, W1
+ *      queue-keeper), create their triggers, then
+ *      `allowExecutorCaller(smartAccount)` on each executor via ADMIN.
  */
 contract DeployAll is ProtocolDeployBase {
     struct DeploymentResult {
@@ -97,10 +98,10 @@ contract DeployAll is ProtocolDeployBase {
         _registerProtocolContracts(protocol.registry, protocol, true);
         _grantTieredProtocolRoles(protocol.registry, protocol, timelocks, security);
 
-        // Keepers are a dedicated step: deploy CRE receivers, register on the Registry
-        // address book, and grant KEEPER_ROLE. Executors reject reports until workflow
-        // identity is ADMIN-bound.
-        CREExecutors memory executors = _deployCREExecutors(protocol.registry, true);
+        // Keepers are a dedicated step: deploy executors, register on the Registry
+        // address book, and grant KEEPER_ROLE. Executors start inert — perform is
+        // rejected until the automation operator's smart account is ADMIN-allowlisted.
+        KeeperExecutors memory executors = _deployKeeperExecutors(protocol.registry, true);
 
         Oracle(protocol.oracle).updateUsdFeedInfo(address(0), priceFeed, STALENESS_INTERVAL);
 
@@ -126,7 +127,7 @@ contract DeployAll is ProtocolDeployBase {
     function _toDeploymentResult(
         ProtocolContracts memory _protocol,
         ProtocolTimelocks memory _timelocks,
-        CREExecutors memory _executors
+        KeeperExecutors memory _executors
     ) internal view returns (DeploymentResult memory result) {
         // The Registry is static (deployed directly, never behind an ERC1967 proxy), so it
         // has no implementation slot to read — see ProtocolDeployBase._deployRegistry().
@@ -153,7 +154,7 @@ contract DeployAll is ProtocolDeployBase {
         DeploymentResult memory result,
         ProtocolContracts memory protocol,
         ProtocolTimelocks memory timelocks,
-        CREExecutors memory executors,
+        KeeperExecutors memory executors,
         address deployer,
         address dao,
         address security,
@@ -170,13 +171,13 @@ contract DeployAll is ProtocolDeployBase {
         console.log("Converter proxy:", result.converterProxy);
         console.log("Whitelist:", result.whitelist);
         console.log("Admin timelock (48h):", result.adminTimelock);
-        console.log("CREQueueExecutor:", result.queueKeeperExecutor);
-        console.log("CREStrategyExecutor:", result.strategyKeeperExecutor);
+        console.log("QueueKeeperExecutor:", result.queueKeeperExecutor);
+        console.log("StrategyKeeperExecutor:", result.strategyKeeperExecutor);
 
         _verifyRegistryWiring(protocol.registry, protocol);
         _verifyModuleRegistryBackpointers(protocol, result.registryProxy);
         _verifyTimelockWiring(protocol.registry, timelocks, deployer, dao, security);
-        _verifyCREExecutors(protocol.registry, executors, true);
+        _verifyKeeperExecutors(protocol.registry, executors, true);
 
         // Protocol role grants (SECURITY is a direct multisig grant — not timelock wiring).
         // Modular Finalize uses _verifyCriticalRoleGrants for the full skipped-step surface;
@@ -199,9 +200,9 @@ contract DeployAll is ProtocolDeployBase {
 
         console.log("ETH price feed:", priceFeed);
         console.log("All deployment checks passed");
-        console.log("Next steps: bind CRE workflow identity on each executor,");
-        console.log("then enable writeReport.");
-        console.log("KEEPER_ROLE is now held by the two CRE executors and nothing else.");
+        console.log("Next steps: deploy the Mimic functions (W2 checker relay,");
+        console.log("W1 queue-keeper), create triggers, then allowExecutorCaller(smartAccount).");
+        console.log("KEEPER_ROLE is now held by the two keeper executors and nothing else.");
         console.log("A manual break-glass keeper is OPT-IN: see docs/FREEZE_RUNBOOK.md 0.1");
         console.log("before proposing that grant (risks, containment, signer policy).");
     }

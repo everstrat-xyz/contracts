@@ -9,7 +9,7 @@ graph TB
     Phase1["Phase 1<br/>Core modules<br/>(EVE, ExitQueue, Controller, Oracle)"]
     Phase2["Phase 2<br/>Converter"]
     Phase3["Phase 3<br/>Whitelist + AMM stack"]
-    Phase4["Phase 4<br/>CRE Keepers + Finalize<br/>(DeployCREExecutors)"]
+    Phase4["Phase 4<br/>Keeper Executors + Finalize<br/>(DeployKeeperExecutors)"]
     Phase5["Phase 5<br/>Adapter bytecode"]
     Phase6["Phase 6<br/>Timelock UniCL prep"]
     Phase7["Phase 7<br/>Strategy bytecode"]
@@ -24,13 +24,13 @@ graph TB
     StrategyManagerProxy["StrategyManager<br/>Proxy"]
     Whitelist["Whitelist<br/>Static"]
     AMM["AMM<br/>Static"]
-    CREQueue["CREQueueExecutor<br/>Static"]
-    CREStrategy["CREStrategyExecutor<br/>Static"]
+    QueueKeeper["QueueKeeperExecutor<br/>Static"]
+    StrategyKeeper["StrategyKeeperExecutor<br/>Static"]
     Adapter["UniswapV3ConverterAdapter<br/>Static"]
     UniCLStrat["UniCLStrat<br/>Static"]
 
     FinalizeDeployer["Finalize deployer ADMIN<br/>(always renounce)"]
-    BindWorkflow["Post-deploy: bind CRE<br/>workflow identity + writeReport"]
+    BindTasks["Post-deploy: deploy Mimic functions, create triggers,<br/>allowExecutorCaller(smartAccount)"]
     AllowAdapter["Timelock: setAllowedAdapter"]
     PairedFeed["Timelock: paired Oracle feed +<br/>optional addSupportedERC20"]
     AddStrategy["Timelock:<br/>StrategyManager.addStrategy"]
@@ -48,10 +48,10 @@ graph TB
     Phase3 --> StrategyManagerProxy
     Phase3 --> AMM
     Phase3 --> Phase4
-    Phase4 --> CREQueue
-    Phase4 --> CREStrategy
+    Phase4 --> QueueKeeper
+    Phase4 --> StrategyKeeper
     Phase4 --> FinalizeDeployer
-    Phase4 --> BindWorkflow
+    Phase4 --> BindTasks
     Phase4 --> Phase5
     Phase5 --> Adapter
     Phase5 --> Phase6
@@ -63,8 +63,8 @@ graph TB
     Phase8 --> AddStrategy
 
     FinalizeDeployer --> RegistryStatic
-    BindWorkflow --> CREQueue
-    BindWorkflow --> CREStrategy
+    BindTasks --> QueueKeeper
+    BindTasks --> StrategyKeeper
     AllowAdapter --> ConverterProxy
     PairedFeed --> OracleProxy
     PairedFeed --> StrategyManagerProxy
@@ -76,9 +76,9 @@ graph TB
     classDef setup fill:#F0E68C,stroke:#B8860B,stroke-width:4px
 
     class Phase0,Phase1,Phase2,Phase3,Phase4,Phase5,Phase6,Phase7,Phase8 phase
-    class RegistryStatic,EVE,AMM,Whitelist,CREQueue,CREStrategy,Adapter,UniCLStrat static
+    class RegistryStatic,EVE,AMM,Whitelist,QueueKeeper,StrategyKeeper,Adapter,UniCLStrat static
     class ExitQueueProxy,ControllerProxy,OracleProxy,ConverterProxy,StrategyManagerProxy proxy
-    class FinalizeDeployer,BindWorkflow,AllowAdapter,PairedFeed,AddStrategy setup
+    class FinalizeDeployer,BindTasks,AllowAdapter,PairedFeed,AddStrategy setup
 ```
 
 ## Deployment Scripts
@@ -94,8 +94,8 @@ graph TB
 | `DeployUniswapV3ConverterAdapter.s.sol` | UniswapV3ConverterAdapter | — | Deploy-only (needs Oracle on Registry). Not part of DeployAll. Export `SWAP_ADAPTER_ADDRESS`; whitelist via timelocked `setAllowedAdapter` before `DeployUniCLStrat` |
 | `DeployAMM.s.sol` | StrategyManager + AMM | `STRATEGY_MANAGER`, `AMM` | Initializes SM with `FeeConfig` (`DAO_TREASURY_ADDRESS`, `PERFORMANCE_FEE_BPS`); grants `MINTER_ROLE` to BOTH the AMM and the StrategyManager (deployer keeps ADMIN for later steps) |
 | `DeployWhitelist.s.sol` | Whitelist | `WHITELIST` | Requires `REGISTRY_ADDRESS`, `WHITELIST_SIGNER_ADDRESS` (explicit `address(0)` postpones invite-signer seeding); redeploys start empty |
-| `DeployAll.s.sol` | Full stack incl. Whitelist + both CRE keeper executors | All keys + keeper keys | Grants protocol roles; `KEEPER_ROLE` only to CRE executors; initializes SM fee config; seeds Whitelist signer when non-zero; unconditionally renounces deployer admin |
-| `DeployCREExecutors.s.sol` | CREQueueExecutor + CREStrategyExecutor | `QUEUE_KEEPER_EXECUTOR`, `STRATEGY_KEEPER_EXECUTOR` | Requires `REGISTRY_ADDRESS`, `KEYSTONE_FORWARDER`, `CHAIN_SELECTOR`, `MAX_REPORT_AGE`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE`; run before finalize; bind workflow identity after deploy |
+| `DeployAll.s.sol` | Full stack incl. Whitelist + both keeper executors | All keys + keeper keys | Grants protocol roles; `KEEPER_ROLE` only to keeper executors; initializes SM fee config; seeds Whitelist signer when non-zero; unconditionally renounces deployer admin |
+| `DeployKeeperExecutors.s.sol` | QueueKeeperExecutor + StrategyKeeperExecutor | `QUEUE_KEEPER_EXECUTOR`, `STRATEGY_KEEPER_EXECUTOR` | Requires `REGISTRY_ADDRESS`, `EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`, `GRANT_KEEPER_ROLE`; run before finalize; executors stay inert until `allowExecutorCaller(smartAccount)` after the Mimic triggers are created |
 | `FinalizeProtocolDeploy.s.sol` | — | — | Unconditionally renounces deployer ADMIN (required final modular step; requires `TIMELOCK_ADDRESS`, `SECURITY_ADDRESS`); VERIFIES every critical grant (`SECURITY_ROLE` → security, `MINTER_ROLE` → AMM + StrategyManager, `CONVERTER_CALLER_MANAGER_ROLE` → Converter, `KEEPER_ROLE` → both executors) and every module registration including `WHITELIST`; reverts loudly on any skipped/mis-granted step |
 | `DeployUniCLStrat.s.sol` | UniCLStrat | — | Deploy-only after timelocked `setAllowedAdapter`. No `addStrategy` — schedule that on the admin timelock (with paired-token feed / optional `addSupportedERC20` typically in the allowlist batch) |
 
@@ -119,13 +119,10 @@ where explicit zero postpones invite-signer seeding.
 | `SECURITY_ADDRESS` | DeployRegistry, DeployAll, FinalizeProtocolDeploy | **Required.** Security multisig — SECURITY_ROLE + timelock canceller |
 | `DAO_TREASURY_ADDRESS` | DeployAll, DeployAMM | **Required.** Performance-fee EVE recipient |
 | `PERFORMANCE_FEE_BPS` | DeployAll, DeployAMM | **Required.** Initial StrategyManager fee rate in bps; `0` disables fees |
-| `EXIT_LIQUIDITY_TARGET_ETH` | DeployAll, DeployCREExecutors | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
-| `CONTROLLER_RESERVE_ETH` | DeployAll, DeployCREExecutors | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
-| `KEYSTONE_FORWARDER` | DeployAll, DeployCREExecutors | **Required.** Chainlink-managed KeystoneForwarder (immutable `FORWARDER` on CRE receivers) |
-| `CHAIN_SELECTOR` | DeployAll, DeployCREExecutors | **Required** (uint64). CCIP chain selector baked into the CRE Envelope |
-| `MAX_REPORT_AGE` | DeployAll, DeployCREExecutors | **Required** (uint64, > 0). Max Envelope `observedAt` age in seconds |
+| `EXIT_LIQUIDITY_TARGET_ETH` | DeployAll, DeployKeeperExecutors | **Required** (wei). AMM free-balance target for ProvideExitLiquidity; `0` disables immediate exits |
+| `CONTROLLER_RESERVE_ETH` | DeployAll, DeployKeeperExecutors | **Required** (wei). ETH kept idle on the Controller; `0` means no reserve |
 | `TIMELOCK_ADMIN_DELAY` | DeployRegistry, DeployAll | Optional. Admin timelock min delay (seconds); defaults to 48h, rejects values below 48h — sole deploy-script `envOr` |
-| `REGISTRY_ADDRESS` | Partial deploy scripts, DeployCREExecutors | Existing Registry (logged by DeployRegistry) |
+| `REGISTRY_ADDRESS` | Partial deploy scripts, DeployKeeperExecutors | Existing Registry (logged by DeployRegistry) |
 | `TIMELOCK_ADDRESS` | DeployOracle, FinalizeProtocolDeploy | Existing admin timelock (logged by DeployRegistry) |
 | `PRICE_FEED` | DeployOracle, DeployAll | **Required.** Chainlink ETH/USD feed |
 | `WETH_ADDRESS` | DeployAll, DeployConverter, DeployUniswapV3ConverterAdapter | **Required.** WETH |
@@ -134,7 +131,7 @@ where explicit zero postpones invite-signer seeding.
 | `UNIV3_FACTORY` | DeployUniswapV3ConverterAdapter | Uniswap V3 Factory |
 | `ADAPTER_TWAP_INTERVAL` | DeployUniswapV3ConverterAdapter | Adapter quote TWAP window (seconds; ≥ 60) |
 | `WHITELIST_SIGNER_ADDRESS` | DeployAll, DeployWhitelist | **Required.** Initial invite-signer key; explicit `address(0)` postpones seeding (add later via timelocked `addSigner`) |
-| `GRANT_KEEPER_ROLE` | DeployCREExecutors | **Required** bool. Grant `KEEPER_ROLE` in-script (`true`) or defer to timelock (`false`) |
+| `GRANT_KEEPER_ROLE` | DeployKeeperExecutors | **Required** bool. Grant `KEEPER_ROLE` in-script (`true`) or defer to timelock (`false`) |
 
 ## Deployment Sequence
 
@@ -164,10 +161,9 @@ Whitelist whitelist = new Whitelist(address(registry));
 registry.registerContracts([CONTROLLER, AMM, STRATEGY_MANAGER, EXIT_QUEUE, ORACLE, EVE, CONVERTER, WHITELIST], [...]);
 registry.grantRoles([ADMIN, SECURITY, MINTER, MINTER, CONVERTER_CALLER_MANAGER], [adminTimelock, security, amm, strategyManager, converter]);
 
-// 4. Dedicated CRE keeper step (shared with DeployCREExecutors)
-// Requires KEYSTONE_FORWARDER + CHAIN_SELECTOR + MAX_REPORT_AGE
-(queueExecutor, strategyExecutor) = deployCREExecutors(registry);
-// registers QUEUE_KEEPER_EXECUTOR + STRATEGY_KEEPER_EXECUTOR, grants KEEPER_ROLE,
+// 4. Dedicated keeper step (shared with DeployKeeperExecutors)
+(queueExecutor, strategyExecutor) = deployKeeperExecutors(registry);
+// registers QUEUE_KEEPER_EXECUTOR + STRATEGY_KEEPER_EXECUTOR, optionally grants KEEPER_ROLE,
 // and applies EXIT_LIQUIDITY_TARGET_ETH / CONTROLLER_RESERVE_ETH (required wei env)
 
 // 5. Oracle ETH feed + optional Whitelist signer seed + deployer admin cleanup
@@ -175,7 +171,7 @@ oracle.updateUsdFeedInfo(address(0), priceFeed, stalenessInterval);
 if (whitelistSigner != address(0)) whitelist.addSigner(whitelistSigner);
 registry.renounceRole(ADMIN_ROLE, deployer); // always — ADMIN ends held only by the timelock
 // UniCL adapter / strategy / setAllowedAdapter / addStrategy are NOT part of DeployAll
-// Then: ADMIN binds workflow identity (setExpectedAuthor / Name / Id) and enables writeReport
+// Then: deploy Mimic functions, create triggers, ADMIN calls allowExecutorCaller(smartAccount)
 ```
 
 ### Option B: Modular (recommended order)
@@ -201,9 +197,8 @@ forge script script/DeployWhitelist.s.sol:DeployWhitelist --broadcast
 forge script script/DeployAMM.s.sol:DeployAMM --broadcast
 # DeployAMM no longer finalizes — the deployer keeps ADMIN for the steps below
 
-forge script script/DeployCREExecutors.s.sol:DeployCREExecutors --broadcast
-# Requires KEYSTONE_FORWARDER + CHAIN_SELECTOR + MAX_REPORT_AGE
-# + EXIT_LIQUIDITY_TARGET_ETH + CONTROLLER_RESERVE_ETH (wei) + GRANT_KEEPER_ROLE
+forge script script/DeployKeeperExecutors.s.sol:DeployKeeperExecutors --broadcast
+# Requires EXIT_LIQUIDITY_TARGET_ETH + CONTROLLER_RESERVE_ETH (wei) + GRANT_KEEPER_ROLE
 # (GRANT_KEEPER_ROLE=false → timelock grants before finalize)
 
 # FinalizeProtocolDeploy is the required final step (unconditional deployer renounce)
@@ -217,7 +212,7 @@ forge script script/DeployUniswapV3ConverterAdapter.s.sol:DeployUniswapV3Convert
 # 3) Deploy strategy bytecode (constructor requires adapter already allowed)
 forge script script/DeployUniCLStrat.s.sol:DeployUniCLStrat --broadcast
 # 4) Timelock: StrategyManager.addStrategy
-# Then: bind workflow identity on each executor
+# Then: deploy Mimic functions + create triggers + allowExecutorCaller(smartAccount) on each executor
 ```
 
 Each partial script calls `_registerAndVerify` so the contract is live on Registry before the script finishes.
@@ -243,8 +238,8 @@ The Registry constructor grants `ADMIN_ROLE` to both `_admin` (the admin timeloc
 | StrategyManager | Upgradeable | `STRATEGY_MANAGER` |
 | Oracle | Upgradeable | `ORACLE` |
 | Converter | Upgradeable | `CONVERTER` |
-| CREQueueExecutor | Static | `QUEUE_KEEPER_EXECUTOR` |
-| CREStrategyExecutor | Static | `STRATEGY_KEEPER_EXECUTOR` |
+| QueueKeeperExecutor | Static | `QUEUE_KEEPER_EXECUTOR` |
+| StrategyKeeperExecutor | Static | `STRATEGY_KEEPER_EXECUTOR` |
 | UniCLStrat | Static | — (registered in StrategyManager only) |
 | UniswapV3ConverterAdapter | Static | — (Converter allowlist only) |
 

@@ -1,0 +1,41 @@
+Keeper auth / caller-allowlist / pause branches live in KeeperExecutorBase.tree.
+
+QueueKeeperExecutor::constructor(address registry_)
+└── It should default policy knobs (minBatchAge, maxUsersPerUpkeep, GAS_INTENSIVE_ACTION_*) and version "2.1.0-mimic"
+
+QueueKeeperExecutor::perform(uint8 action, bytes params) — called by the allowlisted automation account
+├── Given action is PriceBatch
+│   ├── It should price the batch when it is mature and unpriced
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded otherwise
+├── Given action is ProcessRequests
+│   ├── It should process affordable requests in [startIndex, startIndex+count)
+│   ├── It should revert with KeeperExecutorNoUpkeepNeeded when the claimed range exceeds affordableRequests
+│   └── It should pull-over-push: credits land in amm.claimableBalances, not held by the executor
+├── Given action is AdvanceCursor
+│   ├── It should advance the cursor past settled/expired batches
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded when nothing is skippable
+├── Given action is None / unknown
+│   └── It should revert with KeeperExecutorUnknownAction
+└── Given msg.sender is not allowlisted
+    └── It should revert with KeeperExecutorUnauthorizedCaller / KeeperExecutorNoAllowedCallers
+
+QueueKeeperExecutor::checker()
+├── It should return (false, "no queue upkeep needed") when queueUpkeepStatus() is None
+└── It should return (true, abi.encodeCall(this.perform, ...)) mirroring queueUpkeepStatus()
+    (execPayload is the exact calldata perform accepts — verified by executing it as the proxy)
+
+QueueKeeperExecutor::queueUpkeepStatus()
+├── It should prefer PriceBatch over ProcessRequests over AdvanceCursor (priority order)
+├── It should return None while the current batch is below minBatchAge
+└── It should return None when the executor / Controller is paused
+
+QueueKeeperExecutor::nextLiveBatchIdToProcess()
+├── It should not skip an unpriced current batch (it can still receive requests)
+├── It should skip a priced batch with zero unprocessed users (fully settled)
+└── It should skip a priced batch past MAX_BATCH_PROCESSING_TIME (escape hatch)
+
+QueueKeeperExecutor::affordableRequests(uint256 _batchId)
+└── It should count only requests the Controller can afford at live prices
+
+QueueKeeperExecutor::setMinBatchAge / setMaxUsersPerUpkeep / advanceBatchCursor
+└── It should enforce ADMIN_ROLE, validate ranges, and never rewind the cursor

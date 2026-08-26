@@ -124,8 +124,8 @@ interface IExitQueue {
 
     /**
      * @notice Thrown when pricing would leave more than `MAX_LIVE_PRICED_BATCHES` ids in
-     * `[liveScanFromBatchId, currentBatchId)`. Production overlap is ~3 (CRE `minBatchAge`
-     * vs `MAX_BATCH_PROCESSING_TIME`); CRE `MAX_BATCH_SCAN` is this same cap (aliased). A
+     * `[liveScanFromBatchId, currentBatchId)`. Production overlap is ~3 (keeper `minBatchAge`
+     * vs `MAX_BATCH_PROCESSING_TIME`); keeper `MAX_BATCH_SCAN` is this same cap (aliased). A
      * DoS bound, not a target.
      */
     error ExitQueueTooManyLivePricedBatches();
@@ -145,8 +145,8 @@ interface IExitQueue {
 
     /**
      * @notice Max width of `[liveScanFromBatchId, currentBatchId)` that `priceBatch` will
-     * allow. CRE `MAX_BATCH_SCAN` is this value (both alias `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`).
-     * Not a production cadence target — CRE `minBatchAge` (1 day) vs `MAX_BATCH_PROCESSING_TIME`
+     * allow. Keeper `MAX_BATCH_SCAN` is this value (both alias `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`).
+     * Not a production cadence target — keeper `minBatchAge` (1 day) vs `MAX_BATCH_PROCESSING_TIME`
      * (3 days) implies ~3 overlapping priced batches. The cap is an `enter()` gas / DoS bound.
      */
     function MAX_LIVE_PRICED_BATCHES() external pure returns (uint256);

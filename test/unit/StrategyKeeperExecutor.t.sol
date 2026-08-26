@@ -10,27 +10,23 @@ import {AMM} from "../../src/contracts/AMM.sol";
 import {Oracle} from "../../src/contracts/Oracle.sol";
 import {ExitQueue} from "../../src/contracts/ExitQueue.sol";
 import {StrategyManager} from "../../src/contracts/StrategyManager.sol";
-import {CREQueueExecutor} from "../../src/contracts/automation/CREQueueExecutor.sol";
-import {CREStrategyExecutor} from "../../src/contracts/automation/CREStrategyExecutor.sol";
+import {QueueKeeperExecutor} from "../../src/contracts/automation/QueueKeeperExecutor.sol";
+import {StrategyKeeperExecutor} from "../../src/contracts/automation/StrategyKeeperExecutor.sol";
 
 import {Auth} from "../../src/libraries/Auth.sol";
-import {ICREReceiverBase} from "../../src/interfaces/automation/ICREReceiverBase.sol";
-import {ICREStrategyExecutor} from "../../src/interfaces/automation/ICREStrategyExecutor.sol";
-import {IReceiver} from "../../src/interfaces/automation/IReceiver.sol";
+import {IKeeperExecutorBase} from "../../src/interfaces/automation/IKeeperExecutorBase.sol";
+import {IStrategyKeeperExecutor} from "../../src/interfaces/automation/IStrategyKeeperExecutor.sol";
 import {IRegistryClient} from "interfaces/IRegistryClient.sol";
 
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockStrategy} from "../mocks/MockStrategy.sol";
 import {ProtocolTestBase} from "../helpers/ProtocolTestBase.sol";
-import {CRETestUtils} from "../helpers/CRETestUtils.sol";
 
 /**
- * @title CREStrategyExecutorTest
- * @notice Unit tests for the CRE strategy keeper receiver.
- * @dev Tree: `test/trees/CREStrategyExecutor.tree` (shared entrypoint branches live in
- *      `test/trees/CREReceiverBase.tree` and are exercised here and in CREQueueExecutor.t.sol).
+ * @title StrategyKeeperExecutorTest
+ * @notice Unit tests for the strategy keeper executor (on-chain checker + perform).
  */
-contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
+contract StrategyKeeperExecutorTest is ProtocolTestBase {
     uint256 public constant ETH_PRICE = 4000e8;
     uint256 public constant STALENESS_INTERVAL = 3600;
     uint256 public constant BOOTSTRAP_DEPOSIT = 10 ether;
@@ -64,28 +60,20 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
     Oracle public oracle;
     EVE public token;
     MockPriceFeed public ethPriceFeed;
-    CREQueueExecutor public queueExecutor;
-    CREStrategyExecutor public executor;
+    QueueKeeperExecutor public queueExecutor;
+    StrategyKeeperExecutor public executor;
     MockStrategy public strategy;
 
     address public admin;
-    address public forwarder;
-    address public workflowOwner;
+    address public automationAccount;
     address public user;
     address public outsider;
-    bytes32 public workflowId;
-    bytes10 public workflowName;
-
-    uint64 internal _seq;
 
     function setUp() public {
         admin = address(this);
-        forwarder = makeAddr("keystoneForwarder");
-        workflowOwner = makeAddr("workflowOwner");
+        automationAccount = makeAddr("mimicSmartAccount");
         user = makeAddr("user");
         outsider = makeAddr("outsider");
-        workflowId = keccak256("strategy-keeper-v1");
-        workflowName = bytes10("strat-keep");
 
         ProtocolContracts memory contracts = _deployProtocol(admin, DEFAULT_CONNECTOR_WEIGHT);
         registry = contracts.registry;
@@ -99,13 +87,8 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         ethPriceFeed = new MockPriceFeed(8, int256(ETH_PRICE));
         oracle.updateUsdFeedInfo(address(0), address(ethPriceFeed), STALENESS_INTERVAL);
 
-        // Move off timestamp 0 so `observedAt` can be pushed a full MAX_REPORT_AGE into the
-        // past without underflowing, then refresh the feed so it is not stale after the warp.
-        vm.warp(block.timestamp + SETUP_WARP);
-        ethPriceFeed.setPrice(int256(ETH_PRICE));
-
-        queueExecutor = new CREQueueExecutor(address(registry), forwarder, TEST_CHAIN_SELECTOR, TEST_MAX_REPORT_AGE);
-        executor = new CREStrategyExecutor(address(registry), forwarder, TEST_CHAIN_SELECTOR, TEST_MAX_REPORT_AGE);
+        queueExecutor = new QueueKeeperExecutor(address(registry));
+        executor = new StrategyKeeperExecutor(address(registry));
 
         bytes32[] memory keys = new bytes32[](2);
         address[] memory addresses = new address[](2);
@@ -118,9 +101,9 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         registry.grantRole(Auth.KEEPER_ROLE, address(queueExecutor));
         registry.grantRole(Auth.KEEPER_ROLE, address(executor));
 
-        executor.setExpectedAuthor(workflowOwner);
-        executor.setExpectedWorkflowName(workflowName);
-        executor.setExpectedWorkflowId(workflowId);
+        // Executors start inert; the automation operator's smart account is bound
+        // after task creation (the address only exists then).
+        executor.allowExecutorCaller(automationAccount);
 
         strategy = new MockStrategy("Mock Strategy", address(controller), address(strategyManager));
         strategyManager.addStrategy(address(strategy), DEPOSIT_WEIGHT, WITHDRAWAL_WEIGHT);
@@ -134,25 +117,15 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
 
     // ============ Helpers ============
 
-    function _metadata() internal view returns (bytes memory) {
-        return _encodeMetadata(workflowId, workflowName, workflowOwner);
+    function _perform(IStrategyKeeperExecutor.StrategyAction action) internal {
+        vm.prank(automationAccount);
+        executor.perform(uint8(action));
     }
 
-    function _report(uint8 action, bytes memory params) internal returns (bytes memory) {
-        _seq += 1;
-        return _encodeReport(TEST_CHAIN_SELECTOR, _seq, uint64(block.timestamp), action, params);
-    }
-
-    function _onReport(ICREStrategyExecutor.StrategyAction action) internal {
-        vm.prank(forwarder);
-        executor.onReport(_metadata(), _report(uint8(action), ""));
-    }
-
-    function _expectNoUpkeep(ICREStrategyExecutor.StrategyAction action) internal {
-        bytes memory report = _report(uint8(action), "");
-        vm.prank(forwarder);
-        vm.expectRevert(ICREStrategyExecutor.KeeperExecutorNoUpkeepNeeded.selector);
-        executor.onReport(_metadata(), report);
+    function _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction action) internal {
+        vm.prank(automationAccount);
+        vm.expectRevert(IStrategyKeeperExecutor.KeeperExecutorNoUpkeepNeeded.selector);
+        executor.perform(uint8(action));
     }
 
     /// @dev Moves `DEPOSIT_TO_STRATEGY` out of the Controller and into the strategy so pending
@@ -185,9 +158,6 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
     // ============ Construction ============
 
     function test_Constructor_Defaults() public view {
-        assertEq(executor.FORWARDER(), forwarder);
-        assertEq(executor.CHAIN_SELECTOR(), TEST_CHAIN_SELECTOR);
-        assertEq(executor.MAX_REPORT_AGE(), TEST_MAX_REPORT_AGE);
         assertEq(executor.minDepositETH(), DEFAULT_MIN_DEPOSIT_ETH);
         assertEq(executor.minWithdrawETH(), DEFAULT_MIN_WITHDRAW_ETH);
         assertEq(executor.minHarvestETH(), DEFAULT_MIN_HARVEST_ETH);
@@ -197,111 +167,117 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         // Explicit deploy-time policy knobs — never defaulted to a non-zero value.
         assertEq(executor.controllerReserveETH(), 0);
         assertEq(executor.exitLiquidityTargetETH(), 0);
-        assertEq(executor.version(), "1.0.0-cre");
+        assertEq(executor.version(), "2.1.0-mimic");
     }
 
-    function test_Constructor_InvalidConfig() public {
-        vm.expectRevert(ICREReceiverBase.CREReceiverZeroAddress.selector);
-        new CREStrategyExecutor(address(registry), address(0), TEST_CHAIN_SELECTOR, TEST_MAX_REPORT_AGE);
+    // ============ Caller allowlist auth ============
 
-        vm.expectRevert(ICREReceiverBase.CREReceiverInvalidConfig.selector);
-        new CREStrategyExecutor(address(registry), forwarder, TEST_CHAIN_SELECTOR, 0);
+    function test_Perform_InertUntilCallerAllowed() public {
+        StrategyKeeperExecutor fresh = new StrategyKeeperExecutor(address(registry));
+        vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
+        vm.prank(automationAccount);
+        fresh.perform(uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
     }
 
-    // ============ Auth / replay / timestamp guards ============
+    function test_Perform_OnlyAllowlistedCaller() public {
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IKeeperExecutorBase.KeeperExecutorUnauthorizedCaller.selector, outsider));
+        executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
 
-    function test_OnReport_OnlyForwarder() public {
-        bytes memory report = _report(uint8(ICREStrategyExecutor.StrategyAction.Sync), "");
-        vm.expectRevert(abi.encodeWithSelector(ICREReceiverBase.InvalidSender.selector, address(this), forwarder));
-        executor.onReport(_metadata(), report);
-    }
-
-    function test_OnReport_UnboundRejected() public {
-        CREStrategyExecutor unbound =
-            new CREStrategyExecutor(address(registry), forwarder, TEST_CHAIN_SELECTOR, TEST_MAX_REPORT_AGE);
-        bytes memory report = _report(uint8(ICREStrategyExecutor.StrategyAction.Sync), "");
-        vm.prank(forwarder);
-        vm.expectRevert(ICREReceiverBase.CREReceiverWorkflowUnbound.selector);
-        unbound.onReport(_metadata(), report);
-    }
-
-    function test_OnReport_WrongChain() public {
-        bytes memory report = _encodeReport(
-            TEST_CHAIN_SELECTOR + 1, 1, uint64(block.timestamp), uint8(ICREStrategyExecutor.StrategyAction.Sync), ""
-        );
-        vm.prank(forwarder);
-        vm.expectRevert(ICREReceiverBase.CREReceiverWrongChain.selector);
-        executor.onReport(_metadata(), report);
-    }
-
-    function test_OnReport_ReplaySequence() public {
+        // The allowlisted proxy still goes through.
         vm.warp(block.timestamp + DEFAULT_SYNC_INTERVAL);
-        _onReport(ICREStrategyExecutor.StrategyAction.Sync);
-
-        // Re-deliver at the same sequence: strictly-increasing guard rejects it.
-        bytes memory report = _encodeReport(
-            TEST_CHAIN_SELECTOR, _seq, uint64(block.timestamp), uint8(ICREStrategyExecutor.StrategyAction.Sync), ""
-        );
-        vm.prank(forwarder);
-        vm.expectRevert(ICREReceiverBase.CREReceiverReplayedSequence.selector);
-        executor.onReport(_metadata(), report);
+        _perform(IStrategyKeeperExecutor.StrategyAction.Sync);
+        assertEq(executor.lastSyncAt(), block.timestamp);
     }
 
-    function test_OnReport_StaleReport() public {
-        bytes memory report = _encodeReport(
-            TEST_CHAIN_SELECTOR,
-            1,
-            uint64(block.timestamp - TEST_MAX_REPORT_AGE - 1),
-            uint8(ICREStrategyExecutor.StrategyAction.Sync),
-            ""
-        );
-        vm.prank(forwarder);
-        vm.expectRevert(ICREReceiverBase.CREReceiverStaleReport.selector);
-        executor.onReport(_metadata(), report);
+    function test_AllowExecutorCaller_OnlyAdmin() public {
+        vm.prank(outsider);
+        vm.expectRevert(); // RegistryClientMissingRole
+        executor.allowExecutorCaller(makeAddr("other"));
     }
 
-    /// @dev A future `observedAt` is a malformed / clock-skewed report, not staleness — it
-    ///      carries its own error so monitoring can distinguish the two failure modes.
-    function test_OnReport_FutureTimestamp() public {
-        bytes memory report = _encodeReport(
-            TEST_CHAIN_SELECTOR, 1, uint64(block.timestamp + 1), uint8(ICREStrategyExecutor.StrategyAction.Sync), ""
-        );
-        vm.prank(forwarder);
-        vm.expectRevert(ICREReceiverBase.CREReceiverFutureTimestamp.selector);
-        executor.onReport(_metadata(), report);
-    }
-
-    function test_OnReport_MaxReportAgeBoundaryAccepted() public {
+    function test_RemoveExecutorCaller_RestoresInert() public {
+        executor.removeExecutorCaller(automationAccount);
         vm.warp(block.timestamp + DEFAULT_SYNC_INTERVAL);
-        bytes memory report = _encodeReport(
-            TEST_CHAIN_SELECTOR,
-            1,
-            uint64(block.timestamp - TEST_MAX_REPORT_AGE),
-            uint8(ICREStrategyExecutor.StrategyAction.Sync),
-            ""
+
+        vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
+        vm.prank(automationAccount);
+        executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
+    }
+
+    function test_AllowExecutorCaller_RejectsZeroAddress() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IKeeperExecutorBase.KeeperExecutorUnauthorizedCaller.selector, address(0))
         );
-        vm.prank(forwarder);
-        executor.onReport(_metadata(), report);
-        assertEq(executor.lastSequence(), 1);
+        executor.allowExecutorCaller(address(0));
     }
 
-    function test_OnReport_UnknownAction() public {
-        bytes memory report = _report(uint8(ICREStrategyExecutor.StrategyAction.None), "");
-        vm.prank(forwarder);
-        vm.expectRevert(ICREStrategyExecutor.KeeperExecutorUnknownAction.selector);
-        executor.onReport(_metadata(), report);
-    }
+    // ============ Pause ============
 
-    function test_WhenPaused_OnReportReverts() public {
+    function test_WhenPaused_PerformReverts() public {
         executor.pause();
-        bytes memory report = _report(uint8(ICREStrategyExecutor.StrategyAction.Sync), "");
-        vm.prank(forwarder);
+        vm.warp(block.timestamp + DEFAULT_SYNC_INTERVAL);
+
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        executor.onReport(_metadata(), report);
+        vm.prank(automationAccount);
+        executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
     }
 
-    function test_SupportsIReceiverInterface() public view {
-        assertTrue(executor.supportsInterface(type(IReceiver).interfaceId));
+    // ============ Checker ============
+
+    function test_Checker_NoWork_CannotExec() public {
+        // Drain idle Controller ETH so no funding action outranks "nothing to do".
+        _perform(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
+
+        (IStrategyKeeperExecutor.StrategyAction statusAction,) = executor.strategyUpkeepStatus();
+        assertEq(uint8(statusAction), uint8(IStrategyKeeperExecutor.StrategyAction.None));
+
+        (bool canExec, bytes memory execPayload) = executor.checker();
+        assertTrue(!canExec);
+        // Not empty: the checker returns a human-readable reason string when canExec=false.
+        assertTrue(execPayload.length > 0);
+    }
+
+    function test_Checker_SyncDue_ExecPayloadTargetsPerform() public {
+        // Drain idle Controller ETH: DepositExcess outranks Sync, so Sync only surfaces
+        // once the controller has nothing better to do.
+        _perform(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
+        vm.warp(block.timestamp + DEFAULT_SYNC_INTERVAL);
+
+        (IStrategyKeeperExecutor.StrategyAction statusAction,) = executor.strategyUpkeepStatus();
+        (bool canExec, bytes memory execPayload) = executor.checker();
+        assertEq(uint8(statusAction), uint8(IStrategyKeeperExecutor.StrategyAction.Sync));
+        assertTrue(canExec);
+        assertTrue(execPayload.length > 4);
+
+        // execPayload is the exact calldata for perform: submitting it as the
+        // allowlisted proxy must run the sync.
+        vm.prank(automationAccount);
+        (bool ok,) = address(executor).call(execPayload);
+        assertTrue(ok);
+        assertEq(executor.lastSyncAt(), block.timestamp);
+    }
+
+    function test_Checker_MirrorsStrategyUpkeepStatus() public {
+        strategy.setIsHealthy(false);
+
+        (IStrategyKeeperExecutor.StrategyAction statusAction,) = executor.strategyUpkeepStatus();
+        (bool canExec, bytes memory execPayload) = executor.checker();
+        assertEq(uint8(statusAction), uint8(IStrategyKeeperExecutor.StrategyAction.Rebalance));
+        assertTrue(canExec);
+
+        vm.prank(automationAccount);
+        (bool ok,) = address(executor).call(execPayload);
+        assertTrue(ok);
+        assertTrue(strategy.isHealthy());
+    }
+
+    // ============ Unknown action ============
+
+    function test_Perform_UnknownAction() public {
+        vm.prank(automationAccount);
+        vm.expectRevert(IStrategyKeeperExecutor.KeeperExecutorUnknownAction.selector);
+        executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.None));
     }
 
     function test_MaxBatchScan_MatchesExitQueueLiveCap() public view {
@@ -312,21 +288,21 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
     // ============ Rebalance ============
 
     function test_Rebalance_NoUpkeepWhenAllHealthy() public {
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertTrue(action != ICREStrategyExecutor.StrategyAction.Rebalance);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.Rebalance);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertTrue(action != IStrategyKeeperExecutor.StrategyAction.Rebalance);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.Rebalance);
     }
 
     function test_Rebalance_WhenStrategyUnhealthy() public {
         strategy.setIsHealthy(false);
 
-        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.Rebalance));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.Rebalance));
         assertEq(amount, 0);
 
         vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(ICREStrategyExecutor.StrategyAction.Rebalance, 0);
-        _onReport(ICREStrategyExecutor.StrategyAction.Rebalance);
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(IStrategyKeeperExecutor.StrategyAction.Rebalance, 0);
+        _perform(IStrategyKeeperExecutor.StrategyAction.Rebalance);
 
         assertTrue(strategy.isHealthy());
     }
@@ -335,9 +311,9 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         strategy.setIsHealthy(false);
         strategy.setPaused(true);
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertTrue(action != ICREStrategyExecutor.StrategyAction.Rebalance);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.Rebalance);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertTrue(action != IStrategyKeeperExecutor.StrategyAction.Rebalance);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.Rebalance);
     }
 
     // ============ DepositExcess ============
@@ -346,15 +322,15 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         uint256 controllerBalance = address(controller).balance;
         assertGt(controllerBalance, DEFAULT_MIN_DEPOSIT_ETH);
 
-        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.DepositExcess));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.DepositExcess));
         assertEq(amount, controllerBalance);
 
         vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
-            ICREStrategyExecutor.StrategyAction.DepositExcess, controllerBalance
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(
+            IStrategyKeeperExecutor.StrategyAction.DepositExcess, controllerBalance
         );
-        _onReport(ICREStrategyExecutor.StrategyAction.DepositExcess);
+        _perform(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
 
         assertEq(address(strategy).balance, controllerBalance);
         assertEq(address(controller).balance, 0);
@@ -364,25 +340,25 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         // Reserve everything: nothing is excess, so the action must be rejected.
         executor.setControllerReserveETH(address(controller).balance);
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertTrue(action != ICREStrategyExecutor.StrategyAction.DepositExcess);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.DepositExcess);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertTrue(action != IStrategyKeeperExecutor.StrategyAction.DepositExcess);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
     }
 
     function test_DepositExcess_NoUpkeepWithoutCapacity() public {
         strategy.setMaxDeposit(0);
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertTrue(action != ICREStrategyExecutor.StrategyAction.DepositExcess);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.DepositExcess);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertTrue(action != IStrategyKeeperExecutor.StrategyAction.DepositExcess);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
     }
 
     function test_DepositExcess_NoUpkeepWhenDepositWeightZero() public {
         strategyManager.setDepositWeight(address(strategy), ZERO_DEPOSIT_WEIGHT);
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertTrue(action != ICREStrategyExecutor.StrategyAction.DepositExcess);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.DepositExcess);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertTrue(action != IStrategyKeeperExecutor.StrategyAction.DepositExcess);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
     }
 
     function test_DepositExcess_EmitsActualWhenCappedByMaxDeposit() public {
@@ -391,15 +367,15 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         uint256 controllerBalance = address(controller).balance;
         assertGt(controllerBalance, CAPPED_MAX_DEPOSIT);
 
-        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.DepositExcess));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.DepositExcess));
         assertEq(amount, controllerBalance);
 
         vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
-            ICREStrategyExecutor.StrategyAction.DepositExcess, CAPPED_MAX_DEPOSIT
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(
+            IStrategyKeeperExecutor.StrategyAction.DepositExcess, CAPPED_MAX_DEPOSIT
         );
-        _onReport(ICREStrategyExecutor.StrategyAction.DepositExcess);
+        _perform(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
 
         assertEq(address(strategy).balance, CAPPED_MAX_DEPOSIT);
         assertEq(address(controller).balance, controllerBalance - CAPPED_MAX_DEPOSIT);
@@ -417,15 +393,15 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         assertGt(needsETH, controllerBalance);
         uint256 shortfall = needsETH - controllerBalance;
 
-        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.WithdrawShortfall));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall));
         assertEq(amount, shortfall);
 
         vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
-            ICREStrategyExecutor.StrategyAction.WithdrawShortfall, shortfall
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(
+            IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall, shortfall
         );
-        _onReport(ICREStrategyExecutor.StrategyAction.WithdrawShortfall);
+        _perform(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
 
         assertEq(address(controller).balance, controllerBalance + shortfall);
     }
@@ -434,7 +410,7 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         _deployCapitalToStrategy();
         _queueExit(user, EXIT_ETH);
         assertEq(executor.pendingRedemptionNeedsETH(), 0);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.WithdrawShortfall);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
     }
 
     function test_WithdrawShortfall_NoUpkeepWhenCovered() public {
@@ -442,38 +418,14 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         _queueExit(user, EXIT_ETH);
         _priceQueuedBatch();
         assertLe(executor.pendingRedemptionNeedsETH(), address(controller).balance);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.WithdrawShortfall);
-    }
-
-    function test_WithdrawShortfall_IgnoresReportParams() public {
-        _deployCapitalToStrategy();
-        _queueExit(user, EXIT_ETH);
-        _priceQueuedBatch();
-
-        uint256 shortfall = executor.pendingRedemptionNeedsETH() - address(controller).balance;
-
-        // Params claim an absurd amount; the executor recomputes and uses the live shortfall.
-        _seq += 1;
-        bytes memory report = _encodeReport(
-            TEST_CHAIN_SELECTOR,
-            _seq,
-            uint64(block.timestamp),
-            uint8(ICREStrategyExecutor.StrategyAction.WithdrawShortfall),
-            abi.encode(type(uint256).max)
-        );
-        vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
-            ICREStrategyExecutor.StrategyAction.WithdrawShortfall, shortfall
-        );
-        vm.prank(forwarder);
-        executor.onReport(_metadata(), report);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
     }
 
     // ============ ProvideExitLiquidity ============
 
     function test_ProvideExitLiquidity_DisabledWhenTargetZero() public {
         assertEq(executor.exitLiquidityTargetETH(), 0);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.ProvideExitLiquidity);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.ProvideExitLiquidity);
     }
 
     function test_ProvideExitLiquidity_TopsUpAmmFloat() public {
@@ -482,32 +434,32 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         assertLt(floatBefore, EXIT_LIQUIDITY_TARGET);
         uint256 topUp = EXIT_LIQUIDITY_TARGET - floatBefore;
 
-        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.ProvideExitLiquidity));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.ProvideExitLiquidity));
         assertEq(amount, topUp);
 
         vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
-            ICREStrategyExecutor.StrategyAction.ProvideExitLiquidity, topUp
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(
+            IStrategyKeeperExecutor.StrategyAction.ProvideExitLiquidity, topUp
         );
-        _onReport(ICREStrategyExecutor.StrategyAction.ProvideExitLiquidity);
+        _perform(IStrategyKeeperExecutor.StrategyAction.ProvideExitLiquidity);
 
         assertEq(amm.freeBalance(), EXIT_LIQUIDITY_TARGET);
     }
 
     function test_ProvideExitLiquidity_NoUpkeepWhenTargetMet() public {
         executor.setExitLiquidityTargetETH(EXIT_LIQUIDITY_TARGET);
-        _onReport(ICREStrategyExecutor.StrategyAction.ProvideExitLiquidity);
+        _perform(IStrategyKeeperExecutor.StrategyAction.ProvideExitLiquidity);
 
         // Float now sits at the target: a second top-up is not needed.
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.ProvideExitLiquidity);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.ProvideExitLiquidity);
     }
 
     // ============ HarvestPerformanceFees ============
 
     function test_Harvest_NoUpkeepWhenFeesDisabled() public {
         assertEq(strategyManager.performanceFeeBps(), 0);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.HarvestPerformanceFees);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees);
     }
 
     function test_Harvest_MintsFeeToTreasury() public {
@@ -518,10 +470,10 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         uint256 treasuryBefore = token.balanceOf(TEST_DAO_TREASURY);
 
         vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(
-            ICREStrategyExecutor.StrategyAction.HarvestPerformanceFees, feeETH
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(
+            IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees, feeETH
         );
-        _onReport(ICREStrategyExecutor.StrategyAction.HarvestPerformanceFees);
+        _perform(IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees);
 
         assertGt(token.balanceOf(TEST_DAO_TREASURY), treasuryBefore);
         assertEq(strategyManager.pendingPerformanceFeeInETH(address(strategy)), 0);
@@ -530,32 +482,32 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
     function test_Harvest_NoUpkeepBelowMinHarvest() public {
         _enablePerformanceFees();
         executor.setMinHarvestETH(type(uint256).max);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.HarvestPerformanceFees);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees);
     }
 
     // ============ Sync ============
 
     function test_Sync_RateLimited() public {
         assertEq(executor.lastSyncAt(), block.timestamp);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.Sync);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.Sync);
     }
 
     function test_Sync_AfterInterval() public {
         vm.warp(block.timestamp + DEFAULT_SYNC_INTERVAL);
 
         vm.expectEmit(true, false, false, true, address(executor));
-        emit ICREStrategyExecutor.StrategyUpkeepPerformed(ICREStrategyExecutor.StrategyAction.Sync, 0);
-        _onReport(ICREStrategyExecutor.StrategyAction.Sync);
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(IStrategyKeeperExecutor.StrategyAction.Sync, 0);
+        _perform(IStrategyKeeperExecutor.StrategyAction.Sync);
 
         assertEq(executor.lastSyncAt(), block.timestamp);
         // Consecutive syncs are rate limited again.
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.Sync);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.Sync);
     }
 
     function test_Sync_DisabledWhenIntervalZero() public {
         executor.setSyncInterval(0);
         vm.warp(block.timestamp + SETUP_WARP);
-        _expectNoUpkeep(ICREStrategyExecutor.StrategyAction.Sync);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.Sync);
     }
 
     // ============ strategyUpkeepStatus ============
@@ -564,8 +516,8 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         strategy.setIsHealthy(false);
         executor.pause();
 
-        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.None));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.None));
         assertEq(amount, 0);
     }
 
@@ -573,16 +525,16 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         strategy.setIsHealthy(false);
         controller.pause();
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.None));
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.None));
     }
 
     function test_StrategyUpkeepStatus_NoneWhenStrategyManagerPaused() public {
         strategy.setIsHealthy(false);
         strategyManager.pause();
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.None));
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.None));
     }
 
     /// @dev Rebalance outranks every funding action — it is the only one that repairs the
@@ -591,23 +543,23 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         strategy.setIsHealthy(false);
         assertGt(address(controller).balance, DEFAULT_MIN_DEPOSIT_ETH);
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.Rebalance));
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.Rebalance));
     }
 
     function test_StrategyUpkeepStatus_ExitLiquidityOutranksDeposit() public {
         executor.setExitLiquidityTargetETH(EXIT_LIQUIDITY_TARGET);
 
-        (ICREStrategyExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.ProvideExitLiquidity));
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.ProvideExitLiquidity));
     }
 
     function test_StrategyUpkeepStatus_NoneWhenNothingToDo() public {
         // Deploy all idle ETH, keep the strategy healthy, leave fees and exit target off.
-        _onReport(ICREStrategyExecutor.StrategyAction.DepositExcess);
+        _perform(IStrategyKeeperExecutor.StrategyAction.DepositExcess);
 
-        (ICREStrategyExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
-        assertEq(uint8(action), uint8(ICREStrategyExecutor.StrategyAction.None));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.None));
         assertEq(amount, 0);
     }
 
@@ -629,7 +581,7 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
     }
 
     /// @dev The strategy executor reads the cursor from the registered queue executor — the
-    ///      two receivers must agree on which batch is next, or reserved ETH drifts.
+    ///      two executors must agree on which batch is next, or reserved ETH drifts.
     function test_PendingRedemptionNeedsETH_AnchoredAtQueueCursor() public {
         _queueExit(user, EXIT_ETH);
         assertEq(queueExecutor.nextLiveBatchIdToProcess(), exitQueue.currentBatchId());
@@ -670,16 +622,16 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
         vm.stopPrank();
     }
 
-    /// @dev Dust floors must stay non-zero: zeroing them would let a workflow burn gas on
+    /// @dev Dust floors must stay non-zero: zeroing them would let the keeper burn gas on
     ///      economically pointless upkeeps.
     function test_Setters_RejectZeroDustFloors() public {
-        vm.expectRevert(ICREStrategyExecutor.KeeperExecutorInvalidConfig.selector);
+        vm.expectRevert(IStrategyKeeperExecutor.KeeperExecutorInvalidConfig.selector);
         executor.setMinDepositETH(0);
 
-        vm.expectRevert(ICREStrategyExecutor.KeeperExecutorInvalidConfig.selector);
+        vm.expectRevert(IStrategyKeeperExecutor.KeeperExecutorInvalidConfig.selector);
         executor.setMinHarvestETH(0);
 
-        vm.expectRevert(ICREStrategyExecutor.KeeperExecutorInvalidConfig.selector);
+        vm.expectRevert(IStrategyKeeperExecutor.KeeperExecutorInvalidConfig.selector);
         executor.setMinExitLiquidityTopUpETH(0);
     }
 
@@ -699,31 +651,31 @@ contract CREStrategyExecutorTest is ProtocolTestBase, CRETestUtils {
 
     function test_Setters_EmitEvents() public {
         vm.expectEmit(false, false, false, true, address(executor));
-        emit ICREStrategyExecutor.ControllerReserveETHChanged(0, 1 ether);
+        emit IStrategyKeeperExecutor.ControllerReserveETHChanged(0, 1 ether);
         executor.setControllerReserveETH(1 ether);
 
         vm.expectEmit(false, false, false, true, address(executor));
-        emit ICREStrategyExecutor.MinDepositETHChanged(DEFAULT_MIN_DEPOSIT_ETH, 1 ether);
+        emit IStrategyKeeperExecutor.MinDepositETHChanged(DEFAULT_MIN_DEPOSIT_ETH, 1 ether);
         executor.setMinDepositETH(1 ether);
 
         vm.expectEmit(false, false, false, true, address(executor));
-        emit ICREStrategyExecutor.MinWithdrawETHChanged(DEFAULT_MIN_WITHDRAW_ETH, 1 ether);
+        emit IStrategyKeeperExecutor.MinWithdrawETHChanged(DEFAULT_MIN_WITHDRAW_ETH, 1 ether);
         executor.setMinWithdrawETH(1 ether);
 
         vm.expectEmit(false, false, false, true, address(executor));
-        emit ICREStrategyExecutor.MinHarvestETHChanged(DEFAULT_MIN_HARVEST_ETH, 1 ether);
+        emit IStrategyKeeperExecutor.MinHarvestETHChanged(DEFAULT_MIN_HARVEST_ETH, 1 ether);
         executor.setMinHarvestETH(1 ether);
 
         vm.expectEmit(false, false, false, true, address(executor));
-        emit ICREStrategyExecutor.SyncIntervalChanged(DEFAULT_SYNC_INTERVAL, 2 days);
+        emit IStrategyKeeperExecutor.SyncIntervalChanged(DEFAULT_SYNC_INTERVAL, 2 days);
         executor.setSyncInterval(2 days);
 
         vm.expectEmit(false, false, false, true, address(executor));
-        emit ICREStrategyExecutor.ExitLiquidityTargetETHChanged(0, EXIT_LIQUIDITY_TARGET);
+        emit IStrategyKeeperExecutor.ExitLiquidityTargetETHChanged(0, EXIT_LIQUIDITY_TARGET);
         executor.setExitLiquidityTargetETH(EXIT_LIQUIDITY_TARGET);
 
         vm.expectEmit(false, false, false, true, address(executor));
-        emit ICREStrategyExecutor.MinExitLiquidityTopUpETHChanged(DEFAULT_MIN_EXIT_LIQUIDITY_TOP_UP_ETH, 1 ether);
+        emit IStrategyKeeperExecutor.MinExitLiquidityTopUpETHChanged(DEFAULT_MIN_EXIT_LIQUIDITY_TOP_UP_ETH, 1 ether);
         executor.setMinExitLiquidityTopUpETH(1 ether);
     }
 

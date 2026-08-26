@@ -1,0 +1,52 @@
+Keeper auth / caller-allowlist / pause branches live in KeeperExecutorBase.tree.
+
+StrategyKeeperExecutor::constructor(address registry_)
+└── It should default policy knobs, lastSyncAt = block.timestamp, and version "2.1.0-mimic"
+
+StrategyKeeperExecutor::perform(uint8 action) — called by the allowlisted automation account
+├── Given action is Rebalance
+│   ├── It should rebalance when a strategy reports unhealthy
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded when all strategies are healthy
+├── Given action is WithdrawShortfall
+│   ├── It should withdraw the live shortfall from strategies to the Controller
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded when needs are covered
+├── Given action is DepositExcess
+│   ├── It should deploy idle Controller ETH above the reserve to strategies
+│   ├── It should cap at the strategy maxDeposit and emit the actual amount
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded when nothing is excess
+├── Given action is HarvestPerformanceFees
+│   ├── It should mint pending fees to the DAO treasury above minHarvestETH
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded below the floor / when fees are off
+├── Given action is Sync
+│   ├── It should sync after syncInterval elapses and rate-limit thereafter
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded within the interval / when interval is 0
+├── Given action is ProvideExitLiquidity
+│   ├── It should top the AMM float up to exitLiquidityTargetETH from idle Controller ETH
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded when target is 0 / already met
+├── Given action is None / unknown
+│   └── It should revert with KeeperExecutorUnknownAction
+└── Given msg.sender is not allowlisted
+    └── It should revert with KeeperExecutorUnauthorizedCaller / KeeperExecutorNoAllowedCallers
+
+StrategyKeeperExecutor::checker()
+├── It should return (false, "no strategy upkeep needed") when strategyUpkeepStatus() is None
+└── It should return (true, abi.encodeCall(this.perform, (uint8(action)))) mirroring strategyUpkeepStatus()
+    (execPayload is the exact calldata perform accepts — verified by executing it as the proxy)
+
+StrategyKeeperExecutor::strategyUpkeepStatus() priority
+├── It should return Rebalance over every funding action (repairs the NAV source)
+├── It should return ProvideExitLiquidity over DepositExcess
+├── It should return None when the executor / Controller / StrategyManager is paused
+└── It should re-derive amounts from live state — reports never carry authoritative amounts
+
+StrategyKeeperExecutor::pendingRedemptionNeedsETH()
+├── It should anchor the scan at QueueKeeperExecutor.nextLiveBatchIdToProcess() (the two
+│   executors must agree on which batch is next, or reserved ETH drifts)
+├── It should not count the unpriced current batch
+└── It should count priced batches inside MAX_BATCH_PROCESSING_TIME
+
+StrategyKeeperExecutor::setControllerReserveETH / setExitLiquidityTargetETH / setSyncInterval / setMinWithdrawETH
+└── It should enforce ADMIN_ROLE and accept 0 as a meaningful explicit choice
+
+StrategyKeeperExecutor::setMinDepositETH / setMinHarvestETH / setMinExitLiquidityTopUpETH
+└── It should enforce ADMIN_ROLE and reject 0 (dust floors must stay non-zero)
