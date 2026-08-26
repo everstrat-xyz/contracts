@@ -32,15 +32,14 @@ import {KeeperExecutorBase} from "./KeeperExecutorBase.sol";
  *     execPayload verbatim. The decision logic was always pinned to these
  *     bounded helpers (mirrored off-chain for cross-checking), so keeping it
  *     on-chain loses nothing versus an off-chain decider.
- *   - `perform(uint8)` — execution target; allowlisted caller only.
- *
- * performData never carries an amount — every ETH quantity is recomputed from
- * live Controller / StrategyManager / ExitQueue / AMM state.
- * `StrategyUpkeepPerformed` emits the Controller return (ETH actually
- * moved / harvest `feeETHEquivalent`), which may be less than the checker's
- * estimate on StrategyManager try/catch underfill. A 0 actual is a successful
- * no-op. ProvideExitLiquidity has no return (`sendValue` is all-or-nothing) —
- * the event uses the recomputed `topUp`.
+ *   - `perform(uint8)` — execution target; allowlisted caller only. The
+ *     action id never carries an amount — every ETH quantity is recomputed
+ *     from live Controller / StrategyManager / ExitQueue / AMM state.
+ *     `StrategyUpkeepPerformed` emits the Controller return (ETH actually
+ *     moved / harvest `feeETHEquivalent`), which may be less than the
+ *     checker's estimate on StrategyManager try/catch underfill. A 0 actual
+ *     is a successful no-op. ProvideExitLiquidity has no return (`sendValue`
+ *     is all-or-nothing) — the event uses the recomputed `topUp`.
  *
  * Couples to the registered queue keeper via Registry `QUEUE_KEEPER_EXECUTOR`
  * and `nextLiveBatchIdToProcess()`.
@@ -128,7 +127,7 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
      *         live state at execution time.
      */
     function perform(uint8 action) external onlyExecutorCaller whenNotPaused nonReentrant {
-        _processReport(action, "");
+        _execute(action);
     }
 
     // ============ Views ============
@@ -160,7 +159,7 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
 
     // ============ Processing ============
 
-    function _processReport(uint8 action, bytes memory /* params */ ) internal {
+    function _execute(uint8 action) internal {
         StrategyAction strategyAction = StrategyAction(action);
 
         IRegistry registry_ = registry();

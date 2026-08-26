@@ -7,7 +7,7 @@ import {IKeeperExecutorBase} from "./IKeeperExecutorBase.sol";
  * @title IStrategyKeeperExecutor
  * @notice Keeper executor for strategy actions, driven by an external
  *         automation network.
- * @dev Amounts are never taken from performData — recomputed at execution time.
+ * @dev Amounts are never taken from the action id — recomputed at execution time.
  *      `StrategyUpkeepPerformed.amount` is the Controller return (achieved) for
  *      deposit/withdraw/harvest; ProvideExitLiquidity emits the recomputed top-up
  *      (`sendValue` is all-or-nothing). A 0 amount is a successful no-op, not a revert.

@@ -482,7 +482,7 @@ graph TB
 - **Trust Chain**: `Mimic smart account → Keeper*Executor (KEEPER_ROLE) → Controller` — Mimic infrastructure never holds a protocol role; only the executor contracts are granted `KEEPER_ROLE` by deployment (an opt-in manual break-glass keeper is a separate governance decision — see `docs/FREEZE_RUNBOOK.md` §0.1)
 - **KeeperExecutorBase** (abstract mixin): RegistryClient + OZ Pausable + ReentrancyGuard. `perform` gated to an ADMIN-managed allowlist of executor callers (`allowExecutorCaller` / `removeExecutorCaller`, `EnumerableSet`), populated with the automation operator's smart account after the triggers are created. An empty allowlist makes the executor inert (`KeeperExecutorNoAllowedCallers`). `pause()` ADMIN or SECURITY, `unpause()` ADMIN
 - **Mimic surfaces**: W2 (`StrategyKeeperExecutor`) has a thin Mimic function that reads `checker()` via oracle and relays `execPayload` verbatim. W1 (`QueueKeeperExecutor`) has a Mimic function (keepers repo, `mimic-functions/queue-keeper`) performing the deep queue scan; it emits the same `perform` calldata as the on-chain `checker()`
-- **Untrusted payload**: the payload only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_processReport`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
+- **Untrusted payload**: the payload only selects the action / hints; conditions and amounts are re-validated/recomputed on-chain in `_execute`, reverting with `KeeperExecutorNoUpkeepNeeded` on stale data
 
 **`perform` guard pipeline** (order is the security argument — cheapest, most authoritative check first; every branch is a revert, never a silent no-op):
 

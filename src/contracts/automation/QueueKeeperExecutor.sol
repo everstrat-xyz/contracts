@@ -25,10 +25,10 @@ import {KeeperExecutorBase} from "./KeeperExecutorBase.sol";
  *     deep-scan path and produces the same perform calldata.
  *   - `perform(uint8,bytes)` — execution target; allowlisted caller only.
  *
- * performData is a hint — every action is re-validated against live state
+ * Params are a hint — every action is re-validated against live state
  * before Controller calls.
  *
- * Params (identical wire shapes to the previous executor generation):
+ * Params:
  *   PriceBatch      abi.encode(batchId)
  *   ProcessRequests abi.encode(batchId, startIndex, endIndex) — endIndex exclusive
  *   AdvanceCursor   abi.encode(batchId)
@@ -94,7 +94,7 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
      *         automation caller; every claim re-validated against live state.
      */
     function perform(uint8 action, bytes calldata params) external onlyExecutorCaller whenNotPaused nonReentrant {
-        _processReport(action, params);
+        _execute(action, params);
     }
 
     // ============ Views ============
@@ -139,7 +139,7 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
 
     // ============ Internal ============
 
-    function _processReport(uint8 action, bytes memory params) internal {
+    function _execute(uint8 action, bytes memory params) internal {
         QueueAction queueAction = QueueAction(action);
         IRegistry registry_ = registry();
         IController controller = IController(registry_.controller());

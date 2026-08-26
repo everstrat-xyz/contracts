@@ -10,12 +10,11 @@ pragma solidity ^0.8.13;
  * Automation executors call perform() from a per-operator smart account,
  * and that address is only known after the automation task exists — so the
  * gate must be settable, not constructor-immutable. Executors remain
- * inert until at least one caller is allowed, preserving the unbound-inert
- * property of the previous report-driven receivers.
+ * inert until at least one caller is allowed.
  *
- * performData is untrusted per keeper-network guidance — every action is
- * re-validated against live state before execution, and amounts are never
- * taken from it.
+ * The perform payload is untrusted per keeper-network guidance — every
+ * action is re-validated against live state before execution, and amounts
+ * are never taken from it.
  */
 interface IKeeperExecutorBase {
     // ============ Events ============

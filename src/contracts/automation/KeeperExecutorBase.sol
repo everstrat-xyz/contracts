@@ -23,9 +23,8 @@ import {IKeeperExecutorBase} from "../../interfaces/automation/IKeeperExecutorBa
  * start inert (zero allowed callers) and accept no work until one is allowed.
  *
  * Every action is re-validated against live state before execution —
- * performData is untrusted. Amounts are never taken from it; subclasses
- * recompute from live protocol state (the same property the executors
- * held).
+ * the perform payload is untrusted. Amounts are never taken from it;
+ * subclasses recompute from live protocol state.
  */
 abstract contract KeeperExecutorBase is IKeeperExecutorBase, RegistryClient, Pausable, ReentrancyGuard {
     using EnumerableSet for EnumerableSet.AddressSet;
