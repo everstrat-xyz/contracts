@@ -87,8 +87,22 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         emit BatchCursorAdvanced(cursor, _toBatchId);
     }
 
-    // ============ Automation surface ============
+    // ============ Automation entrypoint ============
 
+    /**
+     * @notice Keeper execution entrypoint. Untrusted payload from an allowlisted
+     *         automation caller; every claim re-validated against live state.
+     */
+    function perform(uint8 action, bytes calldata params) external onlyExecutorCaller whenNotPaused nonReentrant {
+        _processReport(action, params);
+    }
+
+    // ============ Views ============
+
+    /// @dev `checker()` sits with the views rather than beside `perform()`:
+    ///      solhint `ordering` puts every external non-view ahead of the
+    ///      external views, and it reads naturally next to the status view it
+    ///      wraps.
     /**
      * @notice On-chain checker. execPayload is the full calldata for `perform`,
      *         so an automation function reading this view and the off-chain
@@ -106,57 +120,8 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         return (true, abi.encodeCall(this.perform, (uint8(action), abi.encode(batchId))));
     }
 
-    /**
-     * @notice Keeper execution entrypoint. Untrusted payload from an allowlisted
-     *         automation caller; every claim re-validated against live state.
-     */
-    function perform(uint8 action, bytes calldata params) external onlyExecutorCaller whenNotPaused nonReentrant {
-        _processReport(action, params);
-    }
-
-    // ============ Views ============
-
     function queueUpkeepStatus() external view returns (QueueAction action, uint256 batchId, uint256 count) {
         return _queueUpkeepStatus();
-    }
-
-    function _queueUpkeepStatus() internal view returns (QueueAction action, uint256 batchId, uint256 count) {
-        if (paused()) return (QueueAction.None, 0, 0);
-
-        IRegistry registry_ = registry();
-        address controller = registry_.controller();
-        address exitQueue = registry_.exitQueue();
-        address amm = registry_.amm();
-
-        if (Pausable(controller).paused() || Pausable(exitQueue).paused() || Pausable(amm).paused()) {
-            return (QueueAction.None, 0, 0);
-        }
-
-        IExitQueue queue = IExitQueue(exitQueue);
-        uint256 currentBatchId = queue.currentBatchId();
-        uint256 cursor = _peekAdvancedCursor(queue);
-        uint256 scanLimit = cursor + MAX_BATCH_SCAN;
-
-        for (uint256 id = cursor; id < currentBatchId && id < scanLimit; id++) {
-            if (_isBatchSkippable(queue, id)) continue;
-            uint256 affordable = _affordableRequests(queue, controller, id);
-            if (affordable > 0) {
-                return (QueueAction.ProcessRequests, id, affordable);
-            }
-        }
-
-        if (queue.unprocessedUsersCount(currentBatchId) > 0) {
-            (,,, uint256 createdAt,) = queue.batchInfo(currentBatchId);
-            if (block.timestamp - createdAt >= minBatchAge) {
-                return (QueueAction.PriceBatch, currentBatchId, 0);
-            }
-        }
-
-        if (cursor > nextBatchIdToProcess) {
-            return (QueueAction.AdvanceCursor, cursor, 0);
-        }
-
-        return (QueueAction.None, 0, 0);
     }
 
     function nextLiveBatchIdToProcess() external view returns (uint256) {
@@ -172,7 +137,7 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         return "2.1.0-mimic";
     }
 
-    // ============ Processing ============
+    // ============ Internal ============
 
     function _processReport(uint8 action, bytes memory params) internal {
         QueueAction queueAction = QueueAction(action);
@@ -213,13 +178,50 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         }
     }
 
-    // ============ Internal ============
-
     function _advanceBatchCursor(IExitQueue _queue) internal {
         uint256 cursor = _peekAdvancedCursor(_queue);
         if (cursor != nextBatchIdToProcess) {
             nextBatchIdToProcess = cursor;
         }
+    }
+
+    function _queueUpkeepStatus() internal view returns (QueueAction action, uint256 batchId, uint256 count) {
+        if (paused()) return (QueueAction.None, 0, 0);
+
+        IRegistry registry_ = registry();
+        address controller = registry_.controller();
+        address exitQueue = registry_.exitQueue();
+        address amm = registry_.amm();
+
+        if (Pausable(controller).paused() || Pausable(exitQueue).paused() || Pausable(amm).paused()) {
+            return (QueueAction.None, 0, 0);
+        }
+
+        IExitQueue queue = IExitQueue(exitQueue);
+        uint256 currentBatchId = queue.currentBatchId();
+        uint256 cursor = _peekAdvancedCursor(queue);
+        uint256 scanLimit = cursor + MAX_BATCH_SCAN;
+
+        for (uint256 id = cursor; id < currentBatchId && id < scanLimit; id++) {
+            if (_isBatchSkippable(queue, id)) continue;
+            uint256 affordable = _affordableRequests(queue, controller, id);
+            if (affordable > 0) {
+                return (QueueAction.ProcessRequests, id, affordable);
+            }
+        }
+
+        if (queue.unprocessedUsersCount(currentBatchId) > 0) {
+            (,,, uint256 createdAt,) = queue.batchInfo(currentBatchId);
+            if (block.timestamp - createdAt >= minBatchAge) {
+                return (QueueAction.PriceBatch, currentBatchId, 0);
+            }
+        }
+
+        if (cursor > nextBatchIdToProcess) {
+            return (QueueAction.AdvanceCursor, cursor, 0);
+        }
+
+        return (QueueAction.None, 0, 0);
     }
 
     /**

@@ -35,13 +35,6 @@ abstract contract KeeperExecutorBase is IKeeperExecutorBase, RegistryClient, Pau
     /// @notice Allowed automation callers (Mimic smart accounts / relays)
     EnumerableSet.AddressSet private _executorCallers;
 
-    // ============ Constructor ============
-
-    /**
-     * @param registry_ Protocol Registry
-     */
-    constructor(address registry_) RegistryClient(registry_) {}
-
     // ============ Entrypoint guard ============
 
     /**
@@ -56,6 +49,13 @@ abstract contract KeeperExecutorBase is IKeeperExecutorBase, RegistryClient, Pau
         }
         _;
     }
+
+    // ============ Constructor ============
+
+    /**
+     * @param registry_ Protocol Registry
+     */
+    constructor(address registry_) RegistryClient(registry_) {}
 
     // ============ Admin (Registry ADMIN_ROLE) ============
 
@@ -74,6 +74,16 @@ abstract contract KeeperExecutorBase is IKeeperExecutorBase, RegistryClient, Pau
         }
     }
 
+    // ============ Emergency controls ============
+
+    function pause() external onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.SECURITY_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyAuthRole(Auth.ADMIN_ROLE) {
+        _unpause();
+    }
+
     // ============ Views ============
 
     /// @inheritdoc IKeeperExecutorBase
@@ -84,15 +94,5 @@ abstract contract KeeperExecutorBase is IKeeperExecutorBase, RegistryClient, Pau
     /// @inheritdoc IKeeperExecutorBase
     function executorCallerCount() public view returns (uint256) {
         return _executorCallers.length();
-    }
-
-    // ============ Emergency controls ============
-
-    function pause() external onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.SECURITY_ROLE) {
-        _pause();
-    }
-
-    function unpause() external onlyAuthRole(Auth.ADMIN_ROLE) {
-        _unpause();
     }
 }

@@ -41,9 +41,16 @@ interface IStrategyKeeperExecutor is IKeeperExecutorBase {
     error KeeperExecutorUnknownAction();
     error KeeperExecutorInvalidConfig();
 
-    /// @notice Gas-bounded scan of priced batches. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
-    function MAX_BATCH_SCAN() external pure returns (uint256);
-    function MAX_USERS_COST_SCAN() external pure returns (uint256);
+    /// @notice Keeper execution entrypoint (allowlisted caller; no params by design)
+    function perform(uint8 action) external;
+
+    function setControllerReserveETH(uint256 _controllerReserveETH) external;
+    function setMinDepositETH(uint256 _minDepositETH) external;
+    function setMinWithdrawETH(uint256 _minWithdrawETH) external;
+    function setMinHarvestETH(uint256 _minHarvestETH) external;
+    function setSyncInterval(uint256 _syncInterval) external;
+    function setExitLiquidityTargetETH(uint256 _exitLiquidityTargetETH) external;
+    function setMinExitLiquidityTopUpETH(uint256 _minExitLiquidityTopUpETH) external;
 
     function controllerReserveETH() external view returns (uint256);
     function minDepositETH() external view returns (uint256);
@@ -68,14 +75,7 @@ interface IStrategyKeeperExecutor is IKeeperExecutorBase {
     /// @notice On-chain checker; execPayload targets `perform`
     function checker() external view returns (bool canExec, bytes memory execPayload);
 
-    /// @notice Keeper execution entrypoint (allowlisted caller; no params by design)
-    function perform(uint8 action) external;
-
-    function setControllerReserveETH(uint256 _controllerReserveETH) external;
-    function setMinDepositETH(uint256 _minDepositETH) external;
-    function setMinWithdrawETH(uint256 _minWithdrawETH) external;
-    function setMinHarvestETH(uint256 _minHarvestETH) external;
-    function setSyncInterval(uint256 _syncInterval) external;
-    function setExitLiquidityTargetETH(uint256 _exitLiquidityTargetETH) external;
-    function setMinExitLiquidityTopUpETH(uint256 _minExitLiquidityTopUpETH) external;
+    /// @notice Gas-bounded scan of priced batches. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
+    function MAX_BATCH_SCAN() external pure returns (uint256);
+    function MAX_USERS_COST_SCAN() external pure returns (uint256);
 }

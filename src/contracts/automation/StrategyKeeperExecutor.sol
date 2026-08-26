@@ -120,69 +120,22 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         minExitLiquidityTopUpETH = _minExitLiquidityTopUpETH;
     }
 
+    // ============ Automation entrypoint ============
+
+    /**
+     * @notice Keeper execution entrypoint. Untrusted action id from an
+     *         allowlisted automation caller; every amount is recomputed from
+     *         live state at execution time.
+     */
+    function perform(uint8 action) external onlyExecutorCaller whenNotPaused nonReentrant {
+        _processReport(action, "");
+    }
+
     // ============ Views ============
 
     function strategyUpkeepStatus() external view returns (StrategyAction action, uint256 amount) {
         return _strategyUpkeepStatus();
     }
-
-    function _strategyUpkeepStatus() internal view returns (StrategyAction action, uint256 amount) {
-        if (paused()) return (StrategyAction.None, 0);
-
-        IRegistry registry_ = registry();
-        address controller = registry_.controller();
-        address strategyManager = registry_.strategyManager();
-
-        if (Pausable(controller).paused() || Pausable(strategyManager).paused()) {
-            return (StrategyAction.None, 0);
-        }
-
-        IStrategyManager strategyManager_ = IStrategyManager(strategyManager);
-
-        if (_rebalanceNeeded(strategyManager_)) {
-            return (StrategyAction.Rebalance, 0);
-        }
-
-        uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
-        uint256 controllerBalance = controller.balance;
-        if (
-            needsETH > controllerBalance && needsETH - controllerBalance >= minWithdrawETH
-                && _totalMaxWithdrawal(strategyManager_) > 0
-        ) {
-            return (StrategyAction.WithdrawShortfall, needsETH - controllerBalance);
-        }
-
-        uint256 topUp = _exitLiquidityTopUp(registry_, controllerBalance, needsETH);
-        if (topUp >= minExitLiquidityTopUpETH) {
-            return (StrategyAction.ProvideExitLiquidity, topUp);
-        }
-
-        uint256 excess = _idleExcess(controllerBalance, needsETH);
-        if (excess >= minDepositETH && _depositCapacityAvailable(strategyManager_)) {
-            return (StrategyAction.DepositExcess, excess);
-        }
-
-        uint256 feeETH = _pendingPerformanceFeeETH(strategyManager_);
-        if (feeETH >= minHarvestETH) {
-            return (StrategyAction.HarvestPerformanceFees, feeETH);
-        }
-
-        if (syncInterval != 0 && block.timestamp - lastSyncAt >= syncInterval && strategyManager_.strategyCount() > 0) {
-            return (StrategyAction.Sync, 0);
-        }
-
-        return (StrategyAction.None, 0);
-    }
-
-    function pendingRedemptionNeedsETH() external view returns (uint256 needsETH) {
-        return _pendingRedemptionNeedsETH(registry());
-    }
-
-    function version() external pure returns (string memory) {
-        return "2.1.0-mimic";
-    }
-
-    // ============ Automation surface ============
 
     /**
      * @notice On-chain checker. execPayload is the full calldata for `perform`;
@@ -197,13 +150,12 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         return (true, abi.encodeCall(this.perform, (uint8(action))));
     }
 
-    /**
-     * @notice Keeper execution entrypoint. Untrusted action id from an
-     *         allowlisted automation caller; every amount is recomputed from
-     *         live state at execution time.
-     */
-    function perform(uint8 action) external onlyExecutorCaller whenNotPaused nonReentrant {
-        _processReport(action, "");
+    function pendingRedemptionNeedsETH() external view returns (uint256 needsETH) {
+        return _pendingRedemptionNeedsETH(registry());
+    }
+
+    function version() external pure returns (string memory) {
+        return "2.1.0-mimic";
     }
 
     // ============ Processing ============
@@ -259,6 +211,54 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
     }
 
     // ============ Internal ============
+
+    function _strategyUpkeepStatus() internal view returns (StrategyAction action, uint256 amount) {
+        if (paused()) return (StrategyAction.None, 0);
+
+        IRegistry registry_ = registry();
+        address controller = registry_.controller();
+        address strategyManager = registry_.strategyManager();
+
+        if (Pausable(controller).paused() || Pausable(strategyManager).paused()) {
+            return (StrategyAction.None, 0);
+        }
+
+        IStrategyManager strategyManager_ = IStrategyManager(strategyManager);
+
+        if (_rebalanceNeeded(strategyManager_)) {
+            return (StrategyAction.Rebalance, 0);
+        }
+
+        uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
+        uint256 controllerBalance = controller.balance;
+        if (
+            needsETH > controllerBalance && needsETH - controllerBalance >= minWithdrawETH
+                && _totalMaxWithdrawal(strategyManager_) > 0
+        ) {
+            return (StrategyAction.WithdrawShortfall, needsETH - controllerBalance);
+        }
+
+        uint256 topUp = _exitLiquidityTopUp(registry_, controllerBalance, needsETH);
+        if (topUp >= minExitLiquidityTopUpETH) {
+            return (StrategyAction.ProvideExitLiquidity, topUp);
+        }
+
+        uint256 excess = _idleExcess(controllerBalance, needsETH);
+        if (excess >= minDepositETH && _depositCapacityAvailable(strategyManager_)) {
+            return (StrategyAction.DepositExcess, excess);
+        }
+
+        uint256 feeETH = _pendingPerformanceFeeETH(strategyManager_);
+        if (feeETH >= minHarvestETH) {
+            return (StrategyAction.HarvestPerformanceFees, feeETH);
+        }
+
+        if (syncInterval != 0 && block.timestamp - lastSyncAt >= syncInterval && strategyManager_.strategyCount() > 0) {
+            return (StrategyAction.Sync, 0);
+        }
+
+        return (StrategyAction.None, 0);
+    }
 
     function _rebalanceNeeded(IStrategyManager _strategyManager) internal view returns (bool) {
         address[] memory strategies = _strategyManager.strategies();

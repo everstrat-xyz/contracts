@@ -155,8 +155,6 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         strategy.setUnchargedLpFeeBaseInETH(UNCHARGED_LP_FEES);
     }
 
-    // ============ Caller allowlist auth ============
-
     // ============ Construction ============
 
     function test_Constructor_Defaults() public view {
@@ -171,6 +169,8 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         assertEq(executor.exitLiquidityTargetETH(), 0);
         assertEq(executor.version(), "2.1.0-mimic");
     }
+
+    // ============ Caller allowlist auth ============
 
     function test_Perform_InertUntilCallerAllowed() public {
         StrategyKeeperExecutor fresh = new StrategyKeeperExecutor(address(registry));

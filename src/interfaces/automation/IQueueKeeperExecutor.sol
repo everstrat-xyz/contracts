@@ -27,11 +27,12 @@ interface IQueueKeeperExecutor is IKeeperExecutorBase {
     error QueueKeeperExecutorBatchCursorPrecedesCurrent();
     error QueueKeeperExecutorBatchCursorPastCurrent();
 
-    /// @notice Gas-bounded scan width. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
-    function MAX_BATCH_SCAN() external pure returns (uint256);
-    function MIN_BATCH_AGE_UPPER_BOUND() external pure returns (uint256);
-    function MIN_BATCH_AGE_LOWER_BOUND() external pure returns (uint256);
-    function MAX_USERS_PER_UPKEEP_UPPER_BOUND() external pure returns (uint256);
+    /// @notice Keeper execution entrypoint (allowlisted caller; untrusted payload)
+    function perform(uint8 action, bytes calldata params) external;
+
+    function setMinBatchAge(uint256 _minBatchAge) external;
+    function setMaxUsersPerUpkeep(uint256 _maxUsersPerUpkeep) external;
+    function advanceBatchCursor(uint256 _toBatchId) external;
 
     function minBatchAge() external view returns (uint256);
     function maxUsersPerUpkeep() external view returns (uint256);
@@ -51,10 +52,9 @@ interface IQueueKeeperExecutor is IKeeperExecutorBase {
     /// @notice On-chain checker; execPayload targets `perform`
     function checker() external view returns (bool canExec, bytes memory execPayload);
 
-    /// @notice Keeper execution entrypoint (allowlisted caller; untrusted payload)
-    function perform(uint8 action, bytes calldata params) external;
-
-    function setMinBatchAge(uint256 _minBatchAge) external;
-    function setMaxUsersPerUpkeep(uint256 _maxUsersPerUpkeep) external;
-    function advanceBatchCursor(uint256 _toBatchId) external;
+    /// @notice Gas-bounded scan width. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
+    function MAX_BATCH_SCAN() external pure returns (uint256);
+    function MIN_BATCH_AGE_UPPER_BOUND() external pure returns (uint256);
+    function MIN_BATCH_AGE_LOWER_BOUND() external pure returns (uint256);
+    function MAX_USERS_PER_UPKEEP_UPPER_BOUND() external pure returns (uint256);
 }
