@@ -303,8 +303,8 @@ abstract contract ProtocolDeployBase is Script {
      *         policy knobs from required env.
      * @dev In the automated trust model the executors are the ONLY KEEPER_ROLE holders —
      *      automation infrastructure never receives a protocol role. Executors start
-     *      inert (zero allowed executor callers); the Gelato dedicated msg.sender for
-     *      each task is bound afterward via ADMIN `allowExecutorCaller` (Registry
+     *      inert (zero allowed executor callers); the Mimic smart account for each
+     *      trigger is bound afterward via ADMIN `allowExecutorCaller` (Registry
      *      ADMIN instead of Ownable).
      *
      *      Policy knobs (`EXIT_LIQUIDITY_TARGET_ETH`, `CONTROLLER_RESERVE_ETH`) are REQUIRED

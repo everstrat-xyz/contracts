@@ -45,8 +45,9 @@ abstract contract KeeperExecutorBase is IKeeperExecutorBase, RegistryClient, Pau
     // ============ Entrypoint guard ============
 
     /**
-     * @notice Gate shared by the perform() entrypoints: allowlisted caller, not
-     *         paused, no reentrancy.
+     * @notice Caller gate shared by the perform() entrypoints. This checks the
+     *         allowlist ONLY — each perform() adds `whenNotPaused nonReentrant`
+     *         at its own call site, and a subclass that omits them gets neither.
      */
     modifier onlyExecutorCaller() {
         if (_executorCallers.length() == 0) revert KeeperExecutorNoAllowedCallers();

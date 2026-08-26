@@ -78,7 +78,7 @@ contract DeployKeeperExecutors is ProtocolDeployBase {
 
         console.log("QueueKeeperExecutor:", address(queueExecutor));
         console.log("StrategyKeeperExecutor:", address(strategyExecutor));
-        console.log("Next steps: create Gelato tasks, then allowExecutorCaller(dedicatedMsgSender)");
+        console.log("Next steps: deploy the Mimic functions, create triggers, then allowExecutorCaller(smartAccount)");
         console.log("on each executor via ADMIN (timelocked in production).");
     }
 }

@@ -29,7 +29,7 @@ StrategyKeeperExecutor::perform(uint8 action) — called by the allowlisted auto
     └── It should revert with KeeperExecutorUnauthorizedCaller / KeeperExecutorNoAllowedCallers
 
 StrategyKeeperExecutor::checker()
-├── It should return (false, "") when strategyUpkeepStatus() is None
+├── It should return (false, "no strategy upkeep needed") when strategyUpkeepStatus() is None
 └── It should return (true, abi.encodeCall(this.perform, (uint8(action)))) mirroring strategyUpkeepStatus()
     (execPayload is the exact calldata perform accepts — verified by executing it as the proxy)
 

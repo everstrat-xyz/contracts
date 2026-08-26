@@ -218,8 +218,8 @@ graph TB
     StrategyKeeperExecutor --> KeeperExecutorBase
     StrategyKeeperExecutor --> IStrategyKeeperExecutor
     StrategyKeeperExecutor --> ExitQueueLimits
-    CREDon -.->|"polls checker() (Solidity Function)"| StrategyKeeperExecutor
-    CREDon -.->|"TS Web3 Function: deep scan"| QueueKeeperExecutor
+    MimicNetwork -.->|"function relays checker()"| StrategyKeeperExecutor
+    MimicNetwork -.->|"function ticks (deep scan)"| QueueKeeperExecutor
     MimicAccount -.->|"perform (only allowlisted caller)"| QueueKeeperExecutor
     MimicAccount -.->|"perform (only allowlisted caller)"| StrategyKeeperExecutor
     QueueKeeperExecutor -.->|"priceBatch / processRequests (KEEPER_ROLE)"| ControllerProxy
@@ -532,7 +532,7 @@ graph TB
     class E1,E2,E3,E4,E5 err
     class Execute ok
 ```
-- **QueueKeeperExecutor**: `queueUpkeepStatus()` is the gas-bounded on-chain scan (`MAX_BATCH_SCAN` aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`; DoS bound, not cadence) — the TS Web3 Function (W1) is the deep-scan path and produces the same `perform` calldata. Actions: `ProcessRequests` (affordable prefix; params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`. After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (`pullRequest` would revert `ExitQueueBatchExpired`). **Do not use the keeper cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`.
+- **QueueKeeperExecutor**: `queueUpkeepStatus()` is the gas-bounded on-chain scan (`MAX_BATCH_SCAN` aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`; DoS bound, not cadence) — the Mimic function (W1) is the deep-scan path and produces the same `perform` calldata. Actions: `ProcessRequests` (affordable prefix; params `batchId, startIndex, endIndex`), `PriceBatch` (`minBatchAge`), `AdvanceCursor`. Governance escape hatch `advanceBatchCursor(to)` (ADMIN). Cursor peek: `nextLiveBatchIdToProcess()`. After `MAX_BATCH_PROCESSING_TIME`, `_affordableRequests` returns 0 (`pullRequest` would revert `ExitQueueBatchExpired`). **Do not use the keeper cursor for NAV** — `advanceBatchCursor` can skip live batches; share-price offsets walk `ExitQueue.liveScanFromBatchId`.
   - **Cursor skippability rule**: a batch is skippable only if it is priced AND (fully settled OR past `MAX_BATCH_PROCESSING_TIME`, where users self-serve via `AMM.cancelRedemption` and `pullRequest` is forbidden). Unpriced batches — the current one and any future id — are never skipped, even when empty, since they can still receive requests. `ExitQueue.priceBatch` writes `canBeProcessed` and `pricedAt` together, so `canBeProcessed` alone is the "is priced" predicate
 - **StrategyKeeperExecutor** (priority order): `Rebalance` → `WithdrawShortfall` (needs from `nextLiveBatchIdToProcess`) → `ProvideExitLiquidity` → `DepositExcess` → `HarvestPerformanceFees` → `Sync`. Amounts never taken from the payload — recomputed at execution. `StrategyUpkeepPerformed` emits the Controller return (achieved ETH / harvest `feeETHEquivalent`) for deposit/withdraw/harvest; ProvideExitLiquidity emits the recomputed `topUp` (`sendValue` is all-or-nothing). A 0 actual is a successful no-op. DepositExcess capacity also requires `depositWeight > 0`. Status view: `strategyUpkeepStatus()`. Priced in-window batches cost `finalEvePrice`; expired contribute 0. The current **unpriced** batch is not counted (cancellable equity, matching `liveRedemptionOffsets`) so a queue-then-cancel cannot pull LP.
 - **Interfaces**: `src/interfaces/automation/` (`IKeeperExecutorBase`, `IQueueKeeperExecutor`, `IStrategyKeeperExecutor`)

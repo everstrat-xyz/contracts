@@ -20,7 +20,7 @@ QueueKeeperExecutor::perform(uint8 action, bytes params) — called by the allow
     └── It should revert with KeeperExecutorUnauthorizedCaller / KeeperExecutorNoAllowedCallers
 
 QueueKeeperExecutor::checker()
-├── It should return (false, "") when queueUpkeepStatus() is None
+├── It should return (false, "no queue upkeep needed") when queueUpkeepStatus() is None
 └── It should return (true, abi.encodeCall(this.perform, ...)) mirroring queueUpkeepStatus()
     (execPayload is the exact calldata perform accepts — verified by executing it as the proxy)
 
