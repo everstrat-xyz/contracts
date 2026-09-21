@@ -351,7 +351,10 @@ contract UniCLStratForkTest is Test {
         _movePoolTickBy(NOT_CALM_TICK_OFFSET);
 
         assertEq(strategy.maxDeposit(), 0, "capacity should be zero while not calm");
-        assertFalse(strategy.isHealthy(), "not-calm pool should report unhealthy");
+        // Healthy-by-default: rebalance is not actionable while the pool is dislocated, so
+        // the keeper trigger (`!paused && !isHealthy`) must stay quiet instead of firing the
+        // `UniCLStratNotCalm` revert asserted just below.
+        assertTrue(strategy.isHealthy(), "not-calm pool should report healthy (no action possible)");
 
         vm.prank(strategyManager);
         vm.expectRevert(IUniCLStrat.UniCLStratNotCalm.selector);

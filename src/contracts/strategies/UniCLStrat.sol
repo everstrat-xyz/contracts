@@ -243,9 +243,29 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         return navInETH();
     }
 
+    /**
+     * @notice True unless a rebalance is both needed **and** currently actionable.
+     * @dev This view is the protocol's rebalance trigger: StrategyManager
+     *      (`_checkAndRebalanceStrategies`) and StrategyKeeperExecutor (`_rebalanceNeeded`)
+     *      both act on `!paused() && !isHealthy()`. `false` therefore has to mean
+     *      "`rebalance()` would succeed right now" — anything else makes the keeper fire an
+     *      upkeep that is a guaranteed revert, swallowed by StrategyManager's `try/catch`
+     *      as `StrategyRebalanceFailed` while burning the tick's gas.
+     *
+     *      Paused and non-calm both report **healthy**. `rebalance()` cannot run in either
+     *      state (`whenNotPaused` / `UniCLStratNotCalm`), so position drift is not
+     *      actionable — and while the pool is dislocated it is not even knowable, since the
+     *      spot tick drift would be measured against is the dislocated one. Read `true` here
+     *      as "no action to take", not as a claim that the position is well placed.
+     *
+     *      Deposit gating is unaffected by that relaxation: every call site pairs
+     *      `isHealthy()` with `maxDeposit() > 0`, and `_maxDeposit()` independently returns
+     *      0 when paused or not calm, so neither state can admit a deposit. The hard mint
+     *      gate remains the `_isCalm()` check inside `deposit()` itself.
+     */
     function isHealthy() public view returns (bool) {
-        if (paused()) return false;
-        if (!_isCalm()) return false;
+        if (paused()) return true;
+        if (!_isCalm()) return true;
         if (!initTicks) return true;
 
         int24 _tick = _currentTick();
@@ -384,8 +404,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     function rebalance() external onlyAuthContract(Auth.STRATEGY_MANAGER) whenNotPaused nonReentrant {
-        if (isHealthy()) revert StrategyIsHealthy();
+        // Calm is checked first: `isHealthy()` reports healthy while the pool is dislocated,
+        // so this order is what makes a non-calm call surface `UniCLStratNotCalm` instead of
+        // the misleading `StrategyIsHealthy`. The two guards are disjoint in this order.
         if (!_isCalm()) revert UniCLStratNotCalm();
+        if (isHealthy()) revert StrategyIsHealthy();
 
         _removeLiquidityAndCollect();
         _balanceInventory();

@@ -84,8 +84,14 @@ UniCLStrat::maxWithdrawal()
     └── It should return navInETH
 
 UniCLStrat::isHealthy()
+├── Given strategy is paused
+│   └── It should return true
 ├── Given pool is not calm
-│   └── It should return false
+│   └── It should return true
+├── Given long or short TWAP observation is unavailable
+│   └── It should return true
+├── Given position is drifted but pool is not calm
+│   └── It should return true
 ├── Given ticks have not been initialized
 │   └── It should return true
 ├── Given current tick is outside the main position range
@@ -172,10 +178,10 @@ UniCLStrat::withdraw(address _receiver, uint256 _amount)
 UniCLStrat::rebalance()
 ├── Given caller is not the registered StrategyManager
 │   └── It should revert with RegistryClientInvalidCaller
-├── Given strategy is healthy
-│   └── It should revert with StrategyIsHealthy
 ├── Given pool is not calm
 │   └── It should revert with UniCLStratNotCalm
+├── Given strategy is healthy
+│   └── It should revert with StrategyIsHealthy
 ├── Given spot tick diverges from long TWAP within maxTickDeviation
 │   └── It should size mint liquidity at spot and complete rebalance
 └── Given caller is the registered StrategyManager and strategy is unhealthy but calm

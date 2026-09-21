@@ -125,7 +125,7 @@ execute.
 |---|---|---|---|---|---|
 | 1 | Chainlink feed stale / broken | `OracleStalePrice`, `OracleInvalidPrice`, `OracleNoRoundData`, `OracleInvalidTimestamp` reverts; if a UniCLStrat holds paired-token inventory or the StrategyManager holds a non-zero supported-ERC-20 balance, `enter()`/`exit()`/`eveBasePriceInETH()` also revert | ADMIN timelock (DAO proposes) | `Oracle.updateUsdFeedInfo(token, newFeed, stalenessInterval)` — this is also how a token is (re)registered | 48h timelock; per-token `stalenessInterval` defines when the freeze starts |
 | 2 | Strategy `navInETH()` reverts | Every `AMM.enter/exit`, `eveBasePriceInETH()`, `Controller.priceBatch()` reverts (bubbled from `StrategyManager.totalNAVInETH()`) | SECURITY, then ADMIN | `UniCLStrat.pause()` → `UniCLStrat.emergencyExit()` → `StrategyManager.emergencyWithdrawToController()` → `Controller.emergencyExitToAMM()`; then ADMIN `StrategyManager.forceRemoveStrategy()` | pause/exit instant; `forceRemoveStrategy` needs 48h timelock |
-| 3 | Strategy unhealthy (`isHealthy() == false`) but not reverting | No freeze; batch deposits skip it; keeper `checkAndRebalance*` triggers `rebalance()` | Keeper (SECURITY only if funds at risk) | `Controller.checkAndRebalanceStrategy(strategy)`; reverts `UniCLStratNotCalm` if pool not calm — back off and retry | none |
+| 3 | Strategy unhealthy (`isHealthy() == false`) but not reverting | No freeze; batch deposits skip it; keeper `checkAndRebalance*` triggers `rebalance()`. `isHealthy() == false` now means the rebalance is also *actionable* (unpaused **and** calm), so this is never a guaranteed-revert upkeep | Keeper (SECURITY only if funds at risk) | `Controller.checkAndRebalanceStrategy(strategy)` | none |
 | 4 | Uniswap pool not calm | `UniCLStratNotCalm` reverts on deposit/rebalance/`investIdleETH`; `maxDeposit() == 0`; **withdrawals still work** (burn/convert ungated; re-add skipped) — intentional, see STRATEGY_GUARDRAILS §1.1.1 | Keeper | Back off deposits/rebalances; retry when pool calms. Do not treat ungated withdraw as a bug. No governance action needed | TWAP windows: long ≥ 1800s, short ≥ 60s |
 | 5 | Pool observation buffer too small | Constructor/setters revert `UniCLStratPoolTWAPNotAvailable` or `UniCLStratInsufficientObservationCardinality` (deploy/retune blocked); `navInETH()` reverts `UniCLStratPoolTWAPNotAvailable` if a registered pool later bricks `observe` → full pricing freeze | Anyone, then wait | Grow via `pool.increaseObservationCardinalityNext(n)` *before* deploy/setter; buffer fills as the pool trades. If already registered and urgent: escalate to scenario-2 chain | buffer fill time depends on pool activity |
 | 6 | Unexplained NAV anomaly (monitoring alert) | Off-chain NAV tracking flags a large single-tx base-price move not explained by enter/exit flow; on-chain there is **no deviation guard** — enter/exit keep working | Investigate first; SECURITY if unexplained | Reconcile NAV component-by-component (§6); if unexplained: SECURITY full-freeze (§5.4) → fix → staged un-freeze (§5.5) | pause instant for SECURITY; un-freeze always 48h |
@@ -278,7 +278,7 @@ Distinguish two different degradation levels:
 | Condition | Blast radius |
 |---|---|
 | `navInETH()` **reverts** (oracle stale, TWAP unavailable, pool bricked) | Full pricing freeze: enter/exit/pricing/batch-pricing all revert. |
-| `isHealthy() == false` or `maxDeposit()/maxWithdrawal() == 0` (view-level degradation, incl. paused strategy or uncalm pool) | **No freeze.** Batch paths skip the strategy by checking views; pricing keeps working. |
+| `isHealthy() == false` or `maxDeposit()/maxWithdrawal() == 0` (view-level degradation; a paused strategy or uncalm pool shows up as `maxDeposit()/maxWithdrawal() == 0`, **not** as `isHealthy() == false`) | **No freeze.** Batch paths skip the strategy by checking views; pricing keeps working. |
 
 ### 3.2 Batch keeper paths: what is (and is not) resilient on this code
 
@@ -367,8 +367,11 @@ Consequences for the keeper:
      `whenNotPaused`. If revocation was skipped, also pause the Converter
      (step below / §5.1) until the token can `approve` again.
 
-   After pausing: `maxDeposit() == 0`, `maxWithdrawal() == 0`,
-   `isHealthy() == false` — all batch keeper paths now skip the strategy.
+   After pausing: `maxDeposit() == 0`, `maxWithdrawal() == 0` — all batch
+   keeper paths now skip the strategy. `isHealthy()` reports **true** while
+   paused (healthy-by-default: `rebalance()` is `whenNotPaused`, so there is no
+   action to take); deposit exclusion comes from the `maxDeposit() > 0` leg,
+   and the rebalance paths check `paused()` directly.
 
    > **Pausing does NOT unfreeze pricing.** `_totalNAVInETH()` calls
    > `navInETH()` on *registered* strategies regardless of their pause state.
@@ -521,7 +524,7 @@ What degrades — **no pricing freeze**, only capital operations:
 | `rebalance()` | reverts `UniCLStratNotCalm` |
 | `withdraw()` | **works** — removes liquidity and pays out; only skips the re-add of remaining liquidity (`if (_isCalm())`). Intentional: see STRATEGY_GUARDRAILS §1.1.1 |
 | `maxDeposit()` | returns 0 → batch deposits skip this strategy and refund the Controller |
-| `isHealthy()` | returns false → keeper `checkAndRebalance*` will try `rebalance()` and revert `UniCLStratNotCalm` — the keeper must back off |
+| `isHealthy()` | returns **true** (healthy-by-default: a rebalance is not actionable while dislocated) → the keeper's `!paused && !isHealthy` trigger stays quiet, so `checkAndRebalance*` is never fired into a guaranteed `UniCLStratNotCalm` revert. Drift is re-evaluated automatically once the pool calms |
 | `navInETH()` | **works** (prices the LP position off the long TWAP, not spot) |
 
 Actions: none for governance. The keeper should treat `UniCLStratNotCalm` as
@@ -660,8 +663,9 @@ escape hatch; also not pause-gated), `emergencyWithdrawToController()`
 stop AMM pricing or enter/exit**.
 
 **UniCLStrat paused** — blocks `deposit()`, `withdraw()`, `rebalance()`,
-`sync()`, `investIdleETH()`; `maxDeposit()`/`maxWithdrawal()` return 0 and
-`isHealthy()` returns false, so batch keeper paths skip it. `navInETH()` keeps
+`sync()`, `investIdleETH()`; `maxDeposit()`/`maxWithdrawal()` return 0, so
+batch keeper paths skip it (`isHealthy()` reports true while paused — see
+§3.1). `navInETH()` keeps
 being consulted by total NAV (see §3.4). `emergencyExit()` **requires** the
 pause and works even with a bricked pool (it bypasses both pool and
 Converter).

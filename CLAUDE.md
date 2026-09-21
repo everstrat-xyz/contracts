@@ -278,7 +278,7 @@ The protocol implements the following core contracts:
      - `withdrawFromStrategy(address, uint256)`: Withdraw from one strategy (`CONTROLLER` caller). Strict: reverts if `withdraw()` fails
      - `checkAndRebalanceStrategies()`: Rebalance unhealthy, unpaused strategies (`CONTROLLER` caller). Batch path: `try/catch` on each `rebalance()` — emits `StrategyRebalanceFailed(strategy, reason)` (`reason` is the revert data) and continues on failure; skips paused strategies
      - `checkAndRebalanceStrategies(uint256 _startIndex, uint256 _endIndex)`: Paginated rebalance check; same batch semantics
-     - `checkAndRebalanceStrategy(address)`: Rebalance one strategy if unhealthy and not paused (`CONTROLLER` caller). No-op when paused. Strict: reverts if `rebalance()` fails
+     - `checkAndRebalanceStrategy(address)`: Rebalance one strategy if unhealthy and not paused (`CONTROLLER` caller). No-op when paused — and, since `isHealthy()` is healthy-by-default in non-actionable states, also a no-op (not a revert) when the pool is not calm. Strict: reverts if `rebalance()` fails
      - `syncStrategies()`: Call `IStrategy.sync()` on all registered strategies (`CONTROLLER` caller); skips paused strategies. Batch path: `try/catch` on each `sync()` — emits `StrategySyncFailed(strategy, reason)` (`reason` is the revert data) and continues on failure
      - `syncStrategies(uint256 _startIndex, uint256 _endIndex)`: Paginated sync; skips paused strategies; same batch `try/catch` semantics
      - `syncStrategy(address)`: Sync one strategy (`CONTROLLER` caller); no-op when paused; strict: reverts if `sync()` fails
@@ -309,7 +309,7 @@ The protocol implements the following core contracts:
      - `paused()`: Returns whether the strategy is paused
      - `maxDeposit()`: Returns maximum ETH that can be deposited
      - `maxWithdrawal()`: Returns maximum ETH that can be withdrawn
-     - `isHealthy()`: Returns true if strategy is healthy
+     - `isHealthy()`: The protocol's **rebalance trigger**, not a general health metric. Returns false only when a rebalance is needed *and* would succeed; paused, not-calm, unavailable-TWAP and uninitialized-ticks states all return true ("no action to take"), since `StrategyManager._checkAndRebalanceStrategies` and `StrategyKeeperExecutor._rebalanceNeeded` both fire on `!paused() && !isHealthy()` and a non-actionable trigger is a guaranteed revert. Implementations MUST also return 0 from `maxDeposit()` in every healthy-by-default state, since deposit gating relies on the pair `isHealthy() && maxDeposit() > 0`
      - `deposit()`: Deposits ETH into the strategy (StrategyManager path; deploys capital)
      - `investIdleETH()`: Admin-only; deploys idle native ETH (e.g. donations) without going through the keeper deposit path
      - `withdraw(address, uint256) returns (uint256)`: Withdraws ETH from the strategy (unwinds internally as needed). Returns the ETH actually delivered to the receiver, net of strategy-retained fees. The StrategyManager accounts for withdrawals via the Controller's ETH balance delta across the `withdraw()` call (mirroring the Converter's adapter accounting) rather than the return value

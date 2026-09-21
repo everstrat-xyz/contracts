@@ -116,8 +116,20 @@ interface IStrategy {
     function totalWithdrawn() external view returns (uint256);
 
     /**
-     * @notice Returns true if the strategy is healthy
-     * @return bool True if the strategy is healthy, false otherwise
+     * @notice Returns false only when a rebalance is needed AND would currently succeed
+     * @dev This is the protocol's rebalance trigger, not a general health metric:
+     *      StrategyManager (`_checkAndRebalanceStrategies`) and StrategyKeeperExecutor
+     *      (`_rebalanceNeeded`) act on `!paused() && !isHealthy()`, so implementations MUST
+     *      return `true` in any state where `rebalance()` would revert — paused, price
+     *      source unavailable or dislocated, position not yet established. Reporting
+     *      "unhealthy" for a condition `rebalance()` cannot fix turns every keeper tick into
+     *      a guaranteed revert, swallowed on the batch path as `StrategyRebalanceFailed`.
+     *
+     *      Because `true` is the safe default, implementations MUST also return 0 from
+     *      `maxDeposit()` in every such state: deposit gating relies on the pair
+     *      (`isHealthy() && maxDeposit() > 0`), and `isHealthy()` alone no longer excludes
+     *      a paused or otherwise non-depositable strategy.
+     * @return bool False when `rebalance()` is needed and actionable, true otherwise
      */
     function isHealthy() external view returns (bool);
 
