@@ -106,7 +106,7 @@ The strategy must implement `IStrategy`:
 - `withdraw(address _receiver, uint256 _amount)` returns native ETH to the Controller.
 - `rebalance()` maps to the reference strategy's `moveTicks()` behavior.
 - `navInETH()` reports total strategy NAV in ETH, including idle ETH/WETH, non-WETH token inventory, active liquidity, and uncollected fees.
-- `isHealthy()` reports whether the position is still within the acceptable rebalance band and whether the pool price is calm.
+- `isHealthy()` reports whether a rebalance is due **and** currently possible: false only when the position has left the acceptable rebalance band while the strategy is unpaused and the pool is calm.
 
 ## External Dependencies
 
@@ -170,7 +170,10 @@ Deposits should be blocked when `isCalm()` is false. The calm gate is load-beari
 
 ### Rebalance
 
-`rebalance()` is called by `StrategyManager` when `isHealthy()` is false.
+`rebalance()` is called by `StrategyManager` when `isHealthy()` is false. Because
+`isHealthy()` already folds in the calm and pause conditions, that trigger fires only
+when the call can actually succeed (modulo the block-to-block race between the keeper's
+read and inclusion).
 
 1. Require `isCalm()` to avoid rebalancing into manipulated spot prices.
 2. Claim and account for pool fees.
@@ -198,13 +201,25 @@ This is separate from the keeper flow (`Controller.depositToStrategies()` → `S
 
 ## Health Model
 
-`isHealthy()` should return false when any of the following is true:
+`isHealthy()` is the rebalance trigger: `StrategyManager` and `StrategyKeeperExecutor`
+both act on `!paused() && !isHealthy()`, so false must mean "`rebalance()` would succeed
+right now". It returns false when **both** of the following hold:
 
-- Current tick is outside the main range.
-- Current tick has moved more than `rebalanceTickThreshold` from the range center.
-- Current tick or short TWAP differs from the main TWAP by more than `maxTickDeviation`.
-- Pool oracle observations are unavailable or too short for the configured `twapInterval`.
-- Strategy is paused or an invariant check fails.
+- The strategy is unpaused and the pool is calm (`isCalm()` true, observations available).
+- Current tick is outside the main range, **or** has moved more than
+  `rebalanceTickThreshold` from the range center.
+
+Every other state returns **true** — healthy-by-default:
+
+- Strategy is paused (`rebalance()` is `whenNotPaused`).
+- Pool is not calm, or oracle observations are unavailable / too short for `twapInterval`
+  (`rebalance()` reverts `UniCLStratNotCalm`; drift is also unmeasurable against a
+  dislocated spot tick).
+- Ticks have not been initialized yet.
+
+"True" therefore reads as "no rebalance action to take", not as a claim that the position
+is well placed. Deposit eligibility is a separate question, answered by
+`isHealthy() && maxDeposit() > 0`; `maxDeposit()` returns 0 when paused or not calm.
 
 `isCalm()` should compare:
 

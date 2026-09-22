@@ -319,17 +319,33 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertTrue(strategy.isHealthy());
     }
 
-    function test_IsHealthy_ReturnsFalseWhenPoolIsNotCalm() public {
+    /// @dev Healthy-by-default: `rebalance()` reverts `UniCLStratNotCalm` while the pool is
+    ///      dislocated, so reporting unhealthy would trigger a guaranteed-revert upkeep.
+    function test_IsHealthy_ReturnsTrueWhenPoolIsNotCalm() public {
         pool.setCurrentTickWithoutTwap(NOT_CALM_TICK);
 
-        assertFalse(strategy.isHealthy());
+        assertTrue(strategy.isHealthy());
+        // Deposits stay gated by the maxDeposit leg, not by isHealthy.
+        assertEq(strategy.maxDeposit(), 0);
     }
 
-    function test_IsHealthy_ReturnsFalseWhenShortTwapObservationIsUnavailable() public {
+    /// @dev Drift is unknowable without a TWAP, and unfixable: same healthy-by-default rule.
+    function test_IsHealthy_ReturnsTrueWhenShortTwapObservationIsUnavailable() public {
         pool.setObserveShouldRevert(true);
 
-        assertFalse(strategy.isHealthy());
+        assertTrue(strategy.isHealthy());
         assertEq(strategy.maxDeposit(), 0);
+    }
+
+    function test_IsHealthy_ReturnsTrueWhenDriftedButPoolIsNotCalm() public {
+        _deposit(DEPOSIT_AMOUNT);
+        pool.setCurrentTick(UNHEALTHY_TICK);
+        assertFalse(strategy.isHealthy());
+
+        // Same drifted position, now with a dislocated pool: not actionable, so healthy.
+        pool.setCurrentTickWithoutTwap(NOT_CALM_TICK);
+
+        assertTrue(strategy.isHealthy());
     }
 
     function test_IsHealthy_ReturnsFalseWhenCurrentTickIsOutsideMainPosition() public {
@@ -732,14 +748,14 @@ contract UniCLStratTest is UniCLStratTestBase {
         uint256 navBefore = strategy.navInETH();
 
         pool.setCurrentTickWithoutTwap(NOT_CALM_TICK);
-        assertFalse(strategy.isHealthy());
+        assertTrue(strategy.isHealthy());
 
         vm.prank(strategyManager);
         strategy.withdraw(receiver, WITHDRAW_AMOUNT);
 
         assertEq(receiver.balance, WITHDRAW_AMOUNT);
         assertApproxEqRel(strategy.navInETH(), navBefore - WITHDRAW_AMOUNT, PERFORMANCE_FEE_NAV_REL_TOLERANCE);
-        assertFalse(strategy.isHealthy());
+        assertTrue(strategy.isHealthy());
     }
 
     function test_Rebalance_RevertsWhenHealthy() public {
@@ -1180,7 +1196,9 @@ contract UniCLStratTest is UniCLStratTestBase {
         strategy.pause();
 
         assertTrue(strategy.paused());
-        assertFalse(strategy.isHealthy());
+        // Healthy-by-default while paused: `rebalance()` is `whenNotPaused`, so there is no
+        // action to take. Deposits stay excluded by the maxDeposit leg.
+        assertTrue(strategy.isHealthy());
         assertEq(strategy.maxDeposit(), 0);
 
         vm.prank(admin);
