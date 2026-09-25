@@ -93,7 +93,7 @@ contract ControllerTest is ProtocolTestBase {
         assertTrue(registry.hasRole(Auth.ADMIN_ROLE, owner));
         assertTrue(registry.hasRole(Auth.KEEPER_ROLE, owner));
         assertEq(address(controller.registry()), address(registry));
-        assertEq(controller.version(), "1.0.0");
+        assertEq(controller.version(), "1.1.0");
     }
 
     function test_Initialize_EmitsControllerInitialized() public {
@@ -771,7 +771,55 @@ contract ControllerTest is ProtocolTestBase {
         vm.deal(address(mockStrategy1), 5 ether);
 
         vm.prank(user);
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IRegistryClient.RegistryClientCallerHasNoneOfRoles.selector, Auth.ADMIN_ROLE, Auth.KEEPER_ROLE
+            )
+        );
+        controller.withdrawFromStrategy(address(mockStrategy1), 1 ether);
+    }
+
+    function test_WithdrawFromStrategy_AdminCanWithdraw() public {
+        strategyManager.addStrategy(address(mockStrategy1), 80, 70);
+        vm.deal(address(mockStrategy1), 5 ether);
+        address admin = makeAddr("admin");
+        registry.grantRole(Auth.ADMIN_ROLE, admin);
+
+        uint256 initialControllerBalance = address(controller).balance;
+
+        vm.prank(admin);
+        uint256 actualWithdrawn = controller.withdrawFromStrategy(address(mockStrategy1), 5 ether);
+
+        assertEq(actualWithdrawn, 5 ether);
+        assertEq(address(controller).balance, initialControllerBalance + 5 ether);
+        assertEq(address(mockStrategy1).balance, 0);
+    }
+
+    function test_WithdrawFromStrategy_KeeperCanWithdraw() public {
+        strategyManager.addStrategy(address(mockStrategy1), 80, 70);
+        vm.deal(address(mockStrategy1), 5 ether);
+        address keeper = makeAddr("keeper");
+        registry.grantRole(Auth.KEEPER_ROLE, keeper);
+
+        vm.prank(keeper);
+        uint256 actualWithdrawn = controller.withdrawFromStrategy(address(mockStrategy1), 1 ether);
+
+        assertEq(actualWithdrawn, 1 ether);
+        assertEq(address(mockStrategy1).balance, 4 ether);
+    }
+
+    function test_WithdrawFromStrategy_SecurityCannotWithdraw() public {
+        strategyManager.addStrategy(address(mockStrategy1), 80, 70);
+        vm.deal(address(mockStrategy1), 5 ether);
+        address security = makeAddr("security");
+        registry.grantRole(Auth.SECURITY_ROLE, security);
+
+        vm.prank(security);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IRegistryClient.RegistryClientCallerHasNoneOfRoles.selector, Auth.ADMIN_ROLE, Auth.KEEPER_ROLE
+            )
+        );
         controller.withdrawFromStrategy(address(mockStrategy1), 1 ether);
     }
 

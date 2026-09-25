@@ -120,6 +120,8 @@ interface IController {
     function withdrawFromStrategies(uint256 _amount) external returns (uint256 actualWithdrawn);
 
     /// @notice Withdraws ETH from a specific strategy to the controller
+    /// @dev Callable by `ADMIN_ROLE` (48h timelock in production — e.g. draining a strategy
+    ///      before migration/removal) or `KEEPER_ROLE`
     /// @param _strategy The address of the strategy to withdraw from
     /// @param _amount The amount of ETH to withdraw
     /// @return actualWithdrawn ETH actually withdrawn

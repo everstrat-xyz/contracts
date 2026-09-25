@@ -126,7 +126,7 @@ contract Controller is
      * @return string The version number
      */
     function version() public pure virtual override returns (string memory) {
-        return "1.0.0";
+        return "1.1.0";
     }
 
     // ============ Strategy Management ============
@@ -229,7 +229,7 @@ contract Controller is
     function withdrawFromStrategy(address _strategy, uint256 _amount)
         external
         override
-        onlyAuthRole(Auth.KEEPER_ROLE)
+        onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.KEEPER_ROLE)
         whenNotPaused
         nonReentrant
         returns (uint256 actualWithdrawn)
