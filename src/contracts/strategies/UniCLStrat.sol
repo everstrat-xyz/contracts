@@ -229,15 +229,15 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function navInETH() public view returns (uint256) {
         return address(this).balance
             + UniCLStratLib.inventoryValueInETH(
-            pool,
-            IOracle(_registry.oracle()),
-            address(weth),
-            address(token0),
-            address(token1),
-            positionMain,
-            positionAlt,
-            _twapSqrtPrice()
-        );
+                pool,
+                IOracle(_registry.oracle()),
+                address(weth),
+                address(token0),
+                address(token1),
+                positionMain,
+                positionAlt,
+                _twapSqrtPrice()
+            );
     }
 
     function maxDeposit() external view returns (uint256) {
@@ -870,9 +870,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     function _idleValueInToken1(uint160 _sqrtPriceX96) internal view returns (uint256) {
-        return
-            UniCLStratLib.token0InToken1(token0.balanceOf(address(this)), _sqrtPriceX96)
-                + token1.balanceOf(address(this));
+        return UniCLStratLib.token0InToken1(token0.balanceOf(address(this)), _sqrtPriceX96)
+            + token1.balanceOf(address(this));
     }
 
     /**
