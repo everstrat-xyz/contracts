@@ -257,9 +257,9 @@ Minting runs the same step backwards. A linear bag is converted into a curve pos
 
 for a position of half-width \(w\). Instantaneous extraction is second-order and saturates around \(w/4\) once \(\varepsilon\) exceeds the range. That is **not** what makes `deposit()` dangerous.
 
-The first-order risk is tick placement. `_setTicks()` centers the range on `_currentTick()` (spot) and `_liquidityForPosition()` sizes the mint from `_sqrtPrice()` (also spot). `pool.mint()` has no `minAmount` / oracle bound — `_isCalm()` is the only defence on that path. If the reversion \(\varepsilon\) exceeds \(w\), the position ends up entirely outside the live price: earning zero fees, holding 100% of one asset, directionally exposed. The only fix is `rebalance()`, itself calm-gated. That damage is proportional to the position, persists until the pool calms, and has no \(\varepsilon^2\) bound.
+The first-order risk is tick placement. `_setMainTicks()` centers the range on `_currentTick()` (spot) and `_liquidityForPosition()` sizes the mint from `_sqrtPrice()` (also spot). `pool.mint()` has no `minAmount` / oracle bound — `_isCalm()` is the only defence on that path. If the reversion \(\varepsilon\) exceeds \(w\), the position ends up entirely outside the live price: earning zero fees, holding 100% of one asset, directionally exposed. The only fix is `rebalance()`, itself calm-gated. That damage is proportional to the position, persists until the pool calms, and has no \(\varepsilon^2\) bound.
 
-The deposit-path *swap* is not the vulnerable part: `_balanceInventory()` targets 50/50 from `_tokenValueInETH` (Chainlink) and executes through the same TWAP / oracle / slippage machinery as withdraw. The calm gate on `deposit()` buys protection specifically for the mint and the tick placement.
+The deposit-path *swap* is not the vulnerable part: `_swapToMainRatio()` (v2) targets the main range's value ratio at spot and executes through the same TWAP / oracle / slippage machinery as withdraw. The calm gate on `deposit()` buys protection specifically for the mint and the tick placement.
 
 ### Why `withdraw()` stays ungated
 
@@ -319,7 +319,7 @@ See `StrategyManager.sol` and `IStrategyManager.sol` for the live fee interface.
 
 Uniswap V3 liquidity is removable synchronously via `withdraw()`; there is no separate queue-withdrawal path.
 
-**Keeper sync:** `IStrategy.sync()` (Controller `KEEPER_ROLE` → StrategyManager → strategy) refreshes implementation-defined on-chain state. UniCLStrat pokes each deployed position with `pool.burn(tickLower, tickUpper, 0)` so accrued LP fees flow into `tokensOwed` storage (readable by `navInETH()` and by `pendingPerformanceFeeInETH` via the live `tokensOwed - snapshot` delta) — without removing liquidity, calling `collect()`, or flushing durable LP-fee counters. Keepers may call it periodically; sync is not required to change `navInETH()`. Durable counter flush (`_accrueLpFees`) happens on `settlePerformanceFee` and on `_removeLiquidityAndCollect()` (deposit / withdraw / rebalance / investIdleETH / pause unwind), where poke-then-accrue is required so fee growth is never collected into inventory without entering the fee counters.
+**Keeper sync:** `IStrategy.sync()` (Controller `KEEPER_ROLE` → StrategyManager → strategy) refreshes implementation-defined on-chain state. UniCLStrat pokes each deployed position with `pool.burn(tickLower, tickUpper, 0)` so accrued LP fees flow into `tokensOwed` storage (readable by `navInETH()` and by `pendingPerformanceFeeInETH` via the live `tokensOwed - snapshot` delta) — without removing liquidity, calling `collect()`, or flushing durable LP-fee counters. Keepers may call it periodically; sync is not required to change `navInETH()`. Durable counter flush (`_accrueLpFees`) happens on `settlePerformanceFee` and before every burn — `_removeLiquidityAndCollect()` (rebalance / re-center / dislocated withdraw / pause unwind), the v2 partial burn in `_decreaseLiquidityForValue()` (calm withdraw), and alt replacement in `_deployLeftoverToAlt()` — where poke-then-accrue is required so fee growth is never collected into inventory without entering the fee counters.
 
 In the Beefy reference, `balances()` returns token0/token1 inventory after subtracting unharvested fees and locked profit. In this protocol, LP trading fees remain strategy assets in `navInETH()`; DAO performance fees are settled separately by StrategyManager via EVE minting.
 
@@ -509,3 +509,12 @@ sequenceDiagram
 - Add unit tests with mocked pool/router/oracle for deposit, withdraw, NAV, health, and rebalance branches.
 - Add mainnet fork tests for a real WETH pair (`test/fork/UniCLStratFork.t.sol`).
 - Validate the exact MonadVision contracts once source access is available, especially constructor parameters, rebalance thresholds, fee handling, and callback behavior.
+
+## v2 Inventory Management (UniCLStrat 2.0.0)
+
+v1 split idle inventory 50/50 by Chainlink value, chose the alt side from the post-swap (≈50/50) balances *before* minting main, only recomputed alt ticks on `rebalance()`, and fully unwound both positions on every deposit / withdraw. With spot anywhere but the exact range center the main range needs an uneven split (≈26% token0 at half the half-width), so the leftover was often the token the stale alt range could not hold, and it sat idle (live deployment: ~11% of NAV idle USDC; fork repro at the same geometry: ~31%). v2:
+
+1. **Ratio-aware swap** (`_swapToMainRatio`): target the main range's value split at spot, `p·(b − p)/b : (p − a)` (sqrt prices, token1 units), fee-adjusted `Δ = excess / (1 − fee·w_sold)`; skipped below `MIN_INVENTORY_SWAP_BPS` (10 bps) of the deployed value.
+2. **Alt from the actual leftover** (`_deployLeftoverToAlt`): after the main mint, place alt on the side matching the token left over (below spot for token1, above for token0). Reuse an alt that already holds only that token; otherwise remove it (poke → accrue → burn → collect → re-base snapshot), re-offer its tokens to main, then re-place. Alt ticks are never reassigned while the old alt holds liquidity or owed tokens (`UniCLStratPositionNotEmpty`), because NAV and fee accounting read only the current position keys.
+3. **Incremental add / remove**: deposit and `investIdleETH` add on top of existing positions (full unwind only when the main range needs re-centering). A calm withdraw sources idle WETH → idle paired → partial burn of alt then main (TWAP-marked, padded by slippage + pool fee), buys only the missing WETH, and re-adds leftovers without an inventory swap; a dislocated withdraw keeps v1's full unwind.
+

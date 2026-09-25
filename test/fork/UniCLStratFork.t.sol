@@ -67,6 +67,9 @@ contract UniCLStratForkTest is Test {
     int24 internal constant NOT_CALM_TICK_OFFSET = 70;
     int24 internal constant REBALANCE_TICK_OFFSET = 25;
     uint256 internal constant NAV_TOLERANCE = 0.03e18; // 3%
+    int24 internal constant WIDE_REBALANCE_TICK_THRESHOLD = 200; // half of the 400-tick half-width
+    int24 internal constant OFF_CENTER_TICK_OFFSET = 180; // inside WIDE_REBALANCE_TICK_THRESHOLD
+    uint256 internal constant MAX_IDLE_BPS = 20; // 0.2% of NAV
     uint256 internal constant WITHDRAW_TOLERANCE = 0.04e18; // 4%
     uint256 internal constant TRADER_USDC_BUDGET = 100_000_000_000e6;
     uint256 internal constant TRADER_WETH_BUDGET = 30_000_000e18;
@@ -250,6 +253,46 @@ contract UniCLStratForkTest is Test {
         (uint128 liquidity,,) = _mainPositionState();
         assertGt(liquidity, 0, "deposit should mint liquidity after inventory swap moves spot");
         assertTrue(strategy.isHealthy());
+    }
+
+    function test_Fork_Deposit_OffCenterSpotLeavesNoMaterialIdleInventory() public onlyFork {
+        // Mirror the live deployment's geometry: the healthy band reaches half the range
+        // half-width, so spot can sit far off-center without triggering a rebalance.
+        vm.prank(admin);
+        strategy.setRebalanceTickThreshold(WIDE_REBALANCE_TICK_THRESHOLD);
+        _prepareCalmAlignedPool();
+        _deposit(DEPOSIT_AMOUNT);
+
+        // Spot drifts inside the healthy band and the TWAP catches up (calm, no rebalance due).
+        (int24 mainLower, int24 mainUpper) = strategy.positionMain();
+        _movePoolSqrtPriceTo(TickMath.getSqrtRatioAtTick((mainLower + mainUpper) / 2 + OFF_CENTER_TICK_OFFSET));
+        vm.warp(block.timestamp + TWAP_INTERVAL + 1);
+        assertTrue(strategy.isHealthy(), "drift should stay inside the healthy band");
+
+        _deposit(DEPOSIT_AMOUNT);
+
+        // v2: ratio-aware swap + alt from the actual leftover — idle WETH/USDC is dust
+        // (v1 leaves ~31% of NAV idle in this scenario).
+        uint256 idleValue = IERC20(WETH).balanceOf(address(strategy))
+            + oracle.convert(USDC, address(0), IERC20(USDC).balanceOf(address(strategy)), USDC_DECIMALS, 18);
+        assertLe(idleValue * BPS, strategy.navInETH() * MAX_IDLE_BPS, "idle inventory should be dust");
+    }
+
+    function test_Fork_Withdraw_PartialWhenCalmDoesNotUnwindMainPosition() public onlyFork {
+        _prepareCalmAlignedPool();
+        _deposit(DEPOSIT_AMOUNT);
+        (uint128 liquidityBefore,,) = _mainPositionState();
+        (int24 mainLower, int24 mainUpper) = strategy.positionMain();
+
+        // A full unwind would burn the whole main position.
+        vm.expectCall(address(pool), abi.encodeCall(pool.burn, (mainLower, mainUpper, liquidityBefore)), 0);
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, PARTIAL_WITHDRAW_AMOUNT);
+
+        assertEq(withdrawn, PARTIAL_WITHDRAW_AMOUNT, "partial withdrawal should be exact");
+        (uint128 liquidityAfter,,) = _mainPositionState();
+        // 0.15 of 0.5 ETH withdrawn: well over half of the main liquidity must stay in place.
+        assertGt(uint256(liquidityAfter) * 2, liquidityBefore, "main position should only be partially burned");
     }
 
     // ============ Withdraw ============

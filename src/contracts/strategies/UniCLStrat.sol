@@ -24,6 +24,8 @@ import {IUniswapV3Pool} from "../../interfaces/integrations/uniswap/IUniswapV3Po
 import {IUniswapV3Factory} from "../../interfaces/integrations/uniswap/IUniswapV3Factory.sol";
 import {IWETH} from "../../interfaces/integrations/IWETH.sol";
 
+import {FixedPoint96} from "../../libraries/integrations/uniswap/FixedPoint96.sol";
+import {FullMath} from "../../libraries/integrations/uniswap/FullMath.sol";
 import {LiquidityAmounts} from "../../libraries/integrations/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "../../libraries/integrations/uniswap/TickMath.sol";
 import {TickUtils} from "../../libraries/integrations/uniswap/TickUtils.sol";
@@ -88,6 +90,12 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     ///      genuine TWAP-vs-Chainlink drift allowance; route configs should prefer pools
     ///      with fee tiers <= 0.3% (30 bps, leaving 170 bps of drift allowance).
     uint256 public constant MAX_QUOTE_DEVIATION_BPS = 200;
+    /// @dev Inventory swaps smaller than this share (bps) of the value being deployed are
+    ///      skipped: the residual is parked in the alt position instead, which is cheaper
+    ///      than paying swap gas + fees for a negligible ratio correction.
+    uint256 public constant MIN_INVENTORY_SWAP_BPS = 10;
+    /// @dev Uniswap V3 fee denominator (fee tiers are in hundredths of a bip).
+    uint256 private constant _FEE_DENOMINATOR = 1_000_000;
 
     // ============ Immutable State ============
 
@@ -101,6 +109,10 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     IUniswapV3Factory public immutable factory;
 
     int24 public immutable tickSpacing;
+    /// @dev Strategy pool fee tier (hundredths of a bip). Used to fee-adjust the inventory
+    ///      swap size; the route may use a different pool, in which case any residual is
+    ///      absorbed by the alt position.
+    uint24 private immutable _poolFee;
     uint256 private immutable _genesisTimestamp;
 
     // ============ Strategy State ============
@@ -179,6 +191,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (factory.getPool(_token0Address, _token1Address, _fee) != _params.addresses.pool) {
             revert UniCLStratInvalidPool();
         }
+        _poolFee = _fee;
 
         tickSpacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
         positionWidth = _params.strategy.positionWidth;
@@ -212,7 +225,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     function version() external pure returns (string memory) {
-        return "1.0.0";
+        return "2.0.0";
     }
 
     function genesisTimestamp() external view returns (uint256) {
@@ -266,13 +279,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function isHealthy() public view returns (bool) {
         if (paused()) return true;
         if (!_isCalm()) return true;
-        if (!initTicks) return true;
-
-        int24 _tick = _currentTick();
-        if (_tick <= positionMain.tickLower || _tick >= positionMain.tickUpper) return false;
-
-        int24 _centerTick = (positionMain.tickLower + positionMain.tickUpper) / 2;
-        return _abs(_tick - _centerTick) <= _abs(rebalanceTickThreshold);
+        return !_mainNeedsRecenter();
     }
 
     // ============ Strategy Actions ============
@@ -290,23 +297,22 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // Deposit ETH to Converter to get WETH back
         IConverter(_registry.converter()).wrapETH{value: _depositAmount}();
 
-        _removeLiquidityAndCollect();
-
-        _balanceInventory();
-        _setTicksIfNeeded();
-        _addLiquidity();
+        // Incremental: the new WETH (plus any idle leftovers) is added on top of the existing
+        // positions. Only a range that needs re-centering is unwound first.
+        _recenterIfNeeded();
+        _deployInventory(true);
 
         emit FundsDeposited(_depositAmount);
     }
 
     /**
      * @notice Deploys idle native ETH (e.g. donations) into the underlying protocol.
-     * @dev Callable only by strategy admin. Going through `_removeLiquidityAndCollect` pokes and
-     *      accrues any pending LP fees into the performance-fee base (same as deposit/withdraw).
-     *      The invested amount is capped at the remaining capacity (`maxDeposit()`). Return value
-     *      and `FundsInvested` report only the idle native ETH actually deployed. Collected
-     *      WETH/ETH from existing positions may also be re-deployed in this call but is excluded
-     *      from `invested` and the event amount.
+     * @dev Callable only by strategy admin. Same incremental path as `deposit()`: existing
+     *      positions are only unwound when the main range needs re-centering. The invested
+     *      amount is capped at the remaining capacity (`maxDeposit()`). Return value and
+     *      `FundsInvested` report only the idle native ETH actually deployed. Idle WETH/paired
+     *      leftovers may also be re-deployed in this call but are excluded from `invested`
+     *      and the event amount.
      * @return invested Idle native ETH deployed (0 when balance is zero or no capacity remains)
      */
     function investIdleETH()
@@ -325,10 +331,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (invested == 0) return 0;
 
         IConverter(_registry.converter()).wrapETH{value: invested}();
-        _removeLiquidityAndCollect();
-        _balanceInventory();
-        _setTicksIfNeeded();
-        _addLiquidity();
+        _recenterIfNeeded();
+        _deployInventory(true);
 
         // Idle native ETH only; collected fees re-deployed above are not included.
         emit FundsInvested(invested);
@@ -341,14 +345,18 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *      - Idle native ETH covers the request: the payout is sent directly from the native
      *        balance, with no pool or Converter interaction (the LP position stays untouched).
      *      - Idle native ETH falls short: all idle ETH goes toward the payout and only the
-     *        remainder is sourced from WETH (liquidity removal plus paired-token conversion),
-     *        of which exactly the needed amount is unwrapped. Native ETH is never wrapped
-     *        just to be unwrapped again. Remaining WETH/paired inventory is rebalanced and
-     *        re-added as liquidity only when the pool is calm. The unwind itself is
-     *        intentionally not calm-gated: `navInETH()` marks at TWAP/oracle (a skewed
-     *        burn does not crystallize IL into NAV), the conversion swap is independently
-     *        bounded, and a calm revert would stall exit liquidity when redemptions spike.
-     *        See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
+     *        remainder is sourced from WETH, of which exactly the needed amount is unwrapped.
+     *        Native ETH is never wrapped just to be unwrapped again. When the pool is calm,
+     *        WETH is sourced in order: idle WETH, idle paired token, then a partial burn of the
+     *        alt position followed by the main position, sized (TWAP-marked, padded by
+     *        slippage + pool fee) to cover the shortfall; a dislocated pool is fully unwound
+     *        instead — see {_sourceWeth}. Only the missing WETH is bought with the paired
+     *        token; leftovers are re-added without any inventory swap (main first, alt with
+     *        the residual) and only when the pool is calm. The unwind itself is intentionally
+     *        not calm-gated: `navInETH()` marks at TWAP/oracle (a skewed burn does not
+     *        crystallize IL into NAV), the conversion swap is independently bounded, and a
+     *        calm revert would stall exit liquidity when redemptions spike. See
+     *        `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *      In both paths the receiver gets a single native ETH transfer and the return value
      *      is the ETH actually delivered.
      */
@@ -378,9 +386,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             // from WETH via liquidity removal and paired-token conversion.
             uint256 _remainder = _amount - _idleETH;
 
-            _removeLiquidityAndCollect();
-
-            _convertToWeth(_remainder);
+            _sourceWeth(_remainder);
 
             uint256 _wethBalance = weth.balanceOf(address(this));
             uint256 _wethToUnwrap = _wethBalance < _remainder ? _wethBalance : _remainder;
@@ -394,10 +400,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             if (_wethToUnwrap > 0) IConverter(_registry.converter()).unwrapWETH(_wethToUnwrap, address(this));
             payable(_receiver).sendValue(_withdrawn);
 
-            if (_isCalm()) {
-                _balanceInventory();
-                _addLiquidity();
-            }
+            if (_isCalm()) _deployInventory(false);
         }
 
         emit FundsWithdrawn(_withdrawn);
@@ -411,9 +414,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (isHealthy()) revert StrategyIsHealthy();
 
         _removeLiquidityAndCollect();
-        _balanceInventory();
-        _setTicks();
-        _addLiquidity();
+        _setMainTicks();
+        _deployInventory(true);
 
         emit Rebalanced();
     }
@@ -856,11 +858,25 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     // ============ Internal Liquidity ============
 
-    function _addLiquidity() internal {
+    /**
+     * @dev Deploys idle WETH / paired-token balances into the pool. Callers must ensure the
+     *      pool is calm (minting paths) — `pool.mint` has no price bound of its own.
+     *      1. (`_allowSwap`) swap only the imbalance between the idle inventory and the ratio
+     *         the main range needs at the current price ({_swapToMainRatio}), not a 50/50 split;
+     *      2. add as much as possible to the main range;
+     *      3. park whatever the main range could not absorb in the single-sided alt range
+     *         ({_deployLeftoverToAlt}), chosen from the token actually left over.
+     */
+    function _deployInventory(bool _allowSwap) internal {
         if (!initTicks || paused()) return;
 
+        // Leftovers below this (token1 units) stay idle — still counted in NAV and redeployed
+        // by the next minting call — instead of paying for an alt mint / re-placement.
+        uint256 _minLeftoverValue = _idleValueInToken1(_sqrtPrice()) * MIN_INVENTORY_SWAP_BPS / BASIS_POINTS;
+
+        if (_allowSwap) _swapToMainRatio();
         _mintPosition(positionMain);
-        _mintPosition(positionAlt);
+        _deployLeftoverToAlt(_minLeftoverValue);
     }
 
     function _mintPosition(Position memory _position) internal {
@@ -882,6 +898,207 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         }
     }
 
+    /**
+     * @dev Parks the inventory left after the main mint in the alt range. The alt range is
+     *      single-sided (entirely below spot for a token1 leftover, entirely above for a
+     *      token0 leftover), so it can only hold the token that is actually left over:
+     *      - existing alt already holds only that token -> add to it;
+     *      - existing alt holds the other token (or straddles spot) -> remove it, offer the
+     *        returned tokens to the main range again, then re-place the alt range around the
+     *        final leftover. Alt ticks are only reassigned once the old position is empty.
+     */
+    function _deployLeftoverToAlt(uint256 _minLeftoverValue) internal {
+        (bool _hasLeftover, bool _leftoverIsToken1) = _leftoverSide(_minLeftoverValue);
+        if (!_hasLeftover) return;
+
+        int24 _tick = _currentTick();
+        if (_positionLiquidity(positionAlt) > 0) {
+            if (_altHoldsOnly(_leftoverIsToken1, _tick)) {
+                _mintPosition(positionAlt);
+                return;
+            }
+
+            _pokePositions();
+            _accrueLpFees();
+            _removePosition(positionAlt);
+            _refreshLpFeesOwedSnapshot();
+
+            _mintPosition(positionMain);
+            (_hasLeftover, _leftoverIsToken1) = _leftoverSide(_minLeftoverValue);
+            if (!_hasLeftover) return;
+        }
+
+        _setAltTicks(_tick, _leftoverIsToken1);
+        _mintPosition(positionAlt);
+    }
+
+    /// @dev Which token dominates the idle inventory, compared in token1 units at spot.
+    ///      `_hasLeftover` is false when the dominant side is at or below `_minValue`.
+    function _leftoverSide(uint256 _minValue) internal view returns (bool _hasLeftover, bool _leftoverIsToken1) {
+        uint256 _value0 = _token0InToken1(token0.balanceOf(address(this)), _sqrtPrice());
+        uint256 _value1 = token1.balanceOf(address(this));
+        _leftoverIsToken1 = _value1 > _value0;
+        _hasLeftover = (_leftoverIsToken1 ? _value1 : _value0) > _minValue;
+    }
+
+    function _idleValueInToken1(uint160 _sqrtPriceX96) internal view returns (uint256) {
+        return _token0InToken1(token0.balanceOf(address(this)), _sqrtPriceX96) + token1.balanceOf(address(this));
+    }
+
+    /// @dev True when the alt range sits entirely on the side that holds only the given token
+    ///      (Uniswap V3: all token1 when `tick >= tickUpper`, all token0 when `tick < tickLower`).
+    function _altHoldsOnly(bool _token1, int24 _tick) internal view returns (bool) {
+        if (!_positionIsValid(positionAlt)) return false;
+        return _token1 ? _tick >= positionAlt.tickUpper : _tick < positionAlt.tickLower;
+    }
+
+    /**
+     * @dev Swaps the idle inventory towards the value ratio the main range needs at the
+     *      current (calm-gated) spot price, which is the price `pool.mint` charges at.
+     *      For a range [a, b] and spot p (sqrt prices), the token0 : token1 value split in
+     *      token1 units is `p·(b − p)/b : (p − a)` (all token0 below the range, all token1
+     *      above it). The swap is fee-adjusted: selling Δ of the excess token only adds
+     *      Δ·(1 − fee) of the other, so total value drops by fee·Δ and
+     *      `Δ = excess / (1 − fee·w_sold)`, where `w_sold` is the target share of the sold token. Swaps below
+     *      {MIN_INVENTORY_SWAP_BPS} of the deployed value are skipped. Any residual from
+     *      fees, slippage, or route/pool price differences is parked in the alt range.
+     */
+    function _swapToMainRatio() internal {
+        uint160 _sqrtPriceX96 = _sqrtPrice();
+        (uint256 _weight0, uint256 _weight1) = _mainValueWeights(_sqrtPriceX96);
+        uint256 _weightSum = _weight0 + _weight1;
+        if (_weightSum == 0) return;
+
+        uint256 _value0 = _token0InToken1(token0.balanceOf(address(this)), _sqrtPriceX96);
+        uint256 _value1 = token1.balanceOf(address(this));
+        uint256 _total = _value0 + _value1;
+        if (_total == 0) return;
+
+        uint256 _target1 = FullMath.mulDiv(_total, _weight1, _weightSum);
+        uint256 _minSwapValue = _total * MIN_INVENTORY_SWAP_BPS / BASIS_POINTS;
+
+        if (_value1 > _target1) {
+            uint256 _swap1 = _feeAdjusted(_value1 - _target1, _weight1, _weightSum);
+            if (_swap1 > _minSwapValue) _swapExactIn(address(token1), _swap1);
+        } else {
+            uint256 _target0 = _total - _target1;
+            if (_value0 > _target0) {
+                uint256 _swap0Value = _feeAdjusted(_value0 - _target0, _weight0, _weightSum);
+                if (_swap0Value > _minSwapValue) {
+                    _swapExactIn(address(token0), _token1InToken0(_swap0Value, _sqrtPriceX96));
+                }
+            }
+        }
+    }
+
+    /// @dev `excess / (1 − fee·weightSold/weightSum)` where `weightSold` is the target value
+    ///      weight of the token being sold.
+    function _feeAdjusted(uint256 _excess, uint256 _weightSold, uint256 _weightSum) internal view returns (uint256) {
+        uint256 _denominator = _FEE_DENOMINATOR * _weightSum;
+        return FullMath.mulDiv(_excess, _denominator, _denominator - uint256(_poolFee) * _weightSold);
+    }
+
+    /// @dev Token0 : token1 value weights (token1 units, sqrtX96 scale) of the main range at spot.
+    function _mainValueWeights(uint160 _sqrtPriceX96) internal view returns (uint256 _weight0, uint256 _weight1) {
+        uint160 _sqrtA = TickMath.getSqrtRatioAtTick(positionMain.tickLower);
+        uint160 _sqrtB = TickMath.getSqrtRatioAtTick(positionMain.tickUpper);
+        if (_sqrtPriceX96 <= _sqrtA) return (1, 0);
+        if (_sqrtPriceX96 >= _sqrtB) return (0, 1);
+        _weight0 = FullMath.mulDiv(_sqrtPriceX96, _sqrtB - _sqrtPriceX96, _sqrtB);
+        _weight1 = _sqrtPriceX96 - _sqrtA;
+    }
+
+    function _token0InToken1(uint256 _amount0, uint160 _sqrtPriceX96) internal pure returns (uint256) {
+        return
+            FullMath.mulDiv(FullMath.mulDiv(_amount0, _sqrtPriceX96, FixedPoint96.Q96), _sqrtPriceX96, FixedPoint96.Q96);
+    }
+
+    function _token1InToken0(uint256 _amount1, uint160 _sqrtPriceX96) internal pure returns (uint256) {
+        return
+            FullMath.mulDiv(FullMath.mulDiv(_amount1, FixedPoint96.Q96, _sqrtPriceX96), FixedPoint96.Q96, _sqrtPriceX96);
+    }
+
+    function _swapExactIn(address _tokenIn, uint256 _amountIn) internal {
+        if (_tokenIn == address(weth)) {
+            _swapWethToPairedToken(_amountIn);
+        } else {
+            _swapPairedTokenToWeth(_amountIn);
+        }
+    }
+
+    /**
+     * @dev Makes at least `_wethTarget` WETH available (best effort).
+     *      - Calm pool: no full unwind — idle WETH, then idle paired token, then a partial burn
+     *        of alt followed by main, sized at TWAP marks and padded by `swapSlippageBps` + the
+     *        pool fee so the paired-token leg can still cover the shortfall after conversion
+     *        costs. If that still falls short, everything is unwound as a fallback.
+     *      - Dislocated pool: full unwind first (v1 behaviour). A partial burn would need a
+     *        paired -> WETH swap for roughly half the payout at a skewed spot, which the
+     *        TWAP-bounded quote rightly refuses; the full unwind maximises the WETH obtained
+     *        without swapping.
+     */
+    function _sourceWeth(uint256 _wethTarget) internal {
+        uint256 _wethBalance = weth.balanceOf(address(this));
+        if (_wethBalance < _wethTarget && !_isCalm()) {
+            _removeLiquidityAndCollect();
+        } else if (_wethBalance < _wethTarget) {
+            uint256 _shortfall = _wethTarget - _wethBalance;
+            uint256 _bufferBps = swapSlippageBps + uint256(_poolFee) * BASIS_POINTS / _FEE_DENOMINATOR;
+            uint256 _needed = _shortfall * (BASIS_POINTS + _bufferBps) / BASIS_POINTS;
+            uint256 _idlePairedValue = _tokenValueInETH(address(pairedToken), pairedToken.balanceOf(address(this)));
+            if (_needed > _idlePairedValue) _decreaseLiquidityForValue(_needed - _idlePairedValue);
+        }
+
+        _convertToWeth(_wethTarget);
+
+        if (weth.balanceOf(address(this)) < _wethTarget && _hasPoolLiquidity()) {
+            _removeLiquidityAndCollect();
+            _convertToWeth(_wethTarget);
+        }
+    }
+
+    /// @dev Burns (and collects) roughly `_value` ETH worth of pool inventory: the alt range
+    ///      first (it is out of range and earns nothing), then the main range.
+    function _decreaseLiquidityForValue(uint256 _value) internal {
+        // Poke + accrue before any burn: a burn credits principal to `tokensOwed`, which must
+        // never be mistaken for LP fees.
+        _pokePositions();
+        _accrueLpFees();
+
+        uint160 _twapSqrtPriceX96 = _twapSqrtPrice();
+        uint256 _remaining = _burnForValue(positionAlt, _value, _twapSqrtPriceX96);
+        if (_remaining > 0) _burnForValue(positionMain, _remaining, _twapSqrtPriceX96);
+
+        _refreshLpFeesOwedSnapshot();
+    }
+
+    /// @dev Burns the share of `_position` worth `_value` (rounded up, capped at the whole
+    ///      position) and collects everything owed. Returns the value still to be sourced.
+    function _burnForValue(Position memory _position, uint256 _value, uint160 _twapSqrtPriceX96)
+        internal
+        returns (uint256 _remaining)
+    {
+        if (!_positionIsValid(_position)) return _value;
+
+        uint128 _liquidity = _positionLiquidity(_position);
+        if (_liquidity == 0) return _value;
+
+        (uint256 _amount0, uint256 _amount1) = _amountsForPosition(_position, _twapSqrtPriceX96);
+        uint256 _positionValue =
+            _tokenValueInETH(address(token0), _amount0) + _tokenValueInETH(address(token1), _amount1);
+
+        uint128 _burnLiquidity = _liquidity;
+        if (_positionValue > _value) {
+            uint256 _share = FullMath.mulDiv(_liquidity, _value, _positionValue) + 1;
+            if (_share < _liquidity) _burnLiquidity = uint128(_share);
+        } else {
+            _remaining = _value - _positionValue;
+        }
+
+        pool.burn(_position.tickLower, _position.tickUpper, _burnLiquidity);
+        pool.collect(address(this), _position.tickLower, _position.tickUpper, type(uint128).max, type(uint128).max);
+    }
+
     function _removeLiquidityAndCollect() internal {
         // Poke before accruing so fee growth since the last update is folded into
         // `tokensOwed`. Accrue before collect so the delta is locked into
@@ -894,6 +1111,12 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         _removePosition(positionAlt);
         _lpFeesOwedSnapshot0 = 0;
         _lpFeesOwedSnapshot1 = 0;
+    }
+
+    /// @dev Re-bases the LP-fee snapshot on the aggregate `tokensOwed` left after a partial
+    ///      collect (positions that were not collected keep their already-accrued owed).
+    function _refreshLpFeesOwedSnapshot() internal {
+        (_lpFeesOwedSnapshot0, _lpFeesOwedSnapshot1) = _lpFeesOwedAmounts();
     }
 
     function _pokePositions() internal {
@@ -921,34 +1144,64 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         pool.collect(address(this), _position.tickLower, _position.tickUpper, type(uint128).max, type(uint128).max);
     }
 
-    function _setTicksIfNeeded() internal {
-        if (!initTicks) _setTicks();
+    function _positionLiquidity(Position memory _position) internal view returns (uint128 _liquidity) {
+        if (!_positionIsValid(_position)) return 0;
+        (_liquidity,,,,) = pool.positions(_positionKey(_position));
     }
 
-    function _setTicks() internal {
-        int24 _tick = _currentTick();
-        int24 _width = positionWidth * tickSpacing;
+    function _hasPoolLiquidity() internal view returns (bool) {
+        return _positionLiquidity(positionMain) > 0 || _positionLiquidity(positionAlt) > 0;
+    }
 
-        (positionMain.tickLower, positionMain.tickUpper) = TickUtils.baseTicks(_tick, _width, tickSpacing);
-        _setAltTicks(_tick, _width);
+    /// @dev True when the main range has been placed and spot has left it or drifted past
+    ///      `rebalanceTickThreshold` from its center.
+    function _mainNeedsRecenter() internal view returns (bool) {
+        if (!initTicks) return false;
+
+        int24 _tick = _currentTick();
+        if (_tick <= positionMain.tickLower || _tick >= positionMain.tickUpper) return true;
+
+        int24 _centerTick = (positionMain.tickLower + positionMain.tickUpper) / 2;
+        return _abs(_tick - _centerTick) > _abs(rebalanceTickThreshold);
+    }
+
+    /// @dev Places the main range on first use, and re-centers it (full unwind) when spot has
+    ///      drifted out of the healthy band; otherwise leaves existing positions untouched.
+    function _recenterIfNeeded() internal {
+        if (!initTicks) {
+            _setMainTicks();
+        } else if (_mainNeedsRecenter()) {
+            _removeLiquidityAndCollect();
+            _setMainTicks();
+        }
+    }
+
+    /// @dev Only called when the main position is empty (first placement or after a full unwind).
+    function _setMainTicks() internal {
+        int24 _width = positionWidth * tickSpacing;
+        (positionMain.tickLower, positionMain.tickUpper) = TickUtils.baseTicks(_currentTick(), _width, tickSpacing);
         initTicks = true;
     }
 
-    function _setAltTicks(int24 _tick, int24 _width) internal {
-        int24 _tickFloor = TickUtils.floor(_tick, tickSpacing);
-        (uint256 _balance0, uint256 _balance1) = (token0.balanceOf(address(this)), token1.balanceOf(address(this)));
-        uint256 _value0 = _tokenValueInETH(address(token0), _balance0);
-        uint256 _value1 = _tokenValueInETH(address(token1), _balance1);
+    /// @dev Places the single-sided alt range next to spot: below it for a token1 leftover,
+    ///      above it for a token0 leftover. Reverts if the current alt position is not empty —
+    ///      NAV and fee accounting only read the current keys, so reassigning a non-empty
+    ///      position would orphan its value.
+    function _setAltTicks(int24 _tick, bool _leftoverIsToken1) internal {
+        if (_positionIsValid(positionAlt)) {
+            (uint128 _liquidity,,, uint128 _owed0, uint128 _owed1) = pool.positions(_positionKey(positionAlt));
+            if (_liquidity > 0 || _owed0 > 0 || _owed1 > 0) revert UniCLStratPositionNotEmpty();
+        }
 
-        if (_value0 < _value1) {
+        int24 _tickFloor = TickUtils.floor(_tick, tickSpacing);
+        int24 _width = positionWidth * tickSpacing;
+
+        if (_leftoverIsToken1) {
             positionAlt.tickLower = _tickFloor - _width;
             positionAlt.tickUpper = _tickFloor - tickSpacing;
-        } else if (_value1 < _value0) {
+        } else {
             positionAlt.tickLower = _tickFloor + tickSpacing;
             positionAlt.tickUpper = _tickFloor + _width;
-        } else {
-            positionAlt.tickLower = 0;
-            positionAlt.tickUpper = 0;
         }
     }
 
@@ -1103,25 +1356,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         } catch {}
 
         return (_lpFeesOwedSnapshot0, _lpFeesOwedSnapshot1);
-    }
-
-    function _balanceInventory() internal {
-        uint256 _wethBalance = weth.balanceOf(address(this));
-        uint256 _pairedBalance = pairedToken.balanceOf(address(this));
-        uint256 _wethValue = _tokenValueInETH(address(weth), _wethBalance);
-        uint256 _pairedValue = _tokenValueInETH(address(pairedToken), _pairedBalance);
-
-        if (_wethValue > _pairedValue) {
-            uint256 _excessWethValue = (_wethValue - _pairedValue) / 2;
-            if (_excessWethValue > 0) {
-                _swapWethToPairedToken(_excessWethValue);
-            }
-        } else if (_pairedValue > _wethValue) {
-            uint256 _excessPairedValue = (_pairedValue - _wethValue) / 2;
-            if (_excessPairedValue > 0) {
-                _swapPairedTokenToWeth(_ethValueToTokenAmount(address(pairedToken), _excessPairedValue));
-            }
-        }
     }
 
     /**
