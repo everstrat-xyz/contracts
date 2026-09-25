@@ -43,6 +43,7 @@ Standalone Foundry contracts repo for the EverStrat / "Everything Strategy" prot
     - `integrations/uniswap/IUniswapV3Router.sol`: Uniswap V3 SwapRouter interface
     - `integrations/IQuoter.sol`: Uniswap V3 quoter interface
   - `libraries/`: Utility libraries (Math, Auth, ExitQueueLimits)
+    - `libraries/strategies/UniCLStratLib.sol`: Externally linked library for UniCLStrat (oracle-bounded swap execution, inventory-ratio math, alt placement, partial burns, LP-fee accounting, NAV valuation) — keeps the strategy under EIP-170
     - `libraries/integrations/uniswap/`: Shared Uniswap V3 libraries (TickMath, FullMath, LiquidityAmounts, TickUtils, FixedPoint96, UniswapV3Path) used by UniCLStrat and the UniswapV3ConverterAdapter
 - `test/`: Contract tests using Forge
 - `script/`: Deployment and interaction scripts
@@ -337,7 +338,8 @@ The protocol implements the following core contracts:
 8. **UniCLStrat Contract** (UniCLStrat)
    - Native-ETH IStrategy implementation deploying funds into a Uniswap V3-style WETH/paired-token concentrated liquidity pool
    - **Static/Non-Upgradeable**: "code is law" — immutable once deployed
-   - Version: 2.0.0 (v2: ratio-aware inventory swap, alt position from the actual leftover, incremental deposit / partial-burn withdraw). Static — v1 → v2 is a new deployment + migration (`addStrategy(v2)`, v1 deposit weight 0, timelocked `Controller.withdrawFromStrategy(v1, nav)`, `removeStrategy(v1)`)
+   - Version: 2.0.0 (v2: ratio-aware inventory swap, alt position from the actual leftover, incremental deposit / partial-burn withdraw).
+   - **Linked library / size limit**: v2 alone exceeds EIP-170 (24,576 B), so swap execution, inventory math, alt placement, partial burns, LP-fee accounting (`LpFeeState` storage struct passed by pointer) and NAV valuation live in `UniCLStratLib` (`public` functions → DELEGATECALL in the strategy's context; stateless, no funds). Runtime ≈ 24.2 KB (≈ 400 B headroom with the default `ipfs` metadata hash) — check `forge build --sizes` (CI gate) before adding code. `forge script` deploys the library via CREATE2 and links it automatically. Static — v1 → v2 is a new deployment + migration (`addStrategy(v2)`, v1 deposit weight 0, timelocked `Controller.withdrawFromStrategy(v1, nav)`, `removeStrategy(v1)`)
    - Location: `src/contracts/strategies/UniCLStrat.sol`
    - Interface: `src/interfaces/strategies/IUniCLStrat.sol`
    - Tests: `test/unit/UniCLStrat.t.sol`, `test/fuzz/UniCLStratFuzz.t.sol`, `test/fork/UniCLStratFork.t.sol`; tree: `test/trees/UniCLStrat.tree`

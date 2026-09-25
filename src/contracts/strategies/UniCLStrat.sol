@@ -24,11 +24,10 @@ import {IUniswapV3Pool} from "../../interfaces/integrations/uniswap/IUniswapV3Po
 import {IUniswapV3Factory} from "../../interfaces/integrations/uniswap/IUniswapV3Factory.sol";
 import {IWETH} from "../../interfaces/integrations/IWETH.sol";
 
-import {FixedPoint96} from "../../libraries/integrations/uniswap/FixedPoint96.sol";
-import {FullMath} from "../../libraries/integrations/uniswap/FullMath.sol";
 import {LiquidityAmounts} from "../../libraries/integrations/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "../../libraries/integrations/uniswap/TickMath.sol";
 import {TickUtils} from "../../libraries/integrations/uniswap/TickUtils.sol";
+import {UniCLStratLib} from "../../libraries/strategies/UniCLStratLib.sol";
 
 /**
  * @title UniCLStrat
@@ -80,7 +79,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     uint32 public constant MAX_TWAP_INTERVAL = uint32(type(uint16).max) * MAX_BLOCK_SECONDS;
     uint256 public constant DEFAULT_SWAP_SLIPPAGE_BPS = 100;
     uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 200;
-    uint256 public constant SWAP_DEADLINE_OFFSET = 15 minutes;
+    uint256 public constant SWAP_DEADLINE_OFFSET = UniCLStratLib.SWAP_DEADLINE_OFFSET;
     /// @dev Maximum deviation tolerated between an adapter quote and the Chainlink-implied
     ///      amount. NOTE: adapter quotes are net of the DEX pool fee while the Chainlink
     ///      amount is a gross mid-price, so the pool's fee tier consumes part of this
@@ -89,13 +88,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     ///      200 bps supports fee tiers up to 1% (100 bps), leaving at least 100 bps of
     ///      genuine TWAP-vs-Chainlink drift allowance; route configs should prefer pools
     ///      with fee tiers <= 0.3% (30 bps, leaving 170 bps of drift allowance).
-    uint256 public constant MAX_QUOTE_DEVIATION_BPS = 200;
+    uint256 public constant MAX_QUOTE_DEVIATION_BPS = UniCLStratLib.MAX_QUOTE_DEVIATION_BPS;
     /// @dev Inventory swaps smaller than this share (bps) of the value being deployed are
     ///      skipped: the residual is parked in the alt position instead, which is cheaper
     ///      than paying swap gas + fees for a negligible ratio correction.
     uint256 public constant MIN_INVENTORY_SWAP_BPS = 10;
-    /// @dev Uniswap V3 fee denominator (fee tiers are in hundredths of a bip).
-    uint256 private constant _FEE_DENOMINATOR = 1_000_000;
 
     // ============ Immutable State ============
 
@@ -120,20 +117,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     uint256 private _totalDeposited;
     uint256 private _totalWithdrawn;
 
-    /// @dev Cumulative LP trading fees earned in native pool token amounts (lifetime).
-    ///      Advanced by `_accrueLpFees` / `_tryAccrueLpFees` (settle / remove-collect /
-    ///      emergency exit), not by `sync()`.
-    uint256 private _cumulativeLpFeesEarned0;
-    uint256 private _cumulativeLpFeesEarned1;
-    /// @dev Cumulative LP fee token amounts already charged via `settlePerformanceFee`, or
-    ///      written off on emergency exit (`charged = earned` in `_resetLpFeeAccounting`).
-    uint256 private _cumulativeLpFeesCharged0;
-    uint256 private _cumulativeLpFeesCharged1;
-    /// @dev Snapshot of aggregate `tokensOwed` at the last accrue pass (per pool token).
-    ///      Pending/settle include the live `tokensOwed - snapshot` delta without a sync flush.
-    ///      `_tryGetLpFeesOwedAmounts` falls back to this when either `positions` read reverts.
-    uint256 private _lpFeesOwedSnapshot0;
-    uint256 private _lpFeesOwedSnapshot1;
+    /// @dev LP-fee accounting (earned / charged / owed snapshot); see {UniCLStratLib-LpFeeState}.
+    UniCLStratLib.LpFeeState private _lpFees;
 
     uint256 public maxTotalNAV;
 
@@ -242,9 +227,17 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     // ============ Strategy Views ============
     function navInETH() public view returns (uint256) {
-        (uint256 _amount0, uint256 _amount1) = _balances();
-        return address(this).balance + _tokenValueInETH(address(token0), _amount0)
-            + _tokenValueInETH(address(token1), _amount1);
+        return address(this).balance
+            + UniCLStratLib.inventoryValueInETH(
+            pool,
+            IOracle(_registry.oracle()),
+            address(weth),
+            address(token0),
+            address(token1),
+            positionMain,
+            positionAlt,
+            _twapSqrtPrice()
+        );
     }
 
     function maxDeposit() external view returns (uint256) {
@@ -424,19 +417,19 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      * @notice Refreshes on-chain state via the keeper path.
      * @dev Pokes Uniswap V3 positions with `burn(..., 0)` so accrued LP fees flow into
      *      `tokensOwed` (NAV and `pendingPerformanceFeeInETH` both read that storage). Does not
-     *      call `_accrueLpFees()` — the pending view already includes the live
+     *      call `UniCLStratLib.accrueLpFees` — the pending view already includes the live
      *      `tokensOwed - snapshot` delta, and settle/remove accrue when they need durable
      *      counters. Does not remove liquidity or call `collect()`.
      */
     function sync() external onlyAuthContract(Auth.STRATEGY_MANAGER) whenNotPaused nonReentrant {
-        _pokePositions();
+        UniCLStratLib.pokePositions(pool, positionMain, positionAlt);
         emit Synced();
     }
 
     /**
      * @inheritdoc IStrategy
      * @dev Over already-materialized `tokensOwed` plus stored counters (via the live
-     *      `tokensOwed - snapshot` delta in `_unchargedLpFeeAmounts`). Unpoked fee growth is
+     *      `tokensOwed - snapshot` delta in `UniCLStratLib.unchargedLpFeeAmounts`). Unpoked fee growth is
      *      invisible until `sync()` or a remove/collect poke. Accrue is not required for the
      *      view — only for durable counter updates on settle/remove.
      */
@@ -461,18 +454,17 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     {
         if (_performanceFeeBps == 0 || paused()) return 0;
 
-        _accrueLpFees();
-        (uint256 _uncharged0, uint256 _uncharged1) = _unchargedLpFeeAmounts();
+        (uint256 _uncharged0, uint256 _uncharged1) =
+            UniCLStratLib.accrueLpFees(pool, _lpFees, positionMain, positionAlt);
         if (_uncharged0 == 0 && _uncharged1 == 0) return 0;
 
-        uint256 _feeBaseETH =
-            _tokenValueInETH(address(token0), _uncharged0) + _tokenValueInETH(address(token1), _uncharged1);
+        uint256 _feeBaseETH = _pairValueInETH(_uncharged0, _uncharged1);
         feeETH = _feeBaseETH * _performanceFeeBps / BASIS_POINTS;
         // Dust base: floor-division to zero must not write off the uncharged amounts.
         if (feeETH == 0) return 0;
 
-        _cumulativeLpFeesCharged0 = _cumulativeLpFeesEarned0;
-        _cumulativeLpFeesCharged1 = _cumulativeLpFeesEarned1;
+        _lpFees.charged0 = _lpFees.earned0;
+        _lpFees.charged1 = _lpFees.earned1;
         emit PerformanceFeeSettled(feeETH);
     }
 
@@ -546,8 +538,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *      value when the transfer succeeds.
      *
      *      This function never moves pool liquidity: it only transfers what the strategy
-     *      already holds. The LP-fee accounting reset (see {_resetLpFeeAccounting}) best-effort
-     *      accrues via {_tryAccrueLpFees} (snapshot fallback if `positions` reverts), so a
+     *      already holds. The LP-fee accounting reset (see {UniCLStratLib-resetLpFeeAccounting}) best-effort
+     *      accrues (snapshot fallback if `positions` reverts), so a
      *      degraded pool cannot block the exit. If the pause-time pool unwind was skipped
      *      (see {_pauseStrategy}), any LP liquidity stays in the pool — it remains attributed
      *      to the strategy via `navInETH()` and is recovered once the pool functions again, by
@@ -566,22 +558,13 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // ETH first: paired-token transfer is best-effort and must not roll back the sweep.
         if (_ethToSend > 0) payable(strategyManagerAddress).sendValue(_ethToSend);
 
-        // Paired-token `balanceOf` is best-effort: a paused/blacklisted token must not hostage
-        // the ETH sweep. Parameterless catch — same returndata-bomb rationale as pause-time paths.
-        try pairedToken.balanceOf(address(this)) returns (uint256 _pairedBalance) {
-            if (_pairedBalance > 0) {
-                // trySafeTransfer (not try/catch on transfer): empty returndata from USDT-style
-                // tokens cannot be ABI-decoded as `bool` and would revert outside catch scope,
-                // hostaging the ETH sweep. OZ treats empty returndata + code as success.
-                if (!pairedToken.trySafeTransfer(strategyManagerAddress, _pairedBalance)) {
-                    emit PairedTokenTransferSkipped();
-                }
-            }
-        } catch {
+        // Paired-token recovery is best-effort (see {UniCLStratLib-trySweepToken}): a paused or
+        // blacklisted token must not hostage the ETH sweep above.
+        if (!UniCLStratLib.trySweepToken(address(pairedToken), strategyManagerAddress)) {
             emit PairedTokenTransferSkipped();
         }
 
-        _resetLpFeeAccounting();
+        UniCLStratLib.resetLpFeeAccounting(pool, _lpFees, positionMain, positionAlt);
 
         emit EmergencyExited(_ethToSend);
     }
@@ -665,22 +648,14 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         bytes memory _wethToPairedTokenPath,
         bytes memory _pairedTokenToWethPath
     ) private view {
-        IConverter converter = IConverter(_registry.converter());
-
-        if (_swapAdapter == address(0)) revert UniCLStratInvalidRouteConfig();
-        if (_swapAdapter.code.length == 0) revert UniCLStratInvalidRouteConfig();
-        if (!converter.validateRoute(_swapAdapter, _wethToPairedTokenPath)) revert UniCLStratInvalidRouteConfig();
-        if (!converter.validateRoute(_swapAdapter, _pairedTokenToWethPath)) revert UniCLStratInvalidRouteConfig();
-
-        (address _tokenIn, address _tokenOut) = converter.routeTokens(_swapAdapter, _wethToPairedTokenPath);
-        if (_tokenIn != address(weth) || _tokenOut != address(pairedToken)) {
-            revert UniCLStratInvalidRouteConfig();
-        }
-
-        (_tokenIn, _tokenOut) = converter.routeTokens(_swapAdapter, _pairedTokenToWethPath);
-        if (_tokenIn != address(pairedToken) || _tokenOut != address(weth)) {
-            revert UniCLStratInvalidRouteConfig();
-        }
+        UniCLStratLib.validateRouteConfig(
+            IConverter(_registry.converter()),
+            _swapAdapter,
+            _wethToPairedTokenPath,
+            _pairedTokenToWethPath,
+            address(weth),
+            address(pairedToken)
+        );
     }
 
     function _setSwapSlippageBps(uint256 _newSwapSlippageBps) private {
@@ -746,20 +721,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     // ============ Private View Helpers ============
 
-    function _balances() private view returns (uint256 _amount0, uint256 _amount1) {
-        (uint256 _poolAmount0, uint256 _poolAmount1) = _balancesOfPool();
-        _amount0 = token0.balanceOf(address(this)) + _poolAmount0;
-        _amount1 = token1.balanceOf(address(this)) + _poolAmount1;
-    }
-
-    function _balancesOfPool() private view returns (uint256 _amount0, uint256 _amount1) {
-        uint160 _sqrtPriceX96 = _twapSqrtPrice();
-        (uint256 _mainAmount0, uint256 _mainAmount1) = _amountsForPosition(positionMain, _sqrtPriceX96);
-        (uint256 _altAmount0, uint256 _altAmount1) = _amountsForPosition(positionAlt, _sqrtPriceX96);
-        _amount0 = _mainAmount0 + _altAmount0;
-        _amount1 = _mainAmount1 + _altAmount1;
-    }
-
     function _maxDeposit() internal view returns (uint256) {
         if (paused() || !_isCalm()) return 0;
 
@@ -818,35 +779,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     ///      will compute; in-use cardinality is necessary so that TWAP is not a
     ///      one-observation spot extrapolation. Neither check is sufficient alone.
     function _requireTwapOracle(uint32 _interval) internal view {
-        _requireTwapAvailable(_interval);
-        _requireObservationCardinality(_interval);
-    }
-
-    /// @dev `pool.observe([interval, 0])` must succeed for the configured window.
-    function _requireTwapAvailable(uint32 _interval) internal view {
-        (bool _available,) = _observeTwap(_interval);
-        if (!_available) revert UniCLStratPoolTWAPNotAvailable();
-    }
-
-    /// @dev In-use ring length (`slot0.observationCardinality`, not Next) must cover
-    ///      `ceil(_interval / MAX_BLOCK_SECONDS)` slots, floored at
-    ///      {MIN_OBSERVATION_CARDINALITY}. Rejects the quiet cardinality-1 pool that
-    ///      still serves `observe` by extrapolating with the current tick.
-    function _requireObservationCardinality(uint32 _interval) internal view {
-        (,,, uint16 _cardinality,,,) = pool.slot0();
-        uint16 _required = _requiredObservationCardinality(_interval);
-        if (_cardinality < _required) {
-            revert UniCLStratInsufficientObservationCardinality(_cardinality, _required);
-        }
-    }
-
-    function _requiredObservationCardinality(uint32 _interval) internal pure returns (uint16) {
-        uint256 _required = (uint256(_interval) + MAX_BLOCK_SECONDS - 1) / MAX_BLOCK_SECONDS;
-        if (_required < MIN_OBSERVATION_CARDINALITY) _required = MIN_OBSERVATION_CARDINALITY;
-        // Uniswap's ring is uint16; a window that needs more slots cannot be densely
-        // served by any V3 pool. Callers must reject `> MAX_TWAP_INTERVAL` first.
-        if (_required > type(uint16).max) revert UniCLStratInvalidConfig();
-        return uint16(_required);
+        UniCLStratLib.requireTwapOracle(pool, _interval, MIN_OBSERVATION_CARDINALITY, MAX_BLOCK_SECONDS);
     }
 
     /// @dev Shared with the UniswapV3ConverterAdapter via {TickUtils.tryMeanTick};
@@ -912,44 +845,34 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (!_hasLeftover) return;
 
         int24 _tick = _currentTick();
-        if (_positionLiquidity(positionAlt) > 0) {
-            if (_altHoldsOnly(_leftoverIsToken1, _tick)) {
+        (bool _occupied, bool _holdsOnlyLeftover) = UniCLStratLib.altState(pool, positionAlt, _tick, _leftoverIsToken1);
+        if (_occupied) {
+            if (_holdsOnlyLeftover) {
                 _mintPosition(positionAlt);
                 return;
             }
 
-            _pokePositions();
-            _accrueLpFees();
-            _removePosition(positionAlt);
-            _refreshLpFeesOwedSnapshot();
+            UniCLStratLib.removeAltLiquidity(pool, _lpFees, positionMain, positionAlt);
 
             _mintPosition(positionMain);
             (_hasLeftover, _leftoverIsToken1) = _leftoverSide(_minLeftoverValue);
             if (!_hasLeftover) return;
         }
 
-        _setAltTicks(_tick, _leftoverIsToken1);
+        UniCLStratLib.placeAlt(pool, positionAlt, _tick, _leftoverIsToken1, tickSpacing, positionWidth * tickSpacing);
         _mintPosition(positionAlt);
     }
 
     /// @dev Which token dominates the idle inventory, compared in token1 units at spot.
     ///      `_hasLeftover` is false when the dominant side is at or below `_minValue`.
-    function _leftoverSide(uint256 _minValue) internal view returns (bool _hasLeftover, bool _leftoverIsToken1) {
-        uint256 _value0 = _token0InToken1(token0.balanceOf(address(this)), _sqrtPrice());
-        uint256 _value1 = token1.balanceOf(address(this));
-        _leftoverIsToken1 = _value1 > _value0;
-        _hasLeftover = (_leftoverIsToken1 ? _value1 : _value0) > _minValue;
+    function _leftoverSide(uint256 _minValue) internal view returns (bool, bool) {
+        return UniCLStratLib.leftoverSide(address(token0), address(token1), _sqrtPrice(), _minValue);
     }
 
     function _idleValueInToken1(uint160 _sqrtPriceX96) internal view returns (uint256) {
-        return _token0InToken1(token0.balanceOf(address(this)), _sqrtPriceX96) + token1.balanceOf(address(this));
-    }
-
-    /// @dev True when the alt range sits entirely on the side that holds only the given token
-    ///      (Uniswap V3: all token1 when `tick >= tickUpper`, all token0 when `tick < tickLower`).
-    function _altHoldsOnly(bool _token1, int24 _tick) internal view returns (bool) {
-        if (!_positionIsValid(positionAlt)) return false;
-        return _token1 ? _tick >= positionAlt.tickUpper : _tick < positionAlt.tickLower;
+        return
+            UniCLStratLib.token0InToken1(token0.balanceOf(address(this)), _sqrtPriceX96)
+                + token1.balanceOf(address(this));
     }
 
     /**
@@ -964,62 +887,18 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *      fees, slippage, or route/pool price differences is parked in the alt range.
      */
     function _swapToMainRatio() internal {
-        uint160 _sqrtPriceX96 = _sqrtPrice();
-        (uint256 _weight0, uint256 _weight1) = _mainValueWeights(_sqrtPriceX96);
-        uint256 _weightSum = _weight0 + _weight1;
-        if (_weightSum == 0) return;
+        (bool _sellToken1, uint256 _amountIn) = UniCLStratLib.inventorySwap(
+            _sqrtPrice(),
+            positionMain.tickLower,
+            positionMain.tickUpper,
+            token0.balanceOf(address(this)),
+            token1.balanceOf(address(this)),
+            _poolFee,
+            MIN_INVENTORY_SWAP_BPS
+        );
+        if (_amountIn == 0) return;
 
-        uint256 _value0 = _token0InToken1(token0.balanceOf(address(this)), _sqrtPriceX96);
-        uint256 _value1 = token1.balanceOf(address(this));
-        uint256 _total = _value0 + _value1;
-        if (_total == 0) return;
-
-        uint256 _target1 = FullMath.mulDiv(_total, _weight1, _weightSum);
-        uint256 _minSwapValue = _total * MIN_INVENTORY_SWAP_BPS / BASIS_POINTS;
-
-        if (_value1 > _target1) {
-            uint256 _swap1 = _feeAdjusted(_value1 - _target1, _weight1, _weightSum);
-            if (_swap1 > _minSwapValue) _swapExactIn(address(token1), _swap1);
-        } else {
-            uint256 _target0 = _total - _target1;
-            if (_value0 > _target0) {
-                uint256 _swap0Value = _feeAdjusted(_value0 - _target0, _weight0, _weightSum);
-                if (_swap0Value > _minSwapValue) {
-                    _swapExactIn(address(token0), _token1InToken0(_swap0Value, _sqrtPriceX96));
-                }
-            }
-        }
-    }
-
-    /// @dev `excess / (1 − fee·weightSold/weightSum)` where `weightSold` is the target value
-    ///      weight of the token being sold.
-    function _feeAdjusted(uint256 _excess, uint256 _weightSold, uint256 _weightSum) internal view returns (uint256) {
-        uint256 _denominator = _FEE_DENOMINATOR * _weightSum;
-        return FullMath.mulDiv(_excess, _denominator, _denominator - uint256(_poolFee) * _weightSold);
-    }
-
-    /// @dev Token0 : token1 value weights (token1 units, sqrtX96 scale) of the main range at spot.
-    function _mainValueWeights(uint160 _sqrtPriceX96) internal view returns (uint256 _weight0, uint256 _weight1) {
-        uint160 _sqrtA = TickMath.getSqrtRatioAtTick(positionMain.tickLower);
-        uint160 _sqrtB = TickMath.getSqrtRatioAtTick(positionMain.tickUpper);
-        if (_sqrtPriceX96 <= _sqrtA) return (1, 0);
-        if (_sqrtPriceX96 >= _sqrtB) return (0, 1);
-        _weight0 = FullMath.mulDiv(_sqrtPriceX96, _sqrtB - _sqrtPriceX96, _sqrtB);
-        _weight1 = _sqrtPriceX96 - _sqrtA;
-    }
-
-    function _token0InToken1(uint256 _amount0, uint160 _sqrtPriceX96) internal pure returns (uint256) {
-        return
-            FullMath.mulDiv(FullMath.mulDiv(_amount0, _sqrtPriceX96, FixedPoint96.Q96), _sqrtPriceX96, FixedPoint96.Q96);
-    }
-
-    function _token1InToken0(uint256 _amount1, uint160 _sqrtPriceX96) internal pure returns (uint256) {
-        return
-            FullMath.mulDiv(FullMath.mulDiv(_amount1, FixedPoint96.Q96, _sqrtPriceX96), FixedPoint96.Q96, _sqrtPriceX96);
-    }
-
-    function _swapExactIn(address _tokenIn, uint256 _amountIn) internal {
-        if (_tokenIn == address(weth)) {
+        if (address(_sellToken1 ? token1 : token0) == address(weth)) {
             _swapWethToPairedToken(_amountIn);
         } else {
             _swapPairedTokenToWeth(_amountIn);
@@ -1039,109 +918,47 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      */
     function _sourceWeth(uint256 _wethTarget) internal {
         uint256 _wethBalance = weth.balanceOf(address(this));
-        if (_wethBalance < _wethTarget && !_isCalm()) {
-            _removeLiquidityAndCollect();
-        } else if (_wethBalance < _wethTarget) {
-            uint256 _shortfall = _wethTarget - _wethBalance;
-            uint256 _bufferBps = swapSlippageBps + uint256(_poolFee) * BASIS_POINTS / _FEE_DENOMINATOR;
-            uint256 _needed = _shortfall * (BASIS_POINTS + _bufferBps) / BASIS_POINTS;
-            uint256 _idlePairedValue = _tokenValueInETH(address(pairedToken), pairedToken.balanceOf(address(this)));
+        bool _fullUnwind = _wethBalance < _wethTarget && !_isCalm();
+
+        if (!_fullUnwind && _wethBalance < _wethTarget) {
+            uint256 _bufferBps = swapSlippageBps + uint256(_poolFee) / 100; // fee tier (1e-6) -> bps
+            uint256 _needed = (_wethTarget - _wethBalance) * (BASIS_POINTS + _bufferBps) / BASIS_POINTS;
+            uint256 _pairedBalance = pairedToken.balanceOf(address(this));
+            uint256 _idlePairedValue = address(pairedToken) == address(token0)
+                ? _pairValueInETH(_pairedBalance, 0)
+                : _pairValueInETH(0, _pairedBalance);
             if (_needed > _idlePairedValue) _decreaseLiquidityForValue(_needed - _idlePairedValue);
         }
 
-        _convertToWeth(_wethTarget);
-
-        if (weth.balanceOf(address(this)) < _wethTarget && _hasPoolLiquidity()) {
-            _removeLiquidityAndCollect();
+        // Pass 0 converts after the (partial or full) unwind above; pass 1 is the full-unwind
+        // fallback when the partial path still leaves WETH short and liquidity remains.
+        for (uint256 _pass; _pass < 2; ++_pass) {
+            if (_fullUnwind) _removeLiquidityAndCollect();
             _convertToWeth(_wethTarget);
+            if (weth.balanceOf(address(this)) >= _wethTarget || !_hasPoolLiquidity()) return;
+            _fullUnwind = true;
         }
     }
 
     /// @dev Burns (and collects) roughly `_value` ETH worth of pool inventory: the alt range
     ///      first (it is out of range and earns nothing), then the main range.
     function _decreaseLiquidityForValue(uint256 _value) internal {
-        // Poke + accrue before any burn: a burn credits principal to `tokensOwed`, which must
-        // never be mistaken for LP fees.
-        _pokePositions();
-        _accrueLpFees();
-
-        uint160 _twapSqrtPriceX96 = _twapSqrtPrice();
-        uint256 _remaining = _burnForValue(positionAlt, _value, _twapSqrtPriceX96);
-        if (_remaining > 0) _burnForValue(positionMain, _remaining, _twapSqrtPriceX96);
-
-        _refreshLpFeesOwedSnapshot();
+        UniCLStratLib.decreaseLiquidityForValue(
+            pool,
+            _lpFees,
+            positionMain,
+            positionAlt,
+            _swapConfig(),
+            address(token0),
+            address(token1),
+            _value,
+            _twapSqrtPrice()
+        );
     }
 
-    /// @dev Burns the share of `_position` worth `_value` (rounded up, capped at the whole
-    ///      position) and collects everything owed. Returns the value still to be sourced.
-    function _burnForValue(Position memory _position, uint256 _value, uint160 _twapSqrtPriceX96)
-        internal
-        returns (uint256 _remaining)
-    {
-        if (!_positionIsValid(_position)) return _value;
-
-        uint128 _liquidity = _positionLiquidity(_position);
-        if (_liquidity == 0) return _value;
-
-        (uint256 _amount0, uint256 _amount1) = _amountsForPosition(_position, _twapSqrtPriceX96);
-        uint256 _positionValue =
-            _tokenValueInETH(address(token0), _amount0) + _tokenValueInETH(address(token1), _amount1);
-
-        uint128 _burnLiquidity = _liquidity;
-        if (_positionValue > _value) {
-            uint256 _share = FullMath.mulDiv(_liquidity, _value, _positionValue) + 1;
-            if (_share < _liquidity) _burnLiquidity = uint128(_share);
-        } else {
-            _remaining = _value - _positionValue;
-        }
-
-        pool.burn(_position.tickLower, _position.tickUpper, _burnLiquidity);
-        pool.collect(address(this), _position.tickLower, _position.tickUpper, type(uint128).max, type(uint128).max);
-    }
-
+    /// @dev Full unwind of both positions with LP-fee accrual; see {UniCLStratLib-removeAllLiquidity}.
     function _removeLiquidityAndCollect() internal {
-        // Poke before accruing so fee growth since the last update is folded into
-        // `tokensOwed`. Accrue before collect so the delta is locked into
-        // `_cumulativeLpFeesEarned*` before owed is zeroed (the pending view's live
-        // delta would otherwise be lost). Accruing after a full burn would also pick
-        // up withdrawn principal briefly sitting in `tokensOwed` and inflate the fee base.
-        _pokePositions();
-        _accrueLpFees();
-        _removePosition(positionMain);
-        _removePosition(positionAlt);
-        _lpFeesOwedSnapshot0 = 0;
-        _lpFeesOwedSnapshot1 = 0;
-    }
-
-    /// @dev Re-bases the LP-fee snapshot on the aggregate `tokensOwed` left after a partial
-    ///      collect (positions that were not collected keep their already-accrued owed).
-    function _refreshLpFeesOwedSnapshot() internal {
-        (_lpFeesOwedSnapshot0, _lpFeesOwedSnapshot1) = _lpFeesOwedAmounts();
-    }
-
-    function _pokePositions() internal {
-        _pokePosition(positionMain);
-        _pokePosition(positionAlt);
-    }
-
-    function _pokePosition(Position memory _position) internal {
-        if (!_positionIsValid(_position)) return;
-
-        (uint128 _liquidity,,,,) = pool.positions(_positionKey(_position));
-        if (_liquidity > 0) {
-            pool.burn(_position.tickLower, _position.tickUpper, 0);
-        }
-    }
-
-    function _removePosition(Position memory _position) internal {
-        if (!_positionIsValid(_position)) return;
-
-        (uint128 _liquidity,,,,) = pool.positions(_positionKey(_position));
-        if (_liquidity > 0) {
-            pool.burn(_position.tickLower, _position.tickUpper, _liquidity);
-        }
-
-        pool.collect(address(this), _position.tickLower, _position.tickUpper, type(uint128).max, type(uint128).max);
+        UniCLStratLib.removeAllLiquidity(pool, _lpFees, positionMain, positionAlt);
     }
 
     function _positionLiquidity(Position memory _position) internal view returns (uint128 _liquidity) {
@@ -1183,28 +1000,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         initTicks = true;
     }
 
-    /// @dev Places the single-sided alt range next to spot: below it for a token1 leftover,
-    ///      above it for a token0 leftover. Reverts if the current alt position is not empty —
-    ///      NAV and fee accounting only read the current keys, so reassigning a non-empty
-    ///      position would orphan its value.
-    function _setAltTicks(int24 _tick, bool _leftoverIsToken1) internal {
-        if (_positionIsValid(positionAlt)) {
-            (uint128 _liquidity,,, uint128 _owed0, uint128 _owed1) = pool.positions(_positionKey(positionAlt));
-            if (_liquidity > 0 || _owed0 > 0 || _owed1 > 0) revert UniCLStratPositionNotEmpty();
-        }
-
-        int24 _tickFloor = TickUtils.floor(_tick, tickSpacing);
-        int24 _width = positionWidth * tickSpacing;
-
-        if (_leftoverIsToken1) {
-            positionAlt.tickLower = _tickFloor - _width;
-            positionAlt.tickUpper = _tickFloor - tickSpacing;
-        } else {
-            positionAlt.tickLower = _tickFloor + tickSpacing;
-            positionAlt.tickUpper = _tickFloor + _width;
-        }
-    }
-
     function _liquidityForPosition(Position memory _position) internal view returns (uint128) {
         return LiquidityAmounts.getLiquidityForAmounts(
             _sqrtPrice(),
@@ -1236,22 +1031,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         );
     }
 
-    function _amountsForPosition(Position memory _position, uint160 _sqrtPriceX96)
-        internal
-        view
-        returns (uint256 _amount0, uint256 _amount1)
-    {
-        if (!_positionIsValid(_position)) return (0, 0);
-
-        (uint128 _liquidity,,, uint128 _owed0, uint128 _owed1) = pool.positions(_positionKey(_position));
-        if (_liquidity > 0) {
-            (_amount0, _amount1) = _amountsForLiquidityAtSqrtPrice(_position, _liquidity, _sqrtPriceX96);
-        }
-
-        _amount0 += _owed0;
-        _amount1 += _owed1;
-    }
-
     function _positionKey(Position memory _position) internal view returns (bytes32) {
         return keccak256(abi.encodePacked(address(this), _position.tickLower, _position.tickUpper));
     }
@@ -1264,98 +1043,9 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     // ============ Internal Accounting ============
 
     function _unchargedLpFeesInETH() internal view returns (uint256) {
-        (uint256 _uncharged0, uint256 _uncharged1) = _unchargedLpFeeAmounts();
-        return _tokenValueInETH(address(token0), _uncharged0) + _tokenValueInETH(address(token1), _uncharged1);
-    }
-
-    function _unchargedLpFeeAmounts() internal view returns (uint256 uncharged0, uint256 uncharged1) {
-        (uint256 _current0, uint256 _current1) = _lpFeesOwedAmounts();
-
-        // Live delta: pending/settle can see fees materialized since the last `_accrueLpFees`
-        // without requiring sync to flush counters (sync is poke-only).
-        uint256 _earned0 = _cumulativeLpFeesEarned0;
-        uint256 _earned1 = _cumulativeLpFeesEarned1;
-        if (_current0 > _lpFeesOwedSnapshot0) {
-            _earned0 += _current0 - _lpFeesOwedSnapshot0;
-        }
-        if (_current1 > _lpFeesOwedSnapshot1) {
-            _earned1 += _current1 - _lpFeesOwedSnapshot1;
-        }
-
-        uncharged0 = _earned0 - _cumulativeLpFeesCharged0;
-        uncharged1 = _earned1 - _cumulativeLpFeesCharged1;
-    }
-
-    /// @dev Flushes `tokensOwed - snapshot` into `_cumulativeLpFeesEarned*` and advances the
-    ///      snapshot. Required before collect (or the live delta is lost when owed → 0) and
-    ///      before settle charges. Not used by `sync()` — poke alone is enough for NAV/pending.
-    function _accrueLpFees() internal {
-        (uint256 _current0, uint256 _current1) = _lpFeesOwedAmounts();
-        _accrueLpFeesFrom(_current0, _current1);
-    }
-
-    /// @dev Best-effort accrue for emergency paths. Uses {_tryGetLpFeesOwedAmounts}: on a
-    ///      degraded pool the current amounts fall back to the snapshot, so this is a no-op
-    ///      on earned/snapshot and cannot revert.
-    function _tryAccrueLpFees() internal {
-        (uint256 _current0, uint256 _current1) = _tryGetLpFeesOwedAmounts();
-        _accrueLpFeesFrom(_current0, _current1);
-    }
-
-    function _accrueLpFeesFrom(uint256 _current0, uint256 _current1) internal {
-        if (_current0 > _lpFeesOwedSnapshot0) {
-            _cumulativeLpFeesEarned0 += _current0 - _lpFeesOwedSnapshot0;
-        }
-        if (_current1 > _lpFeesOwedSnapshot1) {
-            _cumulativeLpFeesEarned1 += _current1 - _lpFeesOwedSnapshot1;
-        }
-        _lpFeesOwedSnapshot0 = _current0;
-        _lpFeesOwedSnapshot1 = _current1;
-    }
-
-    /// @dev Writes off pending LP fees after emergency exit so that only fee growth after
-    ///      the reset is feeable. Best-effort accrues (snapshot fallback if `positions`
-    ///      reverts), then aligns charged to earned — the same pattern as
-    ///      `settlePerformanceFee`. In-pool fees at reset time (including fees already
-    ///      charged via settle, which leaves tokens in-pool) become wind-down value and are
-    ///      never charged again on resume. Zeroing the counters instead would let the
-    ///      `tokensOwed - snapshot(0)` delta re-accrue already-charged fees as freshly
-    ///      earned, double-charging them at the next settle. When the pool is degraded the
-    ///      snapshot fallback makes accrue a no-op; charged = earned still clears counter
-    ///      pending, while any unread live growth above the snapshot stays feeable on resume.
-    function _resetLpFeeAccounting() internal {
-        _tryAccrueLpFees();
-        _cumulativeLpFeesCharged0 = _cumulativeLpFeesEarned0;
-        _cumulativeLpFeesCharged1 = _cumulativeLpFeesEarned1;
-    }
-
-    /// @dev Fail-closed aggregate `tokensOwed` across both positions. Used by NAV/pending/
-    ///      normal accrue paths where a degraded pool should revert.
-    function _lpFeesOwedAmounts() internal view returns (uint256 amount0, uint256 amount1) {
-        (,,, uint128 _mainOwed0, uint128 _mainOwed1) = pool.positions(_positionKey(positionMain));
-        (,,, uint128 _altOwed0, uint128 _altOwed1) = pool.positions(_positionKey(positionAlt));
-
-        amount0 = uint256(_mainOwed0) + uint256(_altOwed0);
-        amount1 = uint256(_mainOwed1) + uint256(_altOwed1);
-    }
-
-    /// @dev Best-effort aggregate `tokensOwed`. If either `positions` read reverts, falls
-    ///      back to the last aggregate snapshot (all-or-nothing — the snapshot is not
-    ///      per-position, so mixing a live leg with the aggregate snapshot is unsafe).
-    function _tryGetLpFeesOwedAmounts() internal view returns (uint256 amount0, uint256 amount1) {
-        // NOTE: parameterless catches mirror `_pauseStrategy` — binding the revert data
-        // would copy unbounded returndata into memory from a degraded pool.
-        try pool.positions(_positionKey(positionMain)) returns (
-            uint128, uint256, uint256, uint128 _main0, uint128 _main1
-        ) {
-            try pool.positions(_positionKey(positionAlt)) returns (
-                uint128, uint256, uint256, uint128 _alt0, uint128 _alt1
-            ) {
-                return (uint256(_main0) + uint256(_alt0), uint256(_main1) + uint256(_alt1));
-            } catch {}
-        } catch {}
-
-        return (_lpFeesOwedSnapshot0, _lpFeesOwedSnapshot1);
+        (uint256 _uncharged0, uint256 _uncharged1) =
+            UniCLStratLib.unchargedLpFeeAmounts(pool, _lpFees, positionMain, positionAlt);
+        return _pairValueInETH(_uncharged0, _uncharged1);
     }
 
     /**
@@ -1387,239 +1077,32 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         _swapViaRouteExactAmountIn(pairedTokenToWethPath, _swapAmountIn);
     }
 
-    /**
-     * @notice Swaps `_amountIn` along `_path` via the shared Converter, using an on-chain
-     *         quote as the base for slippage protection.
-     *
-     * @dev ── Security model for the on-chain quote ──────────────────────────────────
-     *      _swapViaRouteExactAmountIn derives `_minAmountOut` from `converter.quoteSwapExactAmountIn()`. The quote
-     *      and the swap execute ATOMICALLY in the same transaction (same block, same
-     *      `block.timestamp`), so the quote-then-swap pattern on its own provides no
-     *      protection against same-block pool manipulation: an attacker who can move the
-     *      quote source before this transaction executes (a flash loan in the same block,
-     *      or a miner/builder ordering attack) moves the derived `_minAmountOut` along
-     *      with the execution price. The layers below are what make the pattern safe,
-     *      NOT the quote itself:
-     *
-     *      0. **TWAP-based quote source**: the UniswapV3ConverterAdapter prices off the
-     *         pool TWAP cross-checked against Chainlink — neither input is movable within
-     *         a single block, so a same-block manipulation cannot drag the quote (and
-     *         hence `_minAmountOut`) toward a manipulated execution price. Other adapters
-     *         may quote from spot pool state, which is why the strategy keeps its own
-     *         adapter-agnostic defence layers (1–3 below).
-     *
-     *      1. **Calm-period guard** (`_isCalm`): a *caller-path* check, not
-     *         enforced in this helper. Minting callers (`deposit` /
-     *         `investIdleETH` / `rebalance`, and the re-add branch of
-     *         `withdraw`) require calm before inventory swaps. `withdraw` →
-     *         `_convertToWeth` reaches this helper while the pool may be
-     *         dislocated; layers 0, 2, and 3 carry that path. Rationale:
-     *         `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
-     *
-     *      2. **Slippage cap** (`MAX_SWAP_SLIPPAGE_BPS = 200`): even against a
-     *         manipulated quote, the minimum output floor caps the loss at 2 % of the
-     *         quoted amount.
-     *
-     *      3. **Oracle bounds** (`MAX_QUOTE_DEVIATION_BPS = 200`): the quoted amount is
-     *         cross-referenced against an independent price source (Chainlink) to detect
-     *         quote manipulation in any swap pool (not just the strategy pool).  Both an
-     *         upper and a lower bound are enforced symmetrically — a quote below the floor
-     *         or above the ceiling reverts.  This layer does not rely on pool state and
-     *         is enforced here even when the adapter performs its own oracle cross-check.
-     *
-     *      ── Fee interaction with the oracle bounds ──────────────────────────────────────
-     *      Adapter quotes are net of the DEX pool fee, while the Chainlink reference is a
-     *      gross mid-price. Even with TWAP and Chainlink perfectly aligned, the quote sits
-     *      `fee tier` bps below the oracle amount, consuming part of the floor budget.
-     *      MAX_QUOTE_DEVIATION_BPS (200) therefore must exceed the route's fee tier — see
-     *      the constant's documentation.
-     *     ────────────────────────────────────────────────────────────────────────────
-     *
-     *      A per-swap deadline (`block.timestamp + SWAP_DEADLINE_OFFSET`) is forwarded to
-     *      the Converter/router, but it is NOT a defence layer: it is computed from
-     *      `block.timestamp` at execution time, so it can never expire within this
-     *      transaction. It only satisfies the router interface.
-     */
-    function _swapViaRouteExactAmountIn(bytes memory _path, uint256 _amountIn) internal returns (uint256 _amountOut) {
-        if (_amountIn == 0) return 0;
+    /// @dev Oracle-bounded exact-input swap; security model documented in
+    ///      {UniCLStratLib-swapExactIn} (TWAP quote, oracle floor/ceiling, slippage cap).
+    function _swapViaRouteExactAmountIn(bytes memory _path, uint256 _amountIn) internal returns (uint256) {
+        return UniCLStratLib.swapExactIn(_swapConfig(), _path, _amountIn);
+    }
 
-        IConverter _converter = IConverter(_registry.converter());
+    /// @dev Oracle-bounded exact-output swap with balance-cap fallback; see {UniCLStratLib-swapExactOut}.
+    function _swapViaRouteExactAmountOut(bytes memory _path, uint256 _amountOut) internal returns (uint256) {
+        return UniCLStratLib.swapExactOut(_swapConfig(), _path, _amountOut);
+    }
 
-        uint256 _quotedAmount;
-        try _converter.quoteSwapExactAmountIn(swapAdapter, _path, _amountIn) returns (uint256 _result) {
-            _quotedAmount = _result;
-        } catch {
-            revert UniCLStratQuoteFailed();
-        }
+    function _swapConfig() internal view returns (UniCLStratLib.SwapConfig memory) {
+        return UniCLStratLib.SwapConfig({
+            converter: IConverter(_registry.converter()),
+            oracle: IOracle(_registry.oracle()),
+            adapter: swapAdapter,
+            weth: address(weth),
+            pairedToken: address(pairedToken),
+            slippageBps: swapSlippageBps
+        });
+    }
 
-        // Oracle sanity bounds: reject quotes that deviate too far from the
-        // Chainlink mid-price in either direction. Both floors and ceilings catch
-        // flash-loan-assisted manipulation of the quote pool (which may be a different
-        // fee tier than the strategy pool).
-        uint256 _oracleAmountOut = _calculateOracleAmountOut(_converter, _path, _amountIn);
-        _enforceOracleBounds(_quotedAmount, _oracleAmountOut);
-
-        uint256 _minAmountOut = _quotedAmount * (BASIS_POINTS - swapSlippageBps) / BASIS_POINTS;
-
-        _amountOut = _converter.executeSwapExactAmountIn(
-            swapAdapter, _path, _amountIn, _minAmountOut, block.timestamp + SWAP_DEADLINE_OFFSET
+    function _pairValueInETH(uint256 _amount0, uint256 _amount1) internal view returns (uint256) {
+        return UniCLStratLib.pairValueInETH(
+            IOracle(_registry.oracle()), address(weth), address(token0), address(token1), _amount0, _amount1
         );
-    }
-
-    /**
-     * @notice Reverts when a DEX-quoted amount deviates from the oracle-implied amount by more
-     *         than `MAX_QUOTE_DEVIATION_BPS` in either direction.
-     * @dev Shared by both swap directions. For exact-input swaps `_quoted`/`_oracleAmount` are
-     *      output amounts; for exact-output swaps they are input amounts. The symmetric
-     *      floor/ceiling band is direction-agnostic, so a single helper serves both. Reverts
-     *      with {UniCLStratQuoteBelowOracleFloor} or {UniCLStratQuoteExceedsOracleCeiling}.
-     * @param _quoted The amount returned by the DEX adapter quote
-     * @param _oracleAmount The independent oracle-implied amount to bound against
-     */
-    function _enforceOracleBounds(uint256 _quoted, uint256 _oracleAmount) internal pure {
-        uint256 _oracleFloor = _oracleAmount * (BASIS_POINTS - MAX_QUOTE_DEVIATION_BPS) / BASIS_POINTS;
-        uint256 _oracleCeiling = _oracleAmount * (BASIS_POINTS + MAX_QUOTE_DEVIATION_BPS) / BASIS_POINTS;
-        if (_quoted < _oracleFloor) {
-            revert UniCLStratQuoteBelowOracleFloor(_quoted, _oracleAmount);
-        }
-        if (_quoted > _oracleCeiling) {
-            revert UniCLStratQuoteExceedsOracleCeiling(_quoted, _oracleAmount);
-        }
-    }
-
-    /**
-     * @notice Computes the fair expected swap output using the protocol oracle (Chainlink)
-     *         as an independent price source, decoupled from any DEX pool state.
-     * @dev Decodes the output token from the DEX route path and derives the oracle-based
-     *      expected amount via the protocol's ETH/USD and token/USD price feeds.
-     *      The path encoding is adapter-specific; this function extracts the last 20 bytes
-     *      which, for Uniswap V3 packed encoding, is always the final output token.
-     * @param _converter The resolved Converter instance (passed by caller to avoid duplicate lookups)
-     * @param _path Adapter-specific route bytes
-     * @param _amountIn The input amount for the swap
-     * @return _oracleAmountOut The oracle-based fair output amount in token decimals
-     */
-    function _calculateOracleAmountOut(IConverter _converter, bytes memory _path, uint256 _amountIn)
-        internal
-        view
-        returns (uint256 _oracleAmountOut)
-    {
-        // Decode the output token using the adapter-agnostic helper rather than
-        // assuming a specific path encoding (Uniswap V3 packed, etc.).  This keeps
-        // the oracle ceiling correct even if setRouteConfig is called with a
-        // non-Uniswap adapter (Curve, Balancer, etc.).
-        (, address _outToken) = _converter.routeTokens(swapAdapter, _path);
-
-        if (_outToken == address(weth)) {
-            // pairedToken -> WETH: compute pairedToken value in ETH using oracle
-            return _tokenValueInETH(address(pairedToken), _amountIn);
-        } else {
-            // WETH -> pairedToken: compute WETH value in pairedToken using oracle
-            return _ethValueToTokenAmount(_outToken, _amountIn);
-        }
-    }
-
-    /**
-     * @notice Swaps along `_path` for exactly `_amountOut` of the output token via the
-     *         shared Converter, with an oracle-bounded, slippage-padded input cap.
-     *
-     * @dev Symmetric counterpart of {_swapViaRouteExactAmountIn} — the same
-     *      in-helper security model applies (TWAP-based quote, slippage cap,
-     *      oracle bounds), mirrored onto the input side: the quoted required
-     *      input is checked against the Chainlink-implied input, and the
-     *      slippage tolerance pads the input MAXIMUM instead of flooring the
-     *      output minimum. The calm-period guard is a caller-path check, not
-     *      enforced here; {_convertToWeth} (withdraw) is the intended non-calm
-     *      caller.
-     *
-     *      Balance-cap fallback: if the slippage-padded maximum input exceeds the
-     *      strategy's balance of the input token, the exact output is unaffordable.
-     *      Instead of reverting, the function falls back to a best-effort exact-input
-     *      swap of the whole input-token balance — the same "cap the input at the
-     *      available balance" pattern used by {_swapWethToPairedToken} and
-     *      {_swapPairedTokenToWeth}.
-     *
-     * @param _path Adapter-specific route bytes (forward encoding, same as exact-input)
-     * @param _amountOut The exact output amount desired
-     * @return _amountIn The input amount actually spent
-     */
-    function _swapViaRouteExactAmountOut(bytes memory _path, uint256 _amountOut) internal returns (uint256 _amountIn) {
-        if (_amountOut == 0) return 0;
-
-        IConverter _converter = IConverter(_registry.converter());
-
-        uint256 _quotedAmountIn;
-        try _converter.quoteSwapExactAmountOut(swapAdapter, _path, _amountOut) returns (uint256 _result) {
-            _quotedAmountIn = _result;
-        } catch {
-            revert UniCLStratQuoteFailed();
-        }
-
-        // Oracle sanity bounds on the required input (mirror of _swapViaRouteExactAmountIn's output
-        // bounds): a quote demanding too much input (above the ceiling) overprices the
-        // swap; one demanding too little (below the floor) signals a manipulated quote.
-        uint256 _oracleAmountIn = _calculateOracleAmountIn(_converter, _path, _amountOut);
-        _enforceOracleBounds(_quotedAmountIn, _oracleAmountIn);
-
-        uint256 _maxAmountIn = _quotedAmountIn * (BASIS_POINTS + swapSlippageBps) / BASIS_POINTS;
-
-        (address _inToken,) = _converter.routeTokens(swapAdapter, _path);
-        uint256 _inBalance = IERC20Metadata(_inToken).balanceOf(address(this));
-
-        // Balance-cap fallback: the exact output is unaffordable — swap the whole
-        // input-token balance best-effort via the exact-input path instead.
-        if (_maxAmountIn > _inBalance) {
-            _swapViaRouteExactAmountIn(_path, _inBalance);
-            return _inBalance;
-        }
-
-        return _converter.executeSwapExactAmountOut(
-            swapAdapter, _path, _amountOut, _maxAmountIn, block.timestamp + SWAP_DEADLINE_OFFSET
-        );
-    }
-
-    /**
-     * @notice Computes the fair required swap input for an exact output using the protocol
-     *         oracle (Chainlink) as an independent price source.
-     * @dev Input-side mirror of {_calculateOracleAmountOut}: decodes the input token from the
-     *      route via the adapter-agnostic helper and converts the desired output amount
-     *      into input-token terms through the oracle cross-rate.
-     * @param _converter The resolved Converter instance (passed by caller to avoid duplicate lookups)
-     * @param _path Adapter-specific route bytes
-     * @param _amountOut The desired output amount of the swap
-     * @return _oracleAmountIn The oracle-based fair input amount in token decimals
-     */
-    function _calculateOracleAmountIn(IConverter _converter, bytes memory _path, uint256 _amountOut)
-        internal
-        view
-        returns (uint256 _oracleAmountIn)
-    {
-        (address _inToken,) = _converter.routeTokens(swapAdapter, _path);
-
-        if (_inToken == address(weth)) {
-            // WETH -> pairedToken: required WETH input equals the ETH value of the output
-            return _tokenValueInETH(address(pairedToken), _amountOut);
-        } else {
-            // pairedToken -> WETH: required pairedToken input for the ETH-denominated output
-            return _ethValueToTokenAmount(_inToken, _amountOut);
-        }
-    }
-
-    function _tokenValueInETH(address _token, uint256 _amount) internal view returns (uint256) {
-        if (_amount == 0) return 0;
-        if (_token == address(weth)) return _amount;
-
-        // Direct token -> ETH cross-rate (single rounding step, both feeds staleness-checked).
-        return IOracle(_registry.oracle()).convert(_token, address(0), _amount, IERC20Metadata(_token).decimals(), 18);
-    }
-
-    function _ethValueToTokenAmount(address _token, uint256 _ethAmount) internal view returns (uint256) {
-        if (_ethAmount == 0) return 0;
-        if (_token == address(weth)) return _ethAmount;
-
-        // Direct ETH -> token cross-rate (single rounding step, both feeds staleness-checked).
-        return
-            IOracle(_registry.oracle()).convert(address(0), _token, _ethAmount, 18, IERC20Metadata(_token).decimals());
     }
 
     function _giveConverterAllowances() internal {
