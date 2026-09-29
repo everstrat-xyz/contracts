@@ -186,7 +186,7 @@ Controller::withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint2
     └── It should revert with AccessControlUnauthorizedAccount
 
 Controller::withdrawFromStrategy(address _strategy, uint256 _amount)
-├── Given caller has KEEPER_ROLE
+├── Given caller has ADMIN_ROLE or KEEPER_ROLE
 │   ├── When amount is zero
 │   │   └── It should revert with ControllerZeroAmountRequested
 │   ├── When amount is valid
@@ -200,8 +200,8 @@ Controller::withdrawFromStrategy(address _strategy, uint256 _amount)
 │   │   └── It should revert with EnforcedPause
 │   └── When strategy manager is not set
 │       └── It should revert (external call to address(0) will fail)
-└── Given caller does not have KEEPER_ROLE
-    └── It should revert with AccessControlUnauthorizedAccount
+└── Given caller has neither ADMIN_ROLE nor KEEPER_ROLE (including SECURITY_ROLE)
+    └── It should revert with RegistryClientCallerHasNoneOfRoles
 
 Controller::checkAndRebalanceStrategies()
 ├── Given caller has KEEPER_ROLE
@@ -358,7 +358,7 @@ Controller::unpause()
     └── It should revert with AccessControlUnauthorizedAccount
 
 Controller::version()
-└── It should return "1.0.0"
+└── It should return "1.1.0"
 
 Controller::eve()
 └── It should return EVE token address
