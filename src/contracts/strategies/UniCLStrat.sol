@@ -377,8 +377,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
             // Padded by slippage, a (near-)full request would burn every position on the
             // partial path anyway: unwind outright and skip the route-cost probe.
-            bool _nearFullWithdrawal =
-                _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
+            bool _nearFullWithdrawal = _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
             _sourceWeth(_remainder, _nearFullWithdrawal);
 
             uint256 _wethBalance = weth.balanceOf(address(this));
