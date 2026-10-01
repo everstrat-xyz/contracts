@@ -334,17 +334,18 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        balance, with no pool or Converter interaction (the LP position stays untouched).
      *      - Idle native ETH falls short: all idle ETH goes toward the payout and only the
      *        remainder is sourced from WETH, of which exactly the needed amount is unwrapped.
-     *        Native ETH is never wrapped just to be unwrapped again. When the pool is calm,
-     *        WETH is sourced in order: idle WETH, idle paired token, then a partial burn of the
-     *        alt position followed by the main position, sized (TWAP-marked, padded by
-     *        slippage + pool fee) to cover the shortfall; a dislocated pool is fully unwound
-     *        instead — see {_sourceWeth}. Only the missing WETH is bought with the paired
-     *        token; leftovers are re-added without any inventory swap (main first, alt with
-     *        the residual) and only when the pool is calm. The unwind itself is intentionally
-     *        not calm-gated: `navInETH()` marks at TWAP/oracle (a skewed burn does not
-     *        crystallize IL into NAV), the conversion swap is independently bounded, and a
-     *        calm revert would stall exit liquidity when redemptions spike. See
-     *        `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
+     *        Native ETH is never wrapped just to be unwrapped again. When the paired -> WETH
+     *        route is tradable, WETH is sourced in order: idle WETH, idle paired token, then a
+     *        partial burn of the alt position followed by the main position, sized
+     *        (at TWAP marks, padded by slippage + the route's measured cost) to cover the
+     *        shortfall. An untradable route, or a request that covers the whole NAV once
+     *        padded by `swapSlippageBps`, fully unwinds instead — see {_sourceWeth}. Only the
+     *        missing WETH is bought with the paired token; leftovers are re-added without any
+     *        inventory swap (main first, alt with the residual) and only when the pool is
+     *        calm. The unwind itself is intentionally not calm-gated: `navInETH()` marks at
+     *        TWAP/oracle (a skewed burn does not crystallize IL into NAV), the conversion swap
+     *        is independently bounded, and a calm revert would stall exit liquidity when
+     *        redemptions spike. See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *      In both paths the receiver gets a single native ETH transfer and the return value
      *      is the ETH actually delivered.
      */
@@ -374,7 +375,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             // from WETH via liquidity removal and paired-token conversion.
             uint256 _remainder = _amount - _idleETH;
 
-            _sourceWeth(_remainder);
+            // Padded by slippage, a (near-)full request would burn every position on the
+            // partial path anyway: unwind outright and skip the route-cost probe.
+            bool _nearFullWithdrawal =
+                _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
+            _sourceWeth(_remainder, _nearFullWithdrawal);
 
             uint256 _wethBalance = weth.balanceOf(address(this));
             uint256 _wethToUnwrap = _wethBalance < _remainder ? _wethBalance : _remainder;
@@ -912,15 +917,16 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        and padded by `swapSlippageBps` + the route's measured cost, so the paired-token
      *        leg still covers the shortfall after conversion. If that still falls short,
      *        everything is unwound as a fallback.
-     *      - Route untradable (quote fails or is outside the oracle band, e.g. the route trades
-     *        through this pool while it is dislocated): full unwind first, which maximises the
-     *        WETH obtained without swapping.
+     *      - Route untradable (quote fails or is outside the oracle band): full unwind first,
+     *        which maximises the WETH obtained without swapping.
+     *      - `_fullUnwind` set by the caller (near-full withdrawal): full unwind first, without
+     *        probing the route, since the partial burn would consume every position anyway.
      */
-    function _sourceWeth(uint256 _wethTarget) internal {
+    function _sourceWeth(uint256 _wethTarget, bool _fullUnwind) internal {
         uint256 _wethBalance = weth.balanceOf(address(this));
-        bool _fullUnwind;
+        if (_wethBalance >= _wethTarget) return;
 
-        if (_wethBalance < _wethTarget) {
+        if (!_fullUnwind) {
             uint256 _shortfall = _wethTarget - _wethBalance;
             (bool _tradable, uint256 _costBps) =
                 UniCLStratLib.routeCostBps(_swapConfig(), pairedTokenToWethPath, _shortfall, true);

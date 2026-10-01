@@ -2148,6 +2148,52 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertLe(strategy.navInETH(), NAV_TOLERANCE);
     }
 
+    function test_Withdraw_NearFullNAVUnwindsWithoutRouteProbe() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 amount = _nearFullWithdrawalThreshold();
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+
+        vm.expectCall(
+            address(converter),
+            abi.encodeCall(
+                IConverter.quoteSwapExactAmountOut,
+                (address(swapAdapter), strategy.pairedTokenToWethPath(), _wethShortfall(amount))
+            ),
+            0
+        );
+        vm.expectCall(
+            address(pool),
+            abi.encodeWithSelector(
+                MockUniCLPool.burn.selector,
+                mainPosition.tickLower,
+                mainPosition.tickUpper,
+                _positionLiquidity(mainPosition)
+            )
+        );
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, amount);
+
+        assertEq(withdrawn, amount);
+    }
+
+    function test_Withdraw_BelowNearFullNAVProbesRoute() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 amount = _nearFullWithdrawalThreshold() - 1;
+
+        vm.expectCall(
+            address(converter),
+            abi.encodeCall(
+                IConverter.quoteSwapExactAmountOut,
+                (address(swapAdapter), strategy.pairedTokenToWethPath(), _wethShortfall(amount))
+            ),
+            1
+        );
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, amount);
+
+        assertEq(withdrawn, amount);
+    }
+
     function test_Withdraw_PartialBurnDoesNotInflateLpFeeBase() public {
         _deposit(DEPOSIT_AMOUNT);
         IUniCLStrat.Position memory mainPosition = _mainPosition();
@@ -2178,6 +2224,18 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         strategy.sync();
         assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), 2 * expectedFee);
+    }
+
+    /// @dev Smallest amount that, padded by `swapSlippageBps`, covers the whole NAV.
+    function _nearFullWithdrawalThreshold() internal view returns (uint256) {
+        uint256 bps = strategy.BASIS_POINTS();
+        uint256 paddedBps = bps + strategy.swapSlippageBps();
+        return (strategy.navInETH() * bps + paddedBps - 1) / paddedBps;
+    }
+
+    /// @dev WETH the pool must supply for `_amount` (what the route-cost probe quotes).
+    function _wethShortfall(uint256 _amount) internal view returns (uint256) {
+        return _amount - address(strategy).balance - weth.balanceOf(address(strategy));
     }
 
     function _poolPositionKey(IUniCLStrat.Position memory _position) internal view returns (bytes32) {
