@@ -63,8 +63,6 @@ library UniCLStratLib {
     /// @dev Maximum deviation between an adapter quote and the Chainlink-implied amount; see
     ///      `UniCLStrat.MAX_QUOTE_DEVIATION_BPS` for the fee-tier interaction.
     uint256 internal constant MAX_QUOTE_DEVIATION_BPS = 200;
-    /// @dev Uniswap V3 fee denominator (fee tiers are in hundredths of a bip).
-    uint256 internal constant FEE_DENOMINATOR = 1_000_000;
 
     // ============ Inventory Math ============
 
@@ -72,10 +70,11 @@ library UniCLStratLib {
      * @notice Inventory swap that moves idle balances to the value ratio a range needs at spot.
      * @dev For a range [a, b] and spot p (sqrt prices), the token0 : token1 value split in token1
      *      units is `p·(b − p)/b : (p − a)` (all token0 below the range, all token1 above it).
-     *      Fee-adjusted: selling Δ of the excess token only adds Δ·(1 − fee) of the other, so total
-     *      value drops by fee·Δ and `Δ = excess / (1 − fee·w_sold)`, where `w_sold` is the target
-     *      share of the sold token. Returns `_amountIn == 0` when the swap value is at or below
-     *      `_minSwapBps` of the total.
+     *      Cost-adjusted: selling Δ of the excess token only adds Δ·(1 − cost) of the other, so
+     *      total value drops by cost·Δ and `Δ = excess / (1 − cost·w_sold)`, where `w_sold` is the
+     *      target share of the sold token. `_swapCostBps` is the route's measured cost (see
+     *      {routeCostBps}), not a fee tier: the route generally does not trade through the strategy
+     *      pool. Returns `_amountIn == 0` when the swap value is at or below `_minSwapBps` of the total.
      * @return _sellToken1 True to sell token1 for token0, false to sell token0 for token1
      * @return _amountIn Amount of the sold token (its own units)
      */
@@ -85,7 +84,7 @@ library UniCLStratLib {
         int24 _tickUpper,
         uint256 _balance0,
         uint256 _balance1,
-        uint24 _poolFee,
+        uint256 _swapCostBps,
         uint256 _minSwapBps
     ) public pure returns (bool _sellToken1, uint256 _amountIn) {
         (uint256 _weight0, uint256 _weight1) = _valueWeights(_sqrtPriceX96, _tickLower, _tickUpper);
@@ -99,14 +98,48 @@ library UniCLStratLib {
         uint256 _minSwapValue = _total * _minSwapBps / BASIS_POINTS;
 
         if (_balance1 > _target1) {
-            uint256 _swap1 = _feeAdjusted(_balance1 - _target1, _weight1, _weightSum, _poolFee);
+            uint256 _swap1 = _costAdjusted(_balance1 - _target1, _weight1, _weightSum, _swapCostBps);
             if (_swap1 > _minSwapValue) return (true, _swap1);
         } else {
             uint256 _target0 = _total - _target1;
             if (_value0 > _target0) {
-                uint256 _swap0Value = _feeAdjusted(_value0 - _target0, _weight0, _weightSum, _poolFee);
+                uint256 _swap0Value = _costAdjusted(_value0 - _target0, _weight0, _weightSum, _swapCostBps);
                 if (_swap0Value > _minSwapValue) return (false, _token1InToken0(_swap0Value, _sqrtPriceX96));
             }
+        }
+    }
+
+    /**
+     * @notice {inventorySwap} sized with the measured cost of the route the swap will actually
+     *         trade on ({routeCostBps}), rather than the strategy pool's fee tier.
+     * @dev An untradable route is left unadjusted; the swap itself then rejects it with its
+     *      specific error.
+     * @return _sellWeth True to sell WETH for the paired token, false for the reverse
+     * @return _amountIn Amount of the sold token (its own units); 0 when no swap is needed
+     */
+    function routedInventorySwap(
+        SwapConfig memory _config,
+        bytes memory _wethToPairedPath,
+        bytes memory _pairedToWethPath,
+        address _token0,
+        uint160 _sqrtPriceX96,
+        IUniCLStrat.Position memory _range,
+        uint256 _balance0,
+        uint256 _balance1,
+        uint256 _minSwapBps
+    ) public returns (bool _sellWeth, uint256 _amountIn) {
+        bool _sellToken1;
+        (_sellToken1, _amountIn) =
+            inventorySwap(_sqrtPriceX96, _range.tickLower, _range.tickUpper, _balance0, _balance1, 0, _minSwapBps);
+        if (_amountIn == 0) return (false, 0);
+
+        _sellWeth = (_token0 == _config.weth) != _sellToken1;
+        (bool _tradable, uint256 _costBps) =
+            routeCostBps(_config, _sellWeth ? _wethToPairedPath : _pairedToWethPath, _amountIn, false);
+        if (_tradable && _costBps > 0) {
+            (, _amountIn) = inventorySwap(
+                _sqrtPriceX96, _range.tickLower, _range.tickUpper, _balance0, _balance1, _costBps, _minSwapBps
+            );
         }
     }
 
@@ -135,14 +168,14 @@ library UniCLStratLib {
         _weight1 = _sqrtPriceX96 - _sqrtA;
     }
 
-    /// @dev `excess / (1 − fee·weightSold/weightSum)`
-    function _feeAdjusted(uint256 _excess, uint256 _weightSold, uint256 _weightSum, uint24 _poolFee)
+    /// @dev `excess / (1 − cost·weightSold/weightSum)`
+    function _costAdjusted(uint256 _excess, uint256 _weightSold, uint256 _weightSum, uint256 _costBps)
         private
         pure
         returns (uint256)
     {
-        uint256 _denominator = FEE_DENOMINATOR * _weightSum;
-        return FullMath.mulDiv(_excess, _denominator, _denominator - uint256(_poolFee) * _weightSold);
+        uint256 _denominator = BASIS_POINTS * _weightSum;
+        return FullMath.mulDiv(_excess, _denominator, _denominator - _costBps * _weightSold);
     }
 
     // ============ Oracle-Bounded Swaps ============
@@ -227,6 +260,54 @@ library UniCLStratLib {
         _amountOut = _converter.executeSwapExactAmountIn(
             _config.adapter, _path, _amountIn, _minAmountOut, block.timestamp + SWAP_DEADLINE_OFFSET
         );
+    }
+
+    /**
+     * @notice Measures what trading `_amount` along `_path` actually costs, against the oracle.
+     * @dev The route is configured independently of the strategy pool (another fee tier, a
+     *      multi-hop path, or a non-Uniswap adapter), so its cost cannot be read off the strategy
+     *      pool's fee tier. Exact-input (`_exactOut == false`, `_amount` is the input): cost is the
+     *      quoted output's shortfall vs the oracle output. Exact-output (`_amount` is the output):
+     *      cost is the quoted input's excess over the oracle input. Captures route fees, price
+     *      impact and route-vs-oracle drift; rounded up, and 0 when the route beats the oracle.
+     *      Never reverts on a bad route: `_tradable` is false when the quote fails or falls outside
+     *      the {MAX_QUOTE_DEVIATION_BPS} band, i.e. exactly when {swapExactIn} / {swapExactOut}
+     *      would refuse the trade.
+     */
+    function routeCostBps(SwapConfig memory _config, bytes memory _path, uint256 _amount, bool _exactOut)
+        public
+        returns (bool _tradable, uint256 _costBps)
+    {
+        if (_amount == 0) return (true, 0);
+
+        uint256 _quoted;
+        uint256 _oracle;
+        if (_exactOut) {
+            try _config.converter.quoteSwapExactAmountOut(_config.adapter, _path, _amount) returns (uint256 _result) {
+                _quoted = _result;
+            } catch {
+                return (false, 0);
+            }
+            _oracle = _calculateOracleAmountIn(_config, _path, _amount);
+        } else {
+            try _config.converter.quoteSwapExactAmountIn(_config.adapter, _path, _amount) returns (uint256 _result) {
+                _quoted = _result;
+            } catch {
+                return (false, 0);
+            }
+            _oracle = _calculateOracleAmountOut(_config, _path, _amount);
+        }
+        if (_oracle == 0) return (false, 0);
+
+        _tradable = _withinOracleBounds(_quoted, _oracle);
+        uint256 _loss =
+            _exactOut ? (_quoted > _oracle ? _quoted - _oracle : 0) : (_oracle > _quoted ? _oracle - _quoted : 0);
+        _costBps = (_loss * BASIS_POINTS + _oracle - 1) / _oracle;
+    }
+
+    function _withinOracleBounds(uint256 _quoted, uint256 _oracleAmount) private pure returns (bool) {
+        return _quoted >= _oracleAmount * (BASIS_POINTS - MAX_QUOTE_DEVIATION_BPS) / BASIS_POINTS
+            && _quoted <= _oracleAmount * (BASIS_POINTS + MAX_QUOTE_DEVIATION_BPS) / BASIS_POINTS;
     }
 
     /**

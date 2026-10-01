@@ -1971,6 +1971,9 @@ contract UniCLStratTest is UniCLStratTestBase {
     uint256 public constant IDLE_PAIRED_DONATION = 20 ether;
     uint256 public constant SMALL_DEPOSIT_AMOUNT = 0.01 ether;
     uint256 public constant ALT_SEED_DEPOSIT_AMOUNT = 1 ether;
+    /// @dev Route quotes 0.3% below the oracle while the mock fills exact-input swaps 1:1, so the
+    ///      cost-adjusted swap overshoots the main ratio and leaves a leftover for the alt range.
+    uint256 public constant ROUTE_QUOTE_COST_MULTIPLIER_BPS = 9_970;
     uint256 public constant BALANCED_IDLE_AMOUNT = 5 ether;
     int24 public constant OFF_CENTER_TICK = 25; // within REBALANCE_TICK_THRESHOLD (30)
     /// @dev Share (bps) of NAV that must end up in the main range after an off-center deposit
@@ -2006,8 +2009,9 @@ contract UniCLStratTest is UniCLStratTestBase {
     }
 
     function test_Deposit_ParksToken1LeftoverInAltBelowSpot() public {
-        // Fee-adjusted WETH -> paired swap buys slightly more paired (token1) than the main
-        // range absorbs in the fee-less mock, so the leftover is token1.
+        // Cost-adjusted WETH -> paired swap buys slightly more paired (token1) than the main
+        // range absorbs when the route fills better than quoted, so the leftover is token1.
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
         _deposit(DEPOSIT_AMOUNT);
 
         (int24 altLower, int24 altUpper) = strategy.positionAlt();
@@ -2020,6 +2024,7 @@ contract UniCLStratTest is UniCLStratTestBase {
     function test_Deposit_ParksToken0LeftoverInAltAboveSpot() public {
         // Idle paired inventory flips the swap direction (paired -> WETH), so the leftover is
         // WETH (token0) and must go to an alt range above spot.
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
         pairedToken.mint(address(strategy), IDLE_PAIRED_DONATION);
         _deposit(SMALL_DEPOSIT_AMOUNT);
 
@@ -2032,6 +2037,7 @@ contract UniCLStratTest is UniCLStratTestBase {
     function test_Deposit_ReplacesAltHoldingTheOtherToken() public {
         // Small seed so the returned old-alt tokens do not cancel the new leftover below the
         // dust threshold.
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
         _deposit(ALT_SEED_DEPOSIT_AMOUNT);
         (int24 oldAltLower, int24 oldAltUpper) = strategy.positionAlt();
         IUniCLStrat.Position memory oldAlt = IUniCLStrat.Position(oldAltLower, oldAltUpper);
@@ -2079,7 +2085,40 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertApproxEqRel(strategy.navInETH(), DEPOSIT_AMOUNT - WITHDRAW_AMOUNT, 1e15);
     }
 
+    function test_Withdraw_PartiallyBurnsWhenPoolIsNotCalmButRouteIsTradable() public {
+        // The paired -> WETH route trades elsewhere and quotes within the oracle band, so a
+        // dislocated strategy pool alone must not force a full unwind.
+        _deposit(DEPOSIT_AMOUNT);
+        pool.setCurrentTickWithoutTwap(NOT_CALM_TICK);
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, WITHDRAW_AMOUNT);
+
+        assertEq(withdrawn, WITHDRAW_AMOUNT);
+        assertGt(_positionLiquidity(_mainPosition()), 0);
+    }
+
+    function test_Withdraw_FullyUnwindsWhenRouteIsUntradable() public {
+        _deposit(DEPOSIT_AMOUNT);
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+        uint128 mainLiquidity = _positionLiquidity(mainPosition);
+        converter.setQuoteShouldRevert(true);
+
+        // The whole main position is burned (leftovers are re-added afterwards).
+        vm.expectCall(
+            address(pool),
+            abi.encodeWithSelector(
+                MockUniCLPool.burn.selector, mainPosition.tickLower, mainPosition.tickUpper, mainLiquidity
+            )
+        );
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, SMALL_WITHDRAW_AMOUNT);
+
+        assertEq(withdrawn, SMALL_WITHDRAW_AMOUNT);
+    }
+
     function test_Withdraw_BurnsAltBeforeMain() public {
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
         _deposit(DEPOSIT_AMOUNT);
         IUniCLStrat.Position memory mainPosition = _mainPosition();
         uint128 mainLiquidityBefore = _positionLiquidity(mainPosition);

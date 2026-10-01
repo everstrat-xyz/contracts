@@ -106,10 +106,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     IUniswapV3Factory public immutable factory;
 
     int24 public immutable tickSpacing;
-    /// @dev Strategy pool fee tier (hundredths of a bip). Used to fee-adjust the inventory
-    ///      swap size; the route may use a different pool, in which case any residual is
-    ///      absorbed by the alt position.
-    uint24 private immutable _poolFee;
     uint256 private immutable _genesisTimestamp;
 
     // ============ Strategy State ============
@@ -176,7 +172,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (factory.getPool(_token0Address, _token1Address, _fee) != _params.addresses.pool) {
             revert UniCLStratInvalidPool();
         }
-        _poolFee = _fee;
 
         tickSpacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
         positionWidth = _params.strategy.positionWidth;
@@ -879,25 +874,29 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *      current (calm-gated) spot price, which is the price `pool.mint` charges at.
      *      For a range [a, b] and spot p (sqrt prices), the token0 : token1 value split in
      *      token1 units is `p·(b − p)/b : (p − a)` (all token0 below the range, all token1
-     *      above it). The swap is fee-adjusted: selling Δ of the excess token only adds
-     *      Δ·(1 − fee) of the other, so total value drops by fee·Δ and
-     *      `Δ = excess / (1 − fee·w_sold)`, where `w_sold` is the target share of the sold token. Swaps below
+     *      above it). The swap is cost-adjusted: selling Δ of the excess token only adds
+     *      Δ·(1 − cost) of the other, so total value drops by cost·Δ and
+     *      `Δ = excess / (1 − cost·w_sold)`, where `w_sold` is the target share of the sold token.
+     *      The cost is measured on the configured route (quote vs oracle), since the route
+     *      generally trades through a different pool than this one. Swaps below
      *      {MIN_INVENTORY_SWAP_BPS} of the deployed value are skipped. Any residual from
-     *      fees, slippage, or route/pool price differences is parked in the alt range.
+     *      slippage or route/pool price differences is parked in the alt range.
      */
     function _swapToMainRatio() internal {
-        (bool _sellToken1, uint256 _amountIn) = UniCLStratLib.inventorySwap(
+        (bool _sellWeth, uint256 _amountIn) = UniCLStratLib.routedInventorySwap(
+            _swapConfig(),
+            wethToPairedTokenPath,
+            pairedTokenToWethPath,
+            address(token0),
             _sqrtPrice(),
-            positionMain.tickLower,
-            positionMain.tickUpper,
+            positionMain,
             token0.balanceOf(address(this)),
             token1.balanceOf(address(this)),
-            _poolFee,
             MIN_INVENTORY_SWAP_BPS
         );
         if (_amountIn == 0) return;
 
-        if (address(_sellToken1 ? token1 : token0) == address(weth)) {
+        if (_sellWeth) {
             _swapWethToPairedToken(_amountIn);
         } else {
             _swapPairedTokenToWeth(_amountIn);
@@ -905,28 +904,36 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     /**
-     * @dev Makes at least `_wethTarget` WETH available (best effort).
-     *      - Calm pool: no full unwind — idle WETH, then idle paired token, then a partial burn
-     *        of alt followed by main, sized at TWAP marks and padded by `swapSlippageBps` + the
-     *        pool fee so the paired-token leg can still cover the shortfall after conversion
-     *        costs. If that still falls short, everything is unwound as a fallback.
-     *      - Dislocated pool: full unwind first (v1 behaviour). A partial burn would need a
-     *        paired -> WETH swap for roughly half the payout at a skewed spot, which the
-     *        TWAP-bounded quote rightly refuses; the full unwind maximises the WETH obtained
-     *        without swapping.
+     * @dev Makes at least `_wethTarget` WETH available (best effort). The paired -> WETH leg
+     *      goes through the configured route, which generally does not trade through this pool,
+     *      so the decision is driven by that route, not by this pool's calm state:
+     *      - Route tradable (quote for the shortfall within the oracle band): idle WETH, then
+     *        idle paired token, then a partial burn of alt followed by main, sized at TWAP marks
+     *        and padded by `swapSlippageBps` + the route's measured cost, so the paired-token
+     *        leg still covers the shortfall after conversion. If that still falls short,
+     *        everything is unwound as a fallback.
+     *      - Route untradable (quote fails or is outside the oracle band, e.g. the route trades
+     *        through this pool while it is dislocated): full unwind first, which maximises the
+     *        WETH obtained without swapping.
      */
     function _sourceWeth(uint256 _wethTarget) internal {
         uint256 _wethBalance = weth.balanceOf(address(this));
-        bool _fullUnwind = _wethBalance < _wethTarget && !_isCalm();
+        bool _fullUnwind;
 
-        if (!_fullUnwind && _wethBalance < _wethTarget) {
-            uint256 _bufferBps = swapSlippageBps + uint256(_poolFee) / 100; // fee tier (1e-6) -> bps
-            uint256 _needed = (_wethTarget - _wethBalance) * (BASIS_POINTS + _bufferBps) / BASIS_POINTS;
-            uint256 _pairedBalance = pairedToken.balanceOf(address(this));
-            uint256 _idlePairedValue = address(pairedToken) == address(token0)
-                ? _pairValueInETH(_pairedBalance, 0)
-                : _pairValueInETH(0, _pairedBalance);
-            if (_needed > _idlePairedValue) _decreaseLiquidityForValue(_needed - _idlePairedValue);
+        if (_wethBalance < _wethTarget) {
+            uint256 _shortfall = _wethTarget - _wethBalance;
+            (bool _tradable, uint256 _costBps) =
+                UniCLStratLib.routeCostBps(_swapConfig(), pairedTokenToWethPath, _shortfall, true);
+            _fullUnwind = !_tradable;
+
+            if (_tradable) {
+                uint256 _needed = _shortfall * (BASIS_POINTS + swapSlippageBps + _costBps) / BASIS_POINTS;
+                uint256 _pairedBalance = pairedToken.balanceOf(address(this));
+                uint256 _idlePairedValue = address(pairedToken) == address(token0)
+                    ? _pairValueInETH(_pairedBalance, 0)
+                    : _pairValueInETH(0, _pairedBalance);
+                if (_needed > _idlePairedValue) _decreaseLiquidityForValue(_needed - _idlePairedValue);
+            }
         }
 
         // Pass 0 converts after the (partial or full) unwind above; pass 1 is the full-unwind
