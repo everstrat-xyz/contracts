@@ -18,6 +18,8 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
 import {MockUniCLPool} from "../mocks/UniCLStratMocks.sol";
+import {LiquidityAmounts} from "../../src/libraries/integrations/uniswap/LiquidityAmounts.sol";
+import {TickMath} from "../../src/libraries/integrations/uniswap/TickMath.sol";
 
 contract RejectingTreasury {
     receive() external payable {
@@ -51,7 +53,7 @@ contract UniCLStratTest is UniCLStratTestBase {
 
     function test_Constructor_SetsInitialState() public view {
         assertEq(strategy.name(), "Uniswap Concentrated Liquidity Strategy");
-        assertEq(strategy.version(), "1.0.0");
+        assertEq(strategy.version(), "2.0.0");
         assertEq(strategy.genesisTimestamp(), INITIAL_TIMESTAMP);
         assertEq(address(strategy.weth()), address(weth));
         assertEq(address(strategy.pairedToken()), address(pairedToken));
@@ -657,11 +659,12 @@ contract UniCLStratTest is UniCLStratTestBase {
 
     function test_Withdraw_UnwrapsOnlyRemainderWhenIdleETHFallsShort() public {
         // Idle ETH (3) falls short of the request (6): all idle ETH goes toward the
-        // payout natively and only the 3 ETH remainder is unwrapped from the WETH
-        // collected by removing liquidity (~5/5 WETH/paired) — no wrapping and no
-        // fee-incurring exact-output swap.
+        // payout natively and only the 3 ETH remainder is sourced from the pool — via a
+        // partial burn (not a full unwind) plus an exact-output swap for the paired half.
+        // Native ETH is never wrapped.
         _deposit(DEPOSIT_AMOUNT);
         _donate(IDLE_ETH_DONATION);
+        uint128 mainLiquidityBefore = _positionLiquidity(_mainPosition());
 
         uint256 withdrawAmount = IDLE_ETH_DONATION + 3 ether;
 
@@ -669,7 +672,8 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         uint256 withdrawn = strategy.withdraw(receiver, withdrawAmount);
 
-        assertEq(converter.lastExecuteSwapExactAmountOutCall(), 0);
+        assertGt(_positionLiquidity(_mainPosition()), 0);
+        assertLt(_positionLiquidity(_mainPosition()), mainLiquidityBefore);
         assertEq(withdrawn, withdrawAmount);
         assertEq(receiver.balance, withdrawAmount);
         // All idle native ETH was consumed by the payout
@@ -1855,7 +1859,8 @@ contract UniCLStratTest is UniCLStratTestBase {
         converter.setQuoteMultiplierBps(8_000); // 80% of 1:1 → below 98% floor
         vm.deal(strategyManager, DEPOSIT_AMOUNT);
         vm.prank(strategyManager);
-        vm.expectRevert(abi.encodeWithSelector(IUniCLStrat.UniCLStratQuoteBelowOracleFloor.selector, 4e18, 5e18));
+        // Swap size is fee-adjusted (slightly above the 5e18 50/50 excess), so match the selector only.
+        vm.expectPartialRevert(IUniCLStrat.UniCLStratQuoteBelowOracleFloor.selector);
         strategy.deposit{value: DEPOSIT_AMOUNT}();
     }
 
@@ -1863,7 +1868,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         converter.setQuoteMultiplierBps(12_000); // 120% of 1:1 → above 102% ceiling
         vm.deal(strategyManager, DEPOSIT_AMOUNT);
         vm.prank(strategyManager);
-        vm.expectRevert(abi.encodeWithSelector(IUniCLStrat.UniCLStratQuoteExceedsOracleCeiling.selector, 6e18, 5e18));
+        vm.expectPartialRevert(IUniCLStrat.UniCLStratQuoteExceedsOracleCeiling.selector);
         strategy.deposit{value: DEPOSIT_AMOUNT}();
     }
 
@@ -1958,5 +1963,297 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
         strategy.setSwapSlippageBps(0);
+    }
+
+    // ============ V2 Inventory Management ============
+
+    uint256 public constant SMALL_WITHDRAW_AMOUNT = 0.001 ether;
+    uint256 public constant IDLE_PAIRED_DONATION = 20 ether;
+    uint256 public constant SMALL_DEPOSIT_AMOUNT = 0.01 ether;
+    uint256 public constant ALT_SEED_DEPOSIT_AMOUNT = 1 ether;
+    /// @dev Route quotes 0.3% below the oracle while the mock fills exact-input swaps 1:1, so the
+    ///      cost-adjusted swap overshoots the main ratio and leaves a leftover for the alt range.
+    uint256 public constant ROUTE_QUOTE_COST_MULTIPLIER_BPS = 9_970;
+    uint256 public constant BALANCED_IDLE_AMOUNT = 5 ether;
+    int24 public constant OFF_CENTER_TICK = 25; // within REBALANCE_TICK_THRESHOLD (30)
+    /// @dev Share (bps) of NAV that must end up in the main range after an off-center deposit
+    uint256 public constant MIN_MAIN_SHARE_BPS = 9_950;
+
+    function test_Deposit_AddsToExistingPositionsWithoutFullUnwind() public {
+        _deposit(DEPOSIT_AMOUNT);
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+        uint128 mainLiquidityBefore = _positionLiquidity(mainPosition);
+
+        // A full unwind would burn the whole main position.
+        vm.expectCall(
+            address(pool),
+            abi.encodeCall(pool.burn, (mainPosition.tickLower, mainPosition.tickUpper, mainLiquidityBefore)),
+            0
+        );
+        _deposit(DEPOSIT_AMOUNT);
+
+        assertApproxEqRel(_positionLiquidity(mainPosition), uint256(mainLiquidityBefore) * 2, 1e15);
+        assertApproxEqAbs(strategy.navInETH(), 2 * DEPOSIT_AMOUNT, NAV_TOLERANCE);
+    }
+
+    function test_Deposit_SwapsToMainRangeRatioWhenSpotIsOffCenter() public {
+        _deposit(DEPOSIT_AMOUNT);
+        // Spot drifts inside the healthy band: the main range now needs far less than 50% WETH.
+        pool.setCurrentTick(OFF_CENTER_TICK);
+        assertTrue(strategy.isHealthy());
+
+        _deposit(DEPOSIT_AMOUNT);
+
+        uint256 mainValue = _positionValueInETH(_mainPosition());
+        assertGe(mainValue * 10_000, strategy.navInETH() * MIN_MAIN_SHARE_BPS);
+    }
+
+    function test_Deposit_ParksToken1LeftoverInAltBelowSpot() public {
+        // Cost-adjusted WETH -> paired swap buys slightly more paired (token1) than the main
+        // range absorbs when the route fills better than quoted, so the leftover is token1.
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
+        _deposit(DEPOSIT_AMOUNT);
+
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        assertLe(altUpper, INITIAL_TICK);
+        assertLt(altLower, altUpper);
+        assertGt(_positionLiquidity(IUniCLStrat.Position(altLower, altUpper)), 0);
+        assertLe(pairedToken.balanceOf(address(strategy)), NAV_TOLERANCE);
+    }
+
+    function test_Deposit_ParksToken0LeftoverInAltAboveSpot() public {
+        // Idle paired inventory flips the swap direction (paired -> WETH), so the leftover is
+        // WETH (token0) and must go to an alt range above spot.
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
+        pairedToken.mint(address(strategy), IDLE_PAIRED_DONATION);
+        _deposit(SMALL_DEPOSIT_AMOUNT);
+
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        assertGt(altLower, INITIAL_TICK);
+        assertGt(_positionLiquidity(IUniCLStrat.Position(altLower, altUpper)), 0);
+        assertLe(weth.balanceOf(address(strategy)), NAV_TOLERANCE);
+    }
+
+    function test_Deposit_ReplacesAltHoldingTheOtherToken() public {
+        // Small seed so the returned old-alt tokens do not cancel the new leftover below the
+        // dust threshold.
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
+        _deposit(ALT_SEED_DEPOSIT_AMOUNT);
+        (int24 oldAltLower, int24 oldAltUpper) = strategy.positionAlt();
+        IUniCLStrat.Position memory oldAlt = IUniCLStrat.Position(oldAltLower, oldAltUpper);
+        assertGt(_positionLiquidity(oldAlt), 0);
+        uint256 navBefore = strategy.navInETH();
+
+        // Next leftover is WETH: the token1-only alt below spot cannot hold it.
+        pairedToken.mint(address(strategy), IDLE_PAIRED_DONATION);
+        _deposit(SMALL_DEPOSIT_AMOUNT);
+
+        (int24 newAltLower,) = strategy.positionAlt();
+        assertGt(newAltLower, INITIAL_TICK);
+        // Old alt fully removed and collected before its ticks were reassigned — nothing orphaned.
+        (uint128 oldLiquidity, uint128 oldOwed0, uint128 oldOwed1,,) = pool.positionStates(_poolPositionKey(oldAlt));
+        assertEq(oldLiquidity, 0);
+        assertEq(oldOwed0, 0);
+        assertEq(oldOwed1, 0);
+        assertApproxEqRel(strategy.navInETH(), navBefore + IDLE_PAIRED_DONATION + SMALL_DEPOSIT_AMOUNT, 1e15);
+    }
+
+    function test_Deposit_SkipsSwapBelowMinInventorySwap() public {
+        weth.mint(address(strategy), BALANCED_IDLE_AMOUNT);
+        pairedToken.mint(address(strategy), BALANCED_IDLE_AMOUNT);
+
+        // Imbalance (the new deposit) is below MIN_INVENTORY_SWAP_BPS of the deployed value.
+        vm.expectCall(address(converter), abi.encodeWithSelector(IConverter.executeSwapExactAmountIn.selector), 0);
+        _deposit(SMALL_DEPOSIT_AMOUNT / 2);
+
+        assertGt(_positionLiquidity(_mainPosition()), 0);
+    }
+
+    function test_Withdraw_PartiallyBurnsMainWithoutFullUnwind() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint128 mainLiquidityBefore = _positionLiquidity(_mainPosition());
+
+        vm.expectCall(address(converter), abi.encodeWithSelector(IConverter.executeSwapExactAmountIn.selector), 0);
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, WITHDRAW_AMOUNT);
+
+        assertEq(withdrawn, WITHDRAW_AMOUNT);
+        uint128 mainLiquidityAfter = _positionLiquidity(_mainPosition());
+        assertGt(mainLiquidityAfter, 0);
+        // Only ~WITHDRAW_AMOUNT (+ buffer) of the 10 ETH position was burned.
+        assertGe(uint256(mainLiquidityAfter) * DEPOSIT_AMOUNT, uint256(mainLiquidityBefore) * 6 ether);
+        assertApproxEqRel(strategy.navInETH(), DEPOSIT_AMOUNT - WITHDRAW_AMOUNT, 1e15);
+    }
+
+    function test_Withdraw_PartiallyBurnsWhenPoolIsNotCalmButRouteIsTradable() public {
+        // The paired -> WETH route trades elsewhere and quotes within the oracle band, so a
+        // dislocated strategy pool alone must not force a full unwind.
+        _deposit(DEPOSIT_AMOUNT);
+        pool.setCurrentTickWithoutTwap(NOT_CALM_TICK);
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, WITHDRAW_AMOUNT);
+
+        assertEq(withdrawn, WITHDRAW_AMOUNT);
+        assertGt(_positionLiquidity(_mainPosition()), 0);
+    }
+
+    function test_Withdraw_FullyUnwindsWhenRouteIsUntradable() public {
+        _deposit(DEPOSIT_AMOUNT);
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+        uint128 mainLiquidity = _positionLiquidity(mainPosition);
+        converter.setQuoteShouldRevert(true);
+
+        // The whole main position is burned (leftovers are re-added afterwards).
+        vm.expectCall(
+            address(pool),
+            abi.encodeWithSelector(
+                MockUniCLPool.burn.selector, mainPosition.tickLower, mainPosition.tickUpper, mainLiquidity
+            )
+        );
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, SMALL_WITHDRAW_AMOUNT);
+
+        assertEq(withdrawn, SMALL_WITHDRAW_AMOUNT);
+    }
+
+    function test_Withdraw_BurnsAltBeforeMain() public {
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
+        _deposit(DEPOSIT_AMOUNT);
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+        uint128 mainLiquidityBefore = _positionLiquidity(mainPosition);
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        uint128 altLiquidityBefore = _positionLiquidity(IUniCLStrat.Position(altLower, altUpper));
+
+        vm.prank(strategyManager);
+        strategy.withdraw(receiver, SMALL_WITHDRAW_AMOUNT);
+
+        assertEq(receiver.balance, SMALL_WITHDRAW_AMOUNT);
+        assertEq(_positionLiquidity(mainPosition), mainLiquidityBefore);
+        (altLower, altUpper) = strategy.positionAlt();
+        assertLt(_positionLiquidity(IUniCLStrat.Position(altLower, altUpper)), altLiquidityBefore);
+    }
+
+    function test_Withdraw_FullNAVUnwindsEverything() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 nav = strategy.navInETH();
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, nav);
+
+        assertApproxEqAbs(withdrawn, nav, NAV_TOLERANCE);
+        assertEq(_positionLiquidity(_mainPosition()), 0);
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        assertEq(_positionLiquidity(IUniCLStrat.Position(altLower, altUpper)), 0);
+        assertLe(strategy.navInETH(), NAV_TOLERANCE);
+    }
+
+    function test_Withdraw_NearFullNAVUnwindsWithoutRouteProbe() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 amount = _nearFullWithdrawalThreshold();
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+
+        vm.expectCall(
+            address(converter),
+            abi.encodeCall(
+                IConverter.quoteSwapExactAmountOut,
+                (address(swapAdapter), strategy.pairedTokenToWethPath(), _wethShortfall(amount))
+            ),
+            0
+        );
+        vm.expectCall(
+            address(pool),
+            abi.encodeWithSelector(
+                MockUniCLPool.burn.selector,
+                mainPosition.tickLower,
+                mainPosition.tickUpper,
+                _positionLiquidity(mainPosition)
+            )
+        );
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, amount);
+
+        assertEq(withdrawn, amount);
+    }
+
+    function test_Withdraw_BelowNearFullNAVProbesRoute() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 amount = _nearFullWithdrawalThreshold() - 1;
+
+        vm.expectCall(
+            address(converter),
+            abi.encodeCall(
+                IConverter.quoteSwapExactAmountOut,
+                (address(swapAdapter), strategy.pairedTokenToWethPath(), _wethShortfall(amount))
+            ),
+            1
+        );
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, amount);
+
+        assertEq(withdrawn, amount);
+    }
+
+    function test_Withdraw_PartialBurnDoesNotInflateLpFeeBase() public {
+        _deposit(DEPOSIT_AMOUNT);
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+        pool.accrueFees(
+            address(strategy),
+            mainPosition.tickLower,
+            mainPosition.tickUpper,
+            uint128(ACCRUED_FEE_WETH),
+            uint128(ACCRUED_FEE_PAIRED)
+        );
+
+        vm.prank(strategyManager);
+        strategy.withdraw(receiver, WITHDRAW_AMOUNT);
+
+        // Burned principal passes through tokensOwed and is collected; only the accrued fees
+        // may enter the performance-fee base (1:1 mock prices).
+        uint256 expectedFee = (ACCRUED_FEE_WETH + ACCRUED_FEE_PAIRED) * PERFORMANCE_FEE_BPS / 10_000;
+        assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), expectedFee);
+
+        // Later fee growth on the untouched remainder is still picked up exactly once.
+        pool.accrueFees(
+            address(strategy),
+            mainPosition.tickLower,
+            mainPosition.tickUpper,
+            uint128(ACCRUED_FEE_WETH),
+            uint128(ACCRUED_FEE_PAIRED)
+        );
+        vm.prank(strategyManager);
+        strategy.sync();
+        assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), 2 * expectedFee);
+    }
+
+    /// @dev Smallest amount that, padded by `swapSlippageBps`, covers the whole NAV.
+    function _nearFullWithdrawalThreshold() internal view returns (uint256) {
+        uint256 bps = strategy.BASIS_POINTS();
+        uint256 paddedBps = bps + strategy.swapSlippageBps();
+        return (strategy.navInETH() * bps + paddedBps - 1) / paddedBps;
+    }
+
+    /// @dev WETH the pool must supply for `_amount` (what the route-cost probe quotes).
+    function _wethShortfall(uint256 _amount) internal view returns (uint256) {
+        return _amount - address(strategy).balance - weth.balanceOf(address(strategy));
+    }
+
+    function _poolPositionKey(IUniCLStrat.Position memory _position) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked(address(strategy), _position.tickLower, _position.tickUpper));
+    }
+
+    function _positionLiquidity(IUniCLStrat.Position memory _position) internal view returns (uint128 liquidity) {
+        (liquidity,,,,) = pool.positionStates(_poolPositionKey(_position));
+    }
+
+    /// @dev Position value at spot with 1:1 mock oracle prices (token amounts sum).
+    function _positionValueInETH(IUniCLStrat.Position memory _position) internal view returns (uint256) {
+        (uint256 amount0, uint256 amount1) = LiquidityAmounts.getAmountsForLiquidity(
+            pool.currentSqrtPriceX96(),
+            TickMath.getSqrtRatioAtTick(_position.tickLower),
+            TickMath.getSqrtRatioAtTick(_position.tickUpper),
+            _positionLiquidity(_position)
+        );
+        return amount0 + amount1;
     }
 }

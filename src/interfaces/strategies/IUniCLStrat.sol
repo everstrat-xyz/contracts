@@ -72,6 +72,8 @@ interface IUniCLStrat is IStrategy {
     error UniCLStratInvalidMintCallback();
     error UniCLStratNotCalm();
     error UniCLStratInsufficientWETH();
+    /// @notice Alt ticks cannot be reassigned while the current alt position still holds liquidity or owed tokens
+    error UniCLStratPositionNotEmpty();
     error UniCLStratPoolTWAPNotAvailable();
     error UniCLStratInsufficientObservationCardinality(uint16 cardinality, uint16 required);
     error UniCLStratNotPaused();

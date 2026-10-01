@@ -61,6 +61,7 @@ graph TB
     Converter["Converter<br/>Implementation"]
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
+    UniCLStratLib["UniCLStratLib<br/>Linked Library"]
 
     %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
@@ -140,6 +141,7 @@ graph TB
     UniCLStrat --> IConverter
     UniCLStrat --> IWETH
     UniCLStrat --> IUniswapV3Pool
+    UniCLStrat --> UniCLStratLib
     UniCLStrat --> Oracle
     UniCLStrat --> UniV3Math
     UniCLStrat --> OZLibs
@@ -640,6 +642,7 @@ graph TB
     Converter["Converter<br/>Implementation"]
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
+    UniCLStratLib["UniCLStratLib<br/>Linked Library"]
     
     %% Registry Subsystem
     Registry["Registry<br/>Static Contract<br/>(Address Book + Roles)"]
@@ -731,6 +734,7 @@ graph TB
     UniCLStrat --> IConverter
     UniCLStrat --> IWETH
     UniCLStrat --> IUniswapV3Pool
+    UniCLStrat --> UniCLStratLib
     UniCLStrat --> Oracle
     UniCLStrat --> UniV3Math
     UniCLStrat --> OZLibs
