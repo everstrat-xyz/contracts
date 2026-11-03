@@ -49,14 +49,14 @@
 +        return "Aero Concentrated Liquidity Strategy";
 -        return "2.0.0";
 +        return "1.0.0";
-+    }
-+
 +    /// @dev Slipstream `slot0` has 6 fields (no `feeProtocol`); decoding it through
 +    ///      `IUniswapV3Pool` would revert. Deliberately a plain internal helper rather than a
 +    ///      hook. `_observationCardinality` is the in-use cardinality (not
 +    ///      `observationCardinalityNext`).
 +    function _slot0() internal view returns (uint160 _sqrtPriceX96, int24 _tick, uint16 _observationCardinality) {
 +        (_sqrtPriceX96, _tick,, _observationCardinality,,) = ICLPool(address(pool)).slot0();
++    }
++
 -        (, _tick,,,,,) = pool.slot0();
 +        (, _tick,) = _slot0();
 -        (_sqrtPriceX96,,,,,,) = pool.slot0();
