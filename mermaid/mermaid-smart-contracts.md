@@ -19,6 +19,8 @@ graph TB
     UniswapV3Path["UniswapV3Path<br/>Path Encoding Library<br/>(libraries/integrations/uniswap)"]
     ChainlinkOracle["Chainlink<br/>Oracle"]
     UniswapPool["Uniswap V3<br/>Pool"]
+    AeroPool["Aero (Slipstream)<br/>CL Pool"]
+    AeroFactory["Aero<br/>CLFactory"]
     SwapRouter["Uniswap V3<br/>Swap Router"]
     UniswapFactory["Uniswap V3<br/>Factory"]
     WETH["WETH<br/>Native Wrapper"]
@@ -49,6 +51,9 @@ graph TB
     IUniswapV3Pool["IUniswapV3Pool<br/>Interface"]
     IUniswapV3Router["IUniswapV3Router<br/>Interface"]
     IUniswapV3Factory["IUniswapV3Factory<br/>Interface"]
+    ICLPool["ICLPool<br/>Interface"]
+    ICLFactory["ICLFactory<br/>Interface"]
+    IDynamicSwapFeeHook["IDynamicSwapFeeHook<br/>Interface"]
     
     %% Main Contracts
     EVE["EVE Token<br/>Static Contract"]
@@ -62,6 +67,7 @@ graph TB
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
     UniCLStratLib["UniCLStratLib<br/>Linked Library"]
+    AeroCLStrat["AeroCLStrat<br/>Static Strategy"]
 
     %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
@@ -145,6 +151,19 @@ graph TB
     UniCLStrat --> Oracle
     UniCLStrat --> UniV3Math
     UniCLStrat --> OZLibs
+    AeroCLStrat --> IStrategy
+    AeroCLStrat --> IUniCLStrat
+    AeroCLStrat --> IConverter
+    AeroCLStrat --> IWETH
+    AeroCLStrat --> IUniswapV3Pool
+    AeroCLStrat --> ICLPool
+    AeroCLStrat --> ICLFactory
+    AeroCLStrat --> UniCLStratLib
+    AeroCLStrat --> Oracle
+    AeroCLStrat --> UniV3Math
+    AeroCLStrat --> OZLibs
+    ICLPool --> AeroPool
+    ICLFactory --> AeroFactory
     
     Oracle --> UUPS
     Oracle --> AccessControl
@@ -205,6 +224,11 @@ graph TB
     UniCLStrat -.->|"mint, burn, collect, observe"| UniswapPool
     UniCLStrat -.->|"emergency weth.withdraw"| WETH
     UniCLStrat -.->|"NAV valuation"| OracleProxy
+    AeroCLStrat -.->|"wrap / unwrap / swap via"| ConverterProxy
+    AeroCLStrat -.->|"mint, burn, collect, observe (unstaked)"| AeroPool
+    AeroCLStrat -.->|"provenance: getPool(tickSpacing)"| AeroFactory
+    AeroCLStrat -.->|"emergency weth.withdraw"| WETH
+    AeroCLStrat -.->|"NAV valuation"| OracleProxy
 
     %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
@@ -261,10 +285,10 @@ graph TB
     classDef test fill:#32CD32,stroke:#006400,stroke-width:4px,font-size:28px,font-weight:bold,color:#000000
     
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
-    class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
+    class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat,AeroCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,MimicNetwork,MimicAccount external
-    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,AeroPool,AeroFactory,SwapRouter,UniswapFactory,WETH,MimicNetwork,MimicAccount external
+    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory,ICLPool,ICLFactory,IDynamicSwapFeeHook interface
     class Tests,Mocks,Helpers,Trees test
     class KeeperExecutorBase,QueueKeeperExecutor,StrategyKeeperExecutor static
     class IRegistry,IRegistryClient,IUniswapV3ConverterAdapter,IKeeperExecutorBase,IQueueKeeperExecutor,IStrategyKeeperExecutor interface
@@ -396,6 +420,14 @@ graph TB
 - **Deployment**: Direct deployment via `script/DeployUniCLStrat.s.sol` (bytecode only; requires prior timelocked `setAllowedAdapter`); `StrategyManager.addStrategy` is always scheduled on the 48h admin timelock — same after modular finalize and after `DeployAll`
 - **Interface**: `src/interfaces/strategies/IUniCLStrat.sol`
 - **Tests**: `test/unit/UniCLStrat.t.sol`, `test/fuzz/UniCLStratFuzz.t.sol`, `test/trees/UniCLStrat.tree`
+
+#### **AeroCLStrat** (Static/Immutable Strategy)
+- **Purpose**: Native-ETH `IStrategy` implementation that deploys funds **unstaked** into an Aero (Slipstream) WETH/paired-token concentrated-liquidity pool and earns swap fees. Issue #55 Phase 1; gauge staking (AERO rewards) is Phase 2 (`AeroCLGaugeStrat`).
+- **Relationship to UniCLStrat**: a separate contract. `UniCLStrat` is unchanged; mechanics, guards, fee accounting, emergency paths and the `IUniCLStrat` interface/errors are the same, and it shares `UniCLStratLib`. Slipstream differences: 6-field `slot0` (read via `ICLPool`; cardinality gate inlined), provenance via tick-spacing-keyed `CLFactory.getPool`, and a dynamic swap fee.
+- **Swap Routing**: through the shared Converter on the configured route, normally `UniswapV3ConverterAdapter` on a deep Uniswap pool. No Slipstream adapter is needed.
+- **Interfaces**: `src/interfaces/integrations/aero/` (`ICLPool`, `ICLFactory`, `IDynamicSwapFeeHook`). These are our own declarations; Dromos source is restricted-use and is not vendored.
+- **Deployment**: `script/DeployAeroCLStrat.s.sol` (bytecode only; probes `isPool`/`getPool`, `observe`, cardinality; warns if the fee cap exceeds the quote budget, fatal under `STRICT_FEE_CAP`; logs `unstakedFee`). Then `addStrategy` on the 48h admin timelock.
+- **Tests**: `test/unit/AeroCLStrat.t.sol`, `test/fork/AeroCLStratFork.t.sol`
 
 #### **Converter** (Upgradeable)
 - **Purpose**: Shared protocol module that centralises WETH wrapping, unwrapping, and DEX swap execution for all registered strategies. Strategies own their routing decisions; the Converter only enforces the adapter allowlist and caller authorisation.
