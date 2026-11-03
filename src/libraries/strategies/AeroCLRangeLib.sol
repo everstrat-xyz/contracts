@@ -295,9 +295,8 @@ library AeroCLRangeLib {
         view
         returns (uint256)
     {
-        return UniCLStratLib.pairValueInETH(
-            _ctx.swap.oracle, _ctx.swap.weth, _ctx.token0, _ctx.token1, _amount0, _amount1
-        );
+        return
+            UniCLStratLib.pairValueInETH(_ctx.swap.oracle, _ctx.swap.weth, _ctx.token0, _ctx.token1, _amount0, _amount1);
     }
 
     /// @dev Long-TWAP sqrt price; reverts `UniCLStratPoolTWAPNotAvailable` (fail-closed).

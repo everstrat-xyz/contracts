@@ -258,8 +258,8 @@ contract AeroCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function navInETH() public view returns (uint256) {
         return address(this).balance
             + AeroCLPositionLib.inventoryValueInETH(
-            pool, _range, IOracle(_registry.oracle()), address(weth), address(token0), address(token1), _twapSqrtPrice()
-        );
+                pool, _range, IOracle(_registry.oracle()), address(weth), address(token0), address(token1), _twapSqrtPrice()
+            );
     }
 
     function maxDeposit() external view returns (uint256) {
