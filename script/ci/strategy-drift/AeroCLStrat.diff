@@ -1,0 +1,76 @@
+-import {IUniswapV3Factory} from "../../interfaces/integrations/uniswap/IUniswapV3Factory.sol";
++import {ICLFactory} from "../../interfaces/integrations/aero/ICLFactory.sol";
++import {ICLPool} from "../../interfaces/integrations/aero/ICLPool.sol";
+- * @title UniCLStrat
+- * @notice Native-ETH IStrategy implementation that deploys funds into a Uniswap V3-style WETH pair.
++ * @title AeroCLStrat
++ * @notice Native-ETH IStrategy implementation that deploys funds into an Aero (Slipstream) WETH
++ *         concentrated-liquidity pool, **unstaked** (earns swap fees, not gauge rewards).
+- * @dev The contract is intentionally static/non-upgradeable. It keeps the external protocol surface small and
++ * @dev Standalone copy of the Uniswap V3 strategy body with the Slipstream differences inlined.
++ *      Keeping it free of a shared base avoids hook indirection. CI enforces that the two files
++ *      only differ by the committed delta (`script/ci/check-strategy-drift.sh`), so a fix to
++ *      either must be mirrored in the other or the baseline consciously regenerated.
++ *      Slipstream specifics:
++ *      - `slot0` has 6 fields (no `feeProtocol`); a 7-field decode reverts. Everything that reads
++ *        spot goes through {_slot0}.
++ *      - `CLFactory.getPool` is keyed by tick spacing, not fee (the fee is dynamic), and the
++ *        `uint24` overload is also spacing-keyed.
++ *      `token0/1`, `tickSpacing`, `observe`, `positions`, `mint`, `burn`, `collect` and the
++ *      `uniswapV3MintCallback` name are ABI-identical and go through `IUniswapV3Pool`.
++ *      Slipstream fees are dynamic (swap-fee hook); `DeployAeroCLStrat` warns when the pool's fee
++ *      cap exceeds the quote-deviation budget. Unstaked LPs keep their pro-rata swap fees net of
++ *      the factory's `unstakedFee` share (0 on Ethereum mainnet at deployment;
++ *      governance-adjustable). Gauge staking (AERO rewards) is Phase 2, `AeroCLGaugeStrat`.
++ *
++ *      The contract is intentionally static/non-upgradeable. It keeps the external protocol surface small and
+- *      Go-live (see `DeployUniCLStrat` NatSpec): timelock `setAllowedAdapter` (+ paired feed /
+- *      optional `addSupportedERC20`) → `DeployUniCLStrat` bytecode → timelock `addStrategy`.
++ *      Go-live (see `DeployAeroCLStrat` NatSpec): timelock `setAllowedAdapter` (+ paired feed /
++ *      optional `addSupportedERC20`) → `DeployAeroCLStrat` bytecode → timelock `addStrategy`.
+-contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
++contract AeroCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
+-    /// @dev Canonical Uniswap V3 factory used to prove `pool` provenance at construction.
+-    IUniswapV3Factory public immutable factory;
++    /// @dev Canonical Slipstream factory used to prove `pool` provenance at construction.
++    ICLFactory public immutable factory;
+-        factory = IUniswapV3Factory(_params.addresses.factory);
++        factory = ICLFactory(_params.addresses.factory);
+-        // Factory provenance: only a pool created by the configured Uniswap V3 factory may
++        // Factory provenance: only a pool created by the configured Slipstream factory may
+-        uint24 _fee = IUniswapV3Pool(_params.addresses.pool).fee();
+-        if (factory.getPool(_token0Address, _token1Address, _fee) != _params.addresses.pool) {
++        // Slipstream keys pools by tick spacing, not fee (the fee is dynamic).
++        int24 _spacing = ICLPool(_params.addresses.pool).tickSpacing();
++        if (factory.getPool(_token0Address, _token1Address, _spacing) != _params.addresses.pool) {
+-        tickSpacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
++        tickSpacing = _spacing;
+-        return "Uniswap Concentrated Liquidity Strategy";
++        return "Aero Concentrated Liquidity Strategy";
+-        return "2.0.0";
++        return "1.0.0";
++    }
++
++    /// @dev Slipstream `slot0` has 6 fields (no `feeProtocol`); decoding it through
++    ///      `IUniswapV3Pool` would revert. Deliberately a plain internal helper rather than a
++    ///      hook. `_observationCardinality` is the in-use cardinality (not
++    ///      `observationCardinalityNext`).
++    function _slot0() internal view returns (uint160 _sqrtPriceX96, int24 _tick, uint16 _observationCardinality) {
++        (_sqrtPriceX96, _tick,, _observationCardinality,,) = ICLPool(address(pool)).slot0();
+-        (, _tick,,,,,) = pool.slot0();
++        (, _tick,) = _slot0();
+-        (_sqrtPriceX96,,,,,,) = pool.slot0();
++        (_sqrtPriceX96,,) = _slot0();
++    ///      Same gate as `UniCLStratLib.requireTwapOracle`, inlined because that helper decodes
++    ///      the 7-field Uniswap `slot0`.
+-        UniCLStratLib.requireTwapOracle(pool, _interval, MIN_OBSERVATION_CARDINALITY, MAX_BLOCK_SECONDS);
++        (bool _available,) = _observeTwap(_interval);
++        if (!_available) revert UniCLStratPoolTWAPNotAvailable();
++
++        uint256 _required = (uint256(_interval) + MAX_BLOCK_SECONDS - 1) / MAX_BLOCK_SECONDS;
++        if (_required < MIN_OBSERVATION_CARDINALITY) _required = MIN_OBSERVATION_CARDINALITY;
++        // The ring is uint16; callers reject `> MAX_TWAP_INTERVAL` first, so this cannot overflow.
++        (,, uint16 _cardinality) = _slot0();
++        if (_cardinality < _required) {
++            revert UniCLStratInsufficientObservationCardinality(_cardinality, uint16(_required));
++        }

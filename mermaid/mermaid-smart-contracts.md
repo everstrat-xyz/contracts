@@ -427,7 +427,8 @@ graph TB
 - **Swap Routing**: through the shared Converter on the configured route, normally `UniswapV3ConverterAdapter` on a deep Uniswap pool. No Slipstream adapter is needed.
 - **Interfaces**: `src/interfaces/integrations/aero/` (`ICLPool`, `ICLFactory`, `IDynamicSwapFeeHook`). These are our own declarations; Dromos source is restricted-use and is not vendored.
 - **Deployment**: `script/DeployAeroCLStrat.s.sol` (bytecode only; probes `isPool`/`getPool`, `observe`, cardinality; warns if the fee cap exceeds the quote budget, fatal under `STRICT_FEE_CAP`; logs `unstakedFee`). Then `addStrategy` on the 48h admin timelock.
-- **Tests**: `test/unit/AeroCLStrat.t.sol`, `test/fork/AeroCLStratFork.t.sol`
+- **Drift guard**: CI diffs `AeroCLStrat.sol` against `UniCLStrat.sol` using the committed baseline `script/ci/strategy-drift/AeroCLStrat.diff` (`script/ci/check-strategy-drift.sh`).
+- **Tests**: `test/unit/AeroCLStrat.t.sol`, `test/fork/AeroCLStratFork.t.sol`, `test/trees/AeroCLStrat.tree`
 
 #### **Converter** (Upgradeable)
 - **Purpose**: Shared protocol module that centralises WETH wrapping, unwrapping, and DEX swap execution for all registered strategies. Strategies own their routing decisions; the Converter only enforces the adapter allowlist and caller authorisation.

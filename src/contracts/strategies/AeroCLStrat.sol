@@ -36,8 +36,9 @@ import {UniCLStratLib} from "../../libraries/strategies/UniCLStratLib.sol";
  *         concentrated-liquidity pool, **unstaked** (earns swap fees, not gauge rewards).
  *         Swap, wrap, and unwrap operations are delegated to the shared Converter.
  * @dev Standalone copy of the Uniswap V3 strategy body with the Slipstream differences inlined.
- *      Keeping it free of a shared base avoids hook indirection; the two files are expected to be
- *      diffed against each other on every change to either.
+ *      Keeping it free of a shared base avoids hook indirection. CI enforces that the two files
+ *      only differ by the committed delta (`script/ci/check-strategy-drift.sh`), so a fix to
+ *      either must be mirrored in the other or the baseline consciously regenerated.
  *      Slipstream specifics:
  *      - `slot0` has 6 fields (no `feeProtocol`); a 7-field decode reverts. Everything that reads
  *        spot goes through {_slot0}.
@@ -778,11 +779,7 @@ contract AeroCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     ///      `IUniswapV3Pool` would revert. Deliberately a plain internal helper rather than a
     ///      hook. `_observationCardinality` is the in-use cardinality (not
     ///      `observationCardinalityNext`).
-    function _slot0()
-        internal
-        view
-        returns (uint160 _sqrtPriceX96, int24 _tick, uint16 _observationCardinality)
-    {
+    function _slot0() internal view returns (uint160 _sqrtPriceX96, int24 _tick, uint16 _observationCardinality) {
         (_sqrtPriceX96, _tick,, _observationCardinality,,) = ICLPool(address(pool)).slot0();
     }
 

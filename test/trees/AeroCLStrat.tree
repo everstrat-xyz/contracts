@@ -1,0 +1,84 @@
+// AeroCLStrat — Slipstream deltas only.
+// Every other branch is identical to UniCLStrat (shared UniCLStratLib / IUniCLStrat, drift
+// enforced by script/ci/check-strategy-drift.sh) and is specified in UniCLStrat.tree.
+// Tests: test/unit/AeroCLStrat.t.sol (mocks: test/mocks/AeroCLStratMocks.sol),
+//        test/fork/AeroCLStratFork.t.sol (real WETH/USDT pool + CLFactory).
+
+AeroCLStrat::constructor(DeploymentConfig _params)
+├── Given factory in config is zero
+│   └── It should revert with UniCLStratZeroAddress
+├── Given the configured pool does not contain WETH
+│   └── It should revert with UniCLStratInvalidPool
+├── Given CLFactory.getPool(token0, token1, pool.tickSpacing()) returns address(0)
+│   └── It should revert with UniCLStratInvalidPool
+├── Given CLFactory.getPool(token0, token1, pool.tickSpacing()) returns a different pool
+│   └── It should revert with UniCLStratInvalidPool
+├── Given the pool is registered under a different tick spacing than pool.tickSpacing()
+│   └── It should revert with UniCLStratInvalidPool
+├── Given twapInterval is greater than MAX_TWAP_INTERVAL
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given pool.observe cannot serve twapInterval
+│   └── It should revert with UniCLStratPoolTWAPNotAvailable
+├── Given the 6-field slot0 in-use observationCardinality is below max(ceil(interval / MAX_BLOCK_SECONDS), MIN_OBSERVATION_CARDINALITY)
+│   └── It should revert with UniCLStratInsufficientObservationCardinality
+├── Given the 6-field slot0 in-use observationCardinality equals MIN_OBSERVATION_CARDINALITY
+│   └── It should deploy
+└── Given valid parameters
+    ├── It should store the Slipstream factory as an ICLFactory
+    ├── It should cache tickSpacing from the provenance lookup
+    ├── It should report name "Aero Concentrated Liquidity Strategy"
+    └── It should report version "1.0.0" (independent of UniCLStrat 2.0.0)
+
+UniCLStrat::constructor(DeploymentConfig _params)
+└── Given the pool has the 6-field Slipstream slot0 layout
+    └── It should revert (7-field decode fails), which is why AeroCLStrat exists
+
+AeroCLStrat::_slot0()
+└── When reading spot state
+    ├── It should decode the 6-field Slipstream slot0 through ICLPool
+    └── It should be the only spot read (_currentTick, _sqrtPrice, _requireTwapOracle)
+
+AeroCLStrat::setTwapInterval(uint32 _interval)
+├── Given the 6-field slot0 in-use cardinality cannot cover the new window
+│   └── It should revert with UniCLStratInsufficientObservationCardinality
+└── Given the cardinality covers the new window
+    └── It should update twapInterval
+
+AeroCLStrat::setShortTwapInterval(uint32 _interval)
+└── Given pool.observe cannot serve the new window
+    └── It should revert with UniCLStratPoolTWAPNotAvailable
+
+AeroCLStrat::deposit()
+├── Given the pool is not calm (spot read via _slot0)
+│   └── It should revert with UniCLStratNotCalm
+└── Given the pool is calm
+    └── It should mint liquidity into the Aero pool and pay it in uniswapV3MintCallback
+
+AeroCLStrat::withdraw(address _receiver, uint256 _amount)
+└── Given the pool is not calm
+    └── It should still burn and send native ETH to the receiver
+
+AeroCLStrat::rebalance()
+├── Given the strategy is healthy
+│   └── It should revert with StrategyIsHealthy
+└── Given spot drifted outside rebalanceTickThreshold
+    └── It should re-center the main range around the current tick
+
+AeroCLStrat::sync()
+└── Given the unstaked position accrued swap fees
+    └── It should poke them into tokensOwed and pendingPerformanceFeeInETH
+
+AeroCLStrat::emergencyExit()
+└── Given the strategy is paused
+    └── It should sweep held WETH (as ETH) and paired token to StrategyManager
+
+DeployAeroCLStrat::run()
+├── Given CLFactory.isPool(pool) is false or getPool(tickSpacing) does not match
+│   └── It should fail before broadcast
+├── Given the pool fee cap is at or above MAX_QUOTE_DEVIATION_BPS
+│   ├── When STRICT_FEE_CAP is unset, false, or unparsable
+│   │   └── It should log a warning and still deploy
+│   └── When STRICT_FEE_CAP is true or 1
+│       └── It should fail before broadcast
+└── Given every probe passes
+    └── It should deploy and log unstakedFee

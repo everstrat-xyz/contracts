@@ -35,10 +35,7 @@ import {DeployAeroCLStrat} from "../../script/DeployAeroCLStrat.s.sol";
 ///      explicitly (the env var is only read in the script's `run`) and the tests stay
 ///      order-independent.
 contract DeployAeroCLStratProbeHarness is DeployAeroCLStrat {
-    function probe(address _factory, address _pool, uint32 _twapInterval, uint32 _shortTwapInterval)
-        external
-        view
-    {
+    function probe(address _factory, address _pool, uint32 _twapInterval, uint32 _shortTwapInterval) external view {
         _probe(_factory, _pool, _twapInterval, _shortTwapInterval, false);
     }
 
@@ -49,13 +46,10 @@ contract DeployAeroCLStratProbeHarness is DeployAeroCLStrat {
         _probe(_factory, _pool, _twapInterval, _shortTwapInterval, true);
     }
 
-    function _probe(
-        address _factory,
-        address _pool,
-        uint32 _twapInterval,
-        uint32 _shortTwapInterval,
-        bool _strict
-    ) private view {
+    function _probe(address _factory, address _pool, uint32 _twapInterval, uint32 _shortTwapInterval, bool _strict)
+        private
+        view
+    {
         _requireAeroProvenance(_factory, _pool);
         _requirePoolCanServeTwap(_pool, _twapInterval, "TWAP_INTERVAL");
         _requirePoolCanServeTwap(_pool, _shortTwapInterval, "SHORT_TWAP_INTERVAL");
@@ -291,10 +285,8 @@ contract AeroCLStratForkTest is Test {
         DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
         harness.probe(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
 
-        (, uint24 feeCap,,,) =
-            IDynamicSwapFeeHook(ICLFactory(AERO_CL_FACTORY).getPoolSwapHook(AERO_WETH_USDT_POOL)).dynamicFeeConfig(
-                AERO_WETH_USDT_POOL
-            );
+        (, uint24 feeCap,,,) = IDynamicSwapFeeHook(ICLFactory(AERO_CL_FACTORY).getPoolSwapHook(AERO_WETH_USDT_POOL))
+            .dynamicFeeConfig(AERO_WETH_USDT_POOL);
         assertGe(
             feeCap,
             harness.feeBudgetPips(),

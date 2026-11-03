@@ -35,7 +35,10 @@ import {Auth} from "../src/libraries/Auth.sol";
  *      sits at or above `MAX_QUOTE_DEVIATION_BPS`. Our inventory swaps route through the configured
  *      Converter route (a Uniswap pool), never through the Aero pool, so the cap only matters if a
  *      route is later pointed at this pool. Aero has already raised the WETH/USDT cap to the 5%
- *      factory default once, which broke the strict check; set `STRICT_FEE_CAP=1` to fail instead.
+ *      factory default once, which broke the strict check; set `STRICT_FEE_CAP=true` to fail instead.
+ *      (`vm.envOr` parses `true`/`false` case-insensitively, plus `1`/`0`; any other value, e.g.
+ *      `yes`, silently falls back to `false`.) A Converter route through this pool is only allowed
+ *      once this check passes under `STRICT_FEE_CAP=true` (docs/STRATEGY_GUARDRAILS.md §1.1.2).
  *      Also logs the pool's `unstakedFee` — the share of swap fees unstaked LPs (this strategy)
  *      forgo; 0 on Ethereum mainnet at launch, governance-adjustable.
  *

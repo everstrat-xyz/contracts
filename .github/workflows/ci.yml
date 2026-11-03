@@ -32,6 +32,9 @@ jobs:
         run: forge fmt --check src/ test/
         id: fmt
 
+      - name: Check UniCLStrat / AeroCLStrat drift
+        run: script/ci/check-strategy-drift.sh
+
       - name: Run Forge build
         run: forge build --sizes
         id: build
