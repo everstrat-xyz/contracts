@@ -6,6 +6,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {Registry} from "registry/Registry.sol";
 import {AeroCLStrat} from "../src/contracts/strategies/AeroCLStrat.sol";
 import {IUniCLStrat} from "../src/interfaces/strategies/IUniCLStrat.sol";
+import {IUniswapV3Pool} from "../src/interfaces/integrations/uniswap/IUniswapV3Pool.sol";
 import {ICLFactory} from "../src/interfaces/integrations/aero/ICLFactory.sol";
 import {ICLPool} from "../src/interfaces/integrations/aero/ICLPool.sol";
 import {IDynamicSwapFeeHook} from "../src/interfaces/integrations/aero/IDynamicSwapFeeHook.sol";
@@ -156,14 +157,17 @@ contract DeployAeroCLStrat is Script {
         uint32[] memory secondsAgos = new uint32[](2);
         secondsAgos[0] = interval;
         secondsAgos[1] = 0;
-        // `observe` is ABI-identical to Uniswap V3; declared here to keep ICLPool minimal.
-        (bool ok,) = pool.staticcall(abi.encodeWithSignature("observe(uint32[])", secondsAgos));
-        require(
-            ok,
-            string.concat(
-                "pool.observe cannot serve ", label, "; grow observation cardinality and wait for fill before deploy"
-            )
-        );
+        // `observe` is ABI-identical to Uniswap V3, so it goes through `IUniswapV3Pool` like the strategy.
+        try IUniswapV3Pool(pool).observe(secondsAgos) returns (int56[] memory, uint160[] memory) {}
+        catch {
+            revert(
+                string.concat(
+                    "pool.observe cannot serve ",
+                    label,
+                    "; grow observation cardinality and wait for fill before deploy"
+                )
+            );
+        }
     }
 
     /// @dev In-use `observationCardinality` (6-field Slipstream `slot0`, not Next).
@@ -195,13 +199,9 @@ contract DeployAeroCLStrat is Script {
         uint256 budget = MAX_QUOTE_DEVIATION_BPS * PIPS_PER_BPS;
         if (feeCap < budget) return;
 
-        if (strict) {
-            require(feeCap < budget, "Aero pool fee cap does not fit inside MAX_QUOTE_DEVIATION_BPS");
-        } else {
-            console.log(
-                "WARNING: pool fee cap (pips) >= quote budget; fine while routes skip this pool, but"
-            );
-            console.log("set STRICT_FEE_CAP=true to enforce, or keep routes off this pool.");
-        }
+        if (strict) revert("Aero pool fee cap does not fit inside MAX_QUOTE_DEVIATION_BPS");
+
+        console.log("WARNING: pool fee cap (pips) >= quote budget; fine while routes skip this pool, but");
+        console.log("set STRICT_FEE_CAP=true to enforce, or keep routes off this pool.");
     }
 }
