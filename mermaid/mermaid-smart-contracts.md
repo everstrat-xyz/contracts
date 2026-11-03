@@ -68,6 +68,8 @@ graph TB
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
     UniCLStratLib["UniCLStratLib<br/>Linked Library"]
     AeroCLStrat["AeroCLStrat<br/>Static Strategy"]
+    AeroCLRangeLib["AeroCLRangeLib<br/>Linked Library"]
+    AeroCLPositionLib["AeroCLPositionLib<br/>Linked Library"]
 
     %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
@@ -159,6 +161,12 @@ graph TB
     AeroCLStrat --> ICLPool
     AeroCLStrat --> ICLFactory
     AeroCLStrat --> UniCLStratLib
+    AeroCLStrat --> AeroCLRangeLib
+    AeroCLStrat --> AeroCLPositionLib
+    AeroCLRangeLib --> AeroCLPositionLib
+    AeroCLRangeLib --> UniCLStratLib
+    AeroCLPositionLib --> UniCLStratLib
+    AeroCLPositionLib --> ICLPool
     AeroCLStrat --> Oracle
     AeroCLStrat --> UniV3Math
     AeroCLStrat --> OZLibs
@@ -423,11 +431,12 @@ graph TB
 
 #### **AeroCLStrat** (Static/Immutable Strategy)
 - **Purpose**: Native-ETH `IStrategy` implementation that deploys funds **unstaked** into an Aero (Slipstream) WETH/paired-token concentrated-liquidity pool and earns swap fees. Issue #55 Phase 1; gauge staking (AERO rewards) is Phase 2 (`AeroCLGaugeStrat`).
-- **Relationship to UniCLStrat**: a separate contract. `UniCLStrat` is unchanged; mechanics, guards, fee accounting, emergency paths and the `IUniCLStrat` interface/errors are the same, and it shares `UniCLStratLib`. Slipstream differences: 6-field `slot0` (read via `ICLPool`; cardinality gate inlined), provenance via tick-spacing-keyed `CLFactory.getPool`, and a dynamic swap fee.
+- **Relationship to UniCLStrat**: a separate contract. `UniCLStrat` is unchanged; mechanics, guards, fee accounting, emergency paths and the `IUniCLStrat` interface/errors are the same, and it reuses the venue-agnostic swap and inventory math in `UniCLStratLib`. Slipstream differences: 6-field `slot0` (read via `ICLPool` in `AeroCLPositionLib.slot0`; cardinality gate inlined), provenance via tick-spacing-keyed `CLFactory.getPool`, and a dynamic swap fee.
+- **Layering**: `AeroCLStrat` keeps configuration, access control, the `IStrategy` entry points, pause / emergency exit, the calm / TWAP / cardinality gates and the mint callback. Two linked libraries run in its context (DELEGATECALL) on one `RangeState` storage struct: `AeroCLRangeLib` (range management: main placement / re-centering, ratio swap, alt placement, WETH sourcing for withdrawals) and `AeroCLPositionLib` (how positions are held: mint / burn / collect / positions, LP-fee accounting, valuation). Range management never calls the pool's position API directly, so the Phase 2 gauge strategy can add an NFT position backend in `AeroCLPositionLib` and reuse `AeroCLRangeLib` unchanged.
 - **Swap Routing**: through the shared Converter on the configured route, normally `UniswapV3ConverterAdapter` on a deep Uniswap pool. No Slipstream adapter is needed.
 - **Interfaces**: `src/interfaces/integrations/aero/` (`ICLPool`, `ICLFactory`, `IDynamicSwapFeeHook`). These are our own declarations; Dromos source is restricted-use and is not vendored.
 - **Deployment**: `script/DeployAeroCLStrat.s.sol` (bytecode only; probes `isPool`/`getPool`, `observe`, cardinality; warns if the fee cap exceeds the quote budget, fatal under `STRICT_FEE_CAP`; logs `unstakedFee`). Then `addStrategy` on the 48h admin timelock.
-- **Drift guard**: CI diffs `AeroCLStrat.sol` against `UniCLStrat.sol` using the committed baseline `script/ci/strategy-drift/AeroCLStrat.diff` (`script/ci/check-strategy-drift.sh`).
+- **Porting fixes**: the range logic is no longer a textual copy of `UniCLStrat`, so a security fix to `UniCLStrat`'s range or LP-fee logic must be ported to `AeroCLRangeLib` / `AeroCLPositionLib` by hand (reviewer checklist item).
 - **Tests**: `test/unit/AeroCLStrat.t.sol`, `test/fork/AeroCLStratFork.t.sol`, `test/trees/AeroCLStrat.tree`
 
 #### **Converter** (Upgradeable)
@@ -682,6 +691,8 @@ graph TB
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
     UniCLStratLib["UniCLStratLib<br/>Linked Library"]
     AeroCLStrat["AeroCLStrat<br/>Static Strategy"]
+    AeroCLRangeLib["AeroCLRangeLib<br/>Linked Library"]
+    AeroCLPositionLib["AeroCLPositionLib<br/>Linked Library"]
     
     %% Registry Subsystem
     Registry["Registry<br/>Static Contract<br/>(Address Book + Roles)"]
@@ -785,6 +796,12 @@ graph TB
     AeroCLStrat --> ICLPool
     AeroCLStrat --> ICLFactory
     AeroCLStrat --> UniCLStratLib
+    AeroCLStrat --> AeroCLRangeLib
+    AeroCLStrat --> AeroCLPositionLib
+    AeroCLRangeLib --> AeroCLPositionLib
+    AeroCLRangeLib --> UniCLStratLib
+    AeroCLPositionLib --> UniCLStratLib
+    AeroCLPositionLib --> ICLPool
     AeroCLStrat --> Oracle
     AeroCLStrat --> UniV3Math
     AeroCLStrat --> OZLibs
