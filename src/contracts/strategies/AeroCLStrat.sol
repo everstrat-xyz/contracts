@@ -190,7 +190,7 @@ contract AeroCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // be trusted as `msg.sender` of `uniswapV3MintCallback`. Without this check an
         // interface-compatible malicious pool could drain inventory during mint.
         // Slipstream keys pools by tick spacing, not fee (the fee is dynamic).
-        int24 _spacing = ICLPool(_params.addresses.pool).tickSpacing();
+        int24 _spacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
         if (factory.getPool(_token0Address, _token1Address, _spacing) != _params.addresses.pool) {
             revert UniCLStratInvalidPool();
         }
