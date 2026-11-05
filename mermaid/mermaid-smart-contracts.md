@@ -19,6 +19,8 @@ graph TB
     UniswapV3Path["UniswapV3Path<br/>Path Encoding Library<br/>(libraries/integrations/uniswap)"]
     ChainlinkOracle["Chainlink<br/>Oracle"]
     UniswapPool["Uniswap V3<br/>Pool"]
+    AeroPool["Aero (Slipstream)<br/>CL Pool"]
+    AeroFactory["Aero<br/>CLFactory"]
     SwapRouter["Uniswap V3<br/>Swap Router"]
     UniswapFactory["Uniswap V3<br/>Factory"]
     WETH["WETH<br/>Native Wrapper"]
@@ -49,6 +51,9 @@ graph TB
     IUniswapV3Pool["IUniswapV3Pool<br/>Interface"]
     IUniswapV3Router["IUniswapV3Router<br/>Interface"]
     IUniswapV3Factory["IUniswapV3Factory<br/>Interface"]
+    ICLPool["ICLPool<br/>Interface"]
+    ICLFactory["ICLFactory<br/>Interface"]
+    IDynamicSwapFeeHook["IDynamicSwapFeeHook<br/>Interface"]
     
     %% Main Contracts
     EVE["EVE Token<br/>Static Contract"]
@@ -62,6 +67,9 @@ graph TB
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
     UniCLStratLib["UniCLStratLib<br/>Linked Library"]
+    AeroCLStrat["AeroCLStrat<br/>Static Strategy"]
+    AeroCLRangeLib["AeroCLRangeLib<br/>Linked Library"]
+    AeroCLPositionLib["AeroCLPositionLib<br/>Linked Library"]
 
     %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
@@ -145,6 +153,25 @@ graph TB
     UniCLStrat --> Oracle
     UniCLStrat --> UniV3Math
     UniCLStrat --> OZLibs
+    AeroCLStrat --> IStrategy
+    AeroCLStrat --> IUniCLStrat
+    AeroCLStrat --> IConverter
+    AeroCLStrat --> IWETH
+    AeroCLStrat --> IUniswapV3Pool
+    AeroCLStrat --> ICLPool
+    AeroCLStrat --> ICLFactory
+    AeroCLStrat --> UniCLStratLib
+    AeroCLStrat --> AeroCLRangeLib
+    AeroCLStrat --> AeroCLPositionLib
+    AeroCLRangeLib --> AeroCLPositionLib
+    AeroCLRangeLib --> UniCLStratLib
+    AeroCLPositionLib --> UniCLStratLib
+    AeroCLPositionLib --> ICLPool
+    AeroCLStrat --> Oracle
+    AeroCLStrat --> UniV3Math
+    AeroCLStrat --> OZLibs
+    ICLPool --> AeroPool
+    ICLFactory --> AeroFactory
     
     Oracle --> UUPS
     Oracle --> AccessControl
@@ -205,6 +232,11 @@ graph TB
     UniCLStrat -.->|"mint, burn, collect, observe"| UniswapPool
     UniCLStrat -.->|"emergency weth.withdraw"| WETH
     UniCLStrat -.->|"NAV valuation"| OracleProxy
+    AeroCLStrat -.->|"wrap / unwrap / swap via"| ConverterProxy
+    AeroCLStrat -.->|"mint, burn, collect, observe (unstaked)"| AeroPool
+    AeroCLStrat -.->|"provenance: getPool(tickSpacing)"| AeroFactory
+    AeroCLStrat -.->|"emergency weth.withdraw"| WETH
+    AeroCLStrat -.->|"NAV valuation"| OracleProxy
 
     %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
@@ -261,10 +293,10 @@ graph TB
     classDef test fill:#32CD32,stroke:#006400,stroke-width:4px,font-size:28px,font-weight:bold,color:#000000
     
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
-    class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
+    class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat,AeroCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH,MimicNetwork,MimicAccount external
-    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,AeroPool,AeroFactory,SwapRouter,UniswapFactory,WETH,MimicNetwork,MimicAccount external
+    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory,ICLPool,ICLFactory,IDynamicSwapFeeHook interface
     class Tests,Mocks,Helpers,Trees test
     class KeeperExecutorBase,QueueKeeperExecutor,StrategyKeeperExecutor static
     class IRegistry,IRegistryClient,IUniswapV3ConverterAdapter,IKeeperExecutorBase,IQueueKeeperExecutor,IStrategyKeeperExecutor interface
@@ -396,6 +428,16 @@ graph TB
 - **Deployment**: Direct deployment via `script/DeployUniCLStrat.s.sol` (bytecode only; requires prior timelocked `setAllowedAdapter`); `StrategyManager.addStrategy` is always scheduled on the 48h admin timelock — same after modular finalize and after `DeployAll`
 - **Interface**: `src/interfaces/strategies/IUniCLStrat.sol`
 - **Tests**: `test/unit/UniCLStrat.t.sol`, `test/fuzz/UniCLStratFuzz.t.sol`, `test/trees/UniCLStrat.tree`
+
+#### **AeroCLStrat** (Static/Immutable Strategy)
+- **Purpose**: Native-ETH `IStrategy` implementation that deploys funds **unstaked** into an Aero (Slipstream) WETH/paired-token concentrated-liquidity pool and earns swap fees. Issue #55 Phase 1; gauge staking (AERO rewards) is Phase 2 (`AeroCLGaugeStrat`).
+- **Relationship to UniCLStrat**: a separate contract. `UniCLStrat` is unchanged; mechanics, guards, fee accounting, emergency paths and the `IUniCLStrat` interface/errors are the same, and it reuses the venue-agnostic swap and inventory math in `UniCLStratLib`. Slipstream differences: 6-field `slot0` (read via `ICLPool` in `AeroCLPositionLib.slot0`; cardinality gate inlined), provenance via tick-spacing-keyed `CLFactory.getPool`, and a dynamic swap fee.
+- **Layering**: `AeroCLStrat` keeps configuration, access control, the `IStrategy` entry points, pause / emergency exit, the calm / TWAP / cardinality gates and the mint callback. Two linked libraries run in its context (DELEGATECALL) on one `RangeState` storage struct: `AeroCLRangeLib` (range management: main placement / re-centering, ratio swap, alt placement, WETH sourcing for withdrawals) and `AeroCLPositionLib` (how positions are held: mint / burn / collect / positions, LP-fee accounting, valuation). Range management never calls the pool's position API directly, so the Phase 2 gauge strategy can add an NFT position backend in `AeroCLPositionLib` and reuse `AeroCLRangeLib` unchanged.
+- **Swap Routing**: through the shared Converter on the configured route, normally `UniswapV3ConverterAdapter` on a deep Uniswap pool. No Slipstream adapter is needed.
+- **Interfaces**: `src/interfaces/integrations/aero/` (`ICLPool`, `ICLFactory`, `IDynamicSwapFeeHook`). These are our own declarations; Dromos source is restricted-use and is not vendored.
+- **Deployment**: `script/DeployAeroCLStrat.s.sol` (bytecode only; probes `isPool`/`getPool`, `observe`, cardinality; warns if the fee cap exceeds the quote budget, fatal under `STRICT_FEE_CAP`; logs `unstakedFee`). Then `addStrategy` on the 48h admin timelock.
+- **Porting fixes**: the range logic is no longer a textual copy of `UniCLStrat`, so a security fix to `UniCLStrat`'s range or LP-fee logic must be ported to `AeroCLRangeLib` / `AeroCLPositionLib` by hand (reviewer checklist item).
+- **Tests**: `test/unit/AeroCLStrat.t.sol`, `test/fork/AeroCLStratFork.t.sol`, `test/trees/AeroCLStrat.tree`
 
 #### **Converter** (Upgradeable)
 - **Purpose**: Shared protocol module that centralises WETH wrapping, unwrapping, and DEX swap execution for all registered strategies. Strategies own their routing decisions; the Converter only enforces the adapter allowlist and caller authorisation.
@@ -601,6 +643,8 @@ graph TB
     UniswapPool["Uniswap V3<br/>Pool"]
     SwapRouter["Uniswap V3<br/>Swap Router"]
     UniswapFactory["Uniswap V3<br/>Factory"]
+    AeroPool["Aero (Slipstream)<br/>CL Pool"]
+    AeroFactory["Aero<br/>CLFactory"]
     WETH["WETH<br/>Native Wrapper"]
     DeFi["DeFi<br/>Protocols"]
     
@@ -630,6 +674,9 @@ graph TB
     IUniswapV3Pool["IUniswapV3Pool<br/>Interface"]
     IUniswapV3Router["IUniswapV3Router<br/>Interface"]
     IUniswapV3Factory["IUniswapV3Factory<br/>Interface"]
+    ICLPool["ICLPool<br/>Interface"]
+    ICLFactory["ICLFactory<br/>Interface"]
+    IDynamicSwapFeeHook["IDynamicSwapFeeHook<br/>Interface"]
     
     %% Main Contracts
     EVE["EVE Token<br/>Static Contract"]
@@ -643,6 +690,9 @@ graph TB
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
     UniCLStratLib["UniCLStratLib<br/>Linked Library"]
+    AeroCLStrat["AeroCLStrat<br/>Static Strategy"]
+    AeroCLRangeLib["AeroCLRangeLib<br/>Linked Library"]
+    AeroCLPositionLib["AeroCLPositionLib<br/>Linked Library"]
     
     %% Registry Subsystem
     Registry["Registry<br/>Static Contract<br/>(Address Book + Roles)"]
@@ -738,6 +788,26 @@ graph TB
     UniCLStrat --> Oracle
     UniCLStrat --> UniV3Math
     UniCLStrat --> OZLibs
+    AeroCLStrat --> IStrategy
+    AeroCLStrat --> IUniCLStrat
+    AeroCLStrat --> IConverter
+    AeroCLStrat --> IWETH
+    AeroCLStrat --> IUniswapV3Pool
+    AeroCLStrat --> ICLPool
+    AeroCLStrat --> ICLFactory
+    AeroCLStrat --> UniCLStratLib
+    AeroCLStrat --> AeroCLRangeLib
+    AeroCLStrat --> AeroCLPositionLib
+    AeroCLRangeLib --> AeroCLPositionLib
+    AeroCLRangeLib --> UniCLStratLib
+    AeroCLPositionLib --> UniCLStratLib
+    AeroCLPositionLib --> ICLPool
+    AeroCLStrat --> Oracle
+    AeroCLStrat --> UniV3Math
+    AeroCLStrat --> OZLibs
+    ICLPool --> AeroPool
+    ICLFactory --> AeroFactory
+    IDynamicSwapFeeHook --> AeroPool
     
     Oracle --> UUPS
     Oracle --> AccessControl
@@ -784,6 +854,7 @@ graph TB
     StrategyManagerProxy --> StrategyManager
     StrategyManagerProxy -.->|"Managed by"| ControllerProxy
     StrategyManagerProxy -.->|"Registers / Calls"| UniCLStrat
+    StrategyManagerProxy -.->|"Registers / Calls"| AeroCLStrat
     StrategyManagerProxy -.->|"Registers / Calls"| FutureStrategy
 
     %% Registry Subsystem
@@ -834,6 +905,11 @@ graph TB
     UniCLStrat -.->|"mint, burn, collect, observe"| UniswapPool
     UniCLStrat -.->|"emergency weth.withdraw"| WETH
     UniCLStrat -.->|"NAV valuation"| OracleProxy
+    AeroCLStrat -.->|"wrap / unwrap / swap via"| ConverterProxy
+    AeroCLStrat -.->|"mint, burn, collect, observe (unstaked)"| AeroPool
+    AeroCLStrat -.->|"provenance: getPool(tickSpacing)"| AeroFactory
+    AeroCLStrat -.->|"emergency weth.withdraw"| WETH
+    AeroCLStrat -.->|"NAV valuation"| OracleProxy
     
     FutureStrategy -.->|"wrap / unwrap / swap via"| ConverterProxy
     FutureStrategy -.->|"NAV valuation"| OracleProxy
@@ -859,6 +935,7 @@ graph TB
     Tests --> ConverterProxy
     Tests --> UniswapV3ConverterAdapter
     Tests --> UniCLStrat
+    Tests --> AeroCLStrat
     Tests --> VaultProxy
     Tests --> FutureStrategy
     Tests --> FutureDEXAdapter
@@ -876,10 +953,10 @@ graph TB
     classDef future fill:#FFD700,stroke:#B8860B,stroke-width:6px,font-size:32px,font-weight:bold,color:#000000
     
     class Controller,ExitQueue,StrategyManager,Oracle,Converter main
-    class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat static
+    class EVE,AMM,Whitelist,UniswapV3ConverterAdapter,UniCLStrat,AeroCLStrat static
     class ControllerProxy,ExitQueueProxy,StrategyManagerProxy,OracleProxy,ConverterProxy proxy
-    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,SwapRouter,UniswapFactory,WETH external
-    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory interface
+    class ERC20,UUPS,AccessControl,Pausable,ReentrancyGuard,Proxy,OZLibs,Math,ExitQueueLimits,UniV3Math,UniswapV3Path,ChainlinkOracle,UniswapPool,AeroPool,AeroFactory,SwapRouter,UniswapFactory,WETH external
+    class IOracle,IEVE,IController,IAMM,IWhitelist,IExitQueue,IStrategyManager,IStrategy,IUniCLStrat,IConverter,IConverterAdapter,IERC20,IWETH,IUniswapV3Pool,IUniswapV3Router,IUniswapV3Factory,ICLPool,ICLFactory,IDynamicSwapFeeHook interface
     class Tests,Mocks,Helpers,Trees test
     class Vault,FutureStrategy,FutureDEXAdapter,IVault,VaultProxy future
     class Registry,RegistryClient,RegistryClientUpgradeable,RegistryClientBase static
