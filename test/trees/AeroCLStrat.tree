@@ -65,8 +65,11 @@ AeroCLStrat::rebalance()
     └── It should re-center the main range around the current tick
 
 AeroCLStrat::sync()
-└── Given the unstaked position accrued swap fees
-    └── It should poke them into tokensOwed and pendingPerformanceFeeInETH
+├── Given the unstaked position accrued swap fees
+│   └── It should poke them into tokensOwed and pendingPerformanceFeeInETH
+└── Given CLFactory.getUnstakedFee(pool) is non-zero
+    ├── It should accrue tokensOwed net of the unstaked-fee share
+    └── It should report pendingPerformanceFeeInETH on the net amount
 
 AeroCLStrat::emergencyExit()
 └── Given the strategy is paused
@@ -75,10 +78,18 @@ AeroCLStrat::emergencyExit()
 DeployAeroCLStrat::run()
 ├── Given CLFactory.isPool(pool) is false or getPool(tickSpacing) does not match
 │   └── It should fail before broadcast
+├── Given pool.observe cannot serve TWAP_INTERVAL or SHORT_TWAP_INTERVAL (e.g. a fresh pool)
+│   └── It should fail before broadcast
+├── Given the in-use observationCardinality is below the window requirement
+│   └── It should fail before broadcast (observe alone passes by extrapolation)
 ├── Given the pool fee cap is at or above MAX_QUOTE_DEVIATION_BPS
 │   ├── When STRICT_FEE_CAP is unset, false, or unparsable
 │   │   └── It should log a warning and still deploy
 │   └── When STRICT_FEE_CAP is true or 1
 │       └── It should fail before broadcast
+├── Given the pool fee cap is below MAX_QUOTE_DEVIATION_BPS
+│   └── It should pass even when STRICT_FEE_CAP is true
+├── Given the pool has no swap-fee hook
+│   └── It should use the static fee() as the cap
 └── Given every probe passes
     └── It should deploy and log unstakedFee

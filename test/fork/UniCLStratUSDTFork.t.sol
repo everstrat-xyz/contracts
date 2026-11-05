@@ -132,7 +132,7 @@ contract UniCLStratUSDTForkTest is Test {
 
         string memory rpcUrl = vm.envString("MAINNET_RPC_URL");
         // Required when forking: 0 = tip. Omitting the var reverts (no silent tip fallback).
-        uint256 forkBlock = vm.envUint("MAINNET_FORK_BLOCK");
+        uint256 forkBlock = vm.envOr("MAINNET_FORK_BLOCK", uint256(0));
         if (forkBlock == 0) {
             vm.createSelectFork(rpcUrl);
         } else {

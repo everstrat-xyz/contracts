@@ -28,6 +28,7 @@ import {TickMath} from "../../src/libraries/integrations/uniswap/TickMath.sol";
 import {TickUtils} from "../../src/libraries/integrations/uniswap/TickUtils.sol";
 
 import {MockStrategyManagerStub} from "../mocks/MockStrategyManagerStub.sol";
+import {IAeroCLFactoryForkAdmin, IAeroCustomUnstakedFeeModule} from "./helpers/AeroForkHelpers.sol";
 import {DeployAeroCLStrat} from "../../script/DeployAeroCLStrat.s.sol";
 
 /// @dev Exposes the deploy script's pre-broadcast probes so they run against the real pool.
@@ -112,15 +113,30 @@ contract AeroCLStratForkTest is Test {
     uint32 internal constant SHORT_TWAP_INTERVAL = 60;
     uint256 internal constant STALENESS_INTERVAL = 30 days;
     uint256 internal constant BPS = 10_000;
-    uint256 internal constant POOL_DETUNE_BPS = 10_050;
     int24 internal constant NOT_CALM_TICK_OFFSET = 350;
     /// @dev Between REBALANCE_TICK_THRESHOLD and MAX_TICK_DEVIATION: unhealthy but still calm.
     int24 internal constant REBALANCE_TICK_OFFSET = 180;
-    uint256 internal constant NAV_TOLERANCE = 0.03e18; // 3%
-    uint256 internal constant WITHDRAW_TOLERANCE = 0.04e18; // 4%
+    // Tolerances sit at ~2-5x the deviations measured at block 26256000 and at tip (Nov 2026):
+    // deposit NAV 0.02-0.10%, invest-idle 0.01-0.04%, partial withdraw at a dislocated spot
+    // 0.32-0.46%, full-withdraw residual 0.75%. A 1-2% mispricing would now fail.
+    uint256 internal constant NAV_TOLERANCE = 0.005e18; // 0.5%
+    uint256 internal constant WITHDRAW_TOLERANCE = 0.01e18; // 1%
+    uint256 internal constant FULL_WITHDRAW_MIN_PAYOUT_BPS = 9_950; // 99.5% of maxWithdrawal
+    uint256 internal constant FULL_WITHDRAW_MAX_RESIDUAL_BPS = 150; // 1.5% of the deposit
     uint256 internal constant SWAP_USDT_BUDGET = 100_000_000_000e6;
     uint256 internal constant SWAP_WETH_BUDGET = 30_000_000e18;
     uint256 internal constant FEE_SWAP_USDT_AMOUNT = 20_000e6;
+    uint256 internal constant PERFORMANCE_FEE_BPS = 1_000; // 10%
+    /// @dev Pending fee is an independent oracle re-valuation of tokensOwed: only rounding differs.
+    uint256 internal constant FEE_VALUATION_TOLERANCE = 1e12; // 1e-6 relative
+    uint256 internal constant INVEST_IDLE_AMOUNT = 0.3 ether;
+    /// @dev 25% of unstaked LP fees diverted (pips); well below the module's MAX_FEE.
+    uint24 internal constant TEST_UNSTAKED_FEE = 250_000;
+    uint256 internal constant PIPS = 1_000_000;
+    uint256 internal constant UNSTAKED_FEE_RATIO_TOLERANCE = 0.01e18; // 1%
+    /// @dev An enabled CLFactory tick spacing with no WETH/USDT pool, for fresh-pool tests.
+    int24 internal constant FRESH_POOL_TICK_SPACING = 100;
+    uint16 internal constant FRESH_POOL_CARDINALITY = 1;
 
     // ============ Actors ============
 
@@ -153,7 +169,7 @@ contract AeroCLStratForkTest is Test {
         if (!vm.envExists("MAINNET_RPC_URL")) return;
 
         string memory rpcUrl = vm.envString("MAINNET_RPC_URL");
-        uint256 forkBlock = vm.envUint("MAINNET_FORK_BLOCK");
+        uint256 forkBlock = vm.envOr("MAINNET_FORK_BLOCK", uint256(0));
         if (forkBlock == 0) {
             vm.createSelectFork(rpcUrl);
         } else {
@@ -277,29 +293,93 @@ contract AeroCLStratForkTest is Test {
         harness.probe(AERO_CL_FACTORY, UNIV3_WETH_USDT_POOL_005, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
     }
 
-    /// @dev Aero raised this pool's dynamic fee cap to the 5% factory default after Phase 1 was
-    ///      written, so the probe must not fail the deploy by default. The cap is logged instead;
-    ///      our inventory swaps route through a Uniswap pool, not this one. Asserts the live cap
-    ///      really is over budget, so this test fails loudly if Aero ever lowers it again.
-    function test_Fork_DeployProbes_FeeCapAboveBudget_StillDeploysByDefault() public onlyFork {
-        DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
-        harness.probe(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
+    // Fee-cap branches use a mocked hook config: the live cap is Aero governance state (it was
+    // raised to the 5% factory default after launch), and a test pinned to it would fail on a
+    // governance change rather than on a code change. Everything else in the probe stays real.
 
-        (, uint24 feeCap,,,) = IDynamicSwapFeeHook(ICLFactory(AERO_CL_FACTORY).getPoolSwapHook(AERO_WETH_USDT_POOL))
-            .dynamicFeeConfig(AERO_WETH_USDT_POOL);
-        assertGe(
-            feeCap,
-            harness.feeBudgetPips(),
-            "live cap should still exceed the quote budget; if not, the warning path is dead code"
-        );
+    /// @dev At the budget counts as over it: the default mode only warns.
+    function test_Fork_DeployProbes_FeeCapAtBudget_WarnsByDefault() public onlyFork {
+        DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
+        _mockPoolFeeCap(harness.feeBudgetPips());
+
+        harness.probe(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
     }
 
     /// @dev `STRICT_FEE_CAP=true` restores the hard gate for operators who route through this pool.
-    function test_Fork_DeployProbes_StrictFeeCap_RejectsWideCap() public onlyFork {
+    function test_Fork_DeployProbes_StrictFeeCap_RejectsCapAtBudget() public onlyFork {
         DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
+        _mockPoolFeeCap(harness.feeBudgetPips());
 
         vm.expectRevert(bytes("Aero pool fee cap does not fit inside MAX_QUOTE_DEVIATION_BPS"));
         harness.probeStrict(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
+    }
+
+    function test_Fork_DeployProbes_StrictFeeCap_AcceptsCapBelowBudget() public onlyFork {
+        DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
+        _mockPoolFeeCap(harness.feeBudgetPips() - 1);
+
+        harness.probeStrict(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
+    }
+
+    /// @dev Without a swap-fee hook the static `fee()` is the cap.
+    function test_Fork_DeployProbes_StrictFeeCap_UsesStaticFeeWithoutHook() public onlyFork {
+        DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
+        vm.mockCall(
+            AERO_CL_FACTORY, abi.encodeCall(ICLFactory.getPoolSwapHook, (AERO_WETH_USDT_POOL)), abi.encode(address(0))
+        );
+        vm.mockCall(AERO_WETH_USDT_POOL, abi.encodeCall(ICLPool.fee, ()), abi.encode(uint24(harness.feeBudgetPips())));
+
+        vm.expectRevert(bytes("Aero pool fee cap does not fit inside MAX_QUOTE_DEVIATION_BPS"));
+        harness.probeStrict(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
+    }
+
+    /// @dev A freshly created pool has one observation, written at creation: `observe` cannot
+    ///      look back a full window yet.
+    function test_Fork_DeployProbes_RejectFreshPool() public onlyFork {
+        address fresh = _createFreshAeroPool();
+        DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
+
+        string memory expected = string.concat(
+            "pool.observe cannot serve TWAP_INTERVAL", "; grow observation cardinality and wait for fill before deploy"
+        );
+        vm.expectRevert(bytes(expected));
+        harness.probe(AERO_CL_FACTORY, fresh, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
+    }
+
+    /// @dev Once a window has passed, a cardinality-1 pool serves `observe` by extrapolating its
+    ///      single observation (a spot price, not a TWAP); only the cardinality probe catches it.
+    function test_Fork_DeployProbes_RejectAgedLowCardinalityPool() public onlyFork {
+        address fresh = _createFreshAeroPool();
+        vm.warp(block.timestamp + TWAP_INTERVAL + 1);
+        DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
+
+        vm.expectRevert(
+            bytes("pool observationCardinality below ceil(interval/MAX_BLOCK_SECONDS); grow and wait for fill")
+        );
+        harness.probe(AERO_CL_FACTORY, fresh, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
+    }
+
+    // ============ Constructor (real fresh pool: TWAP / cardinality gates) ============
+
+    function test_Fork_Constructor_RevertsForFreshPool() public onlyFork {
+        IUniCLStrat.DeploymentConfig memory config = _deploymentConfig(_createFreshAeroPool());
+
+        vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
+        new AeroCLStrat(config);
+    }
+
+    function test_Fork_Constructor_RevertsForAgedLowCardinalityPool() public onlyFork {
+        IUniCLStrat.DeploymentConfig memory config = _deploymentConfig(_createFreshAeroPool());
+        vm.warp(block.timestamp + TWAP_INTERVAL + 1);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IUniCLStrat.UniCLStratInsufficientObservationCardinality.selector,
+                FRESH_POOL_CARDINALITY,
+                strategy.MIN_OBSERVATION_CARDINALITY()
+            )
+        );
+        new AeroCLStrat(config);
     }
 
     // ============ Deposit ============
@@ -343,6 +423,7 @@ contract AeroCLStratForkTest is Test {
         _prepareCalmAlignedPool();
         _deposit(DEPOSIT_AMOUNT);
         uint256 navBefore = strategy.navInETH();
+        (uint128 liquidityBefore,,) = _mainPositionState();
 
         _movePoolTickBy(NOT_CALM_TICK_OFFSET);
 
@@ -351,6 +432,11 @@ contract AeroCLStratForkTest is Test {
 
         assertEq(withdrawn, PARTIAL_WITHDRAW_AMOUNT, "partial withdrawal should be exact");
         assertEq(receiver.balance, PARTIAL_WITHDRAW_AMOUNT, "receiver should get native ETH");
+        // Partial burn, not a full unwind: the pool is not calm, so nothing is re-added, and any
+        // liquidity left on the main range must therefore have survived the withdrawal.
+        (uint128 liquidityAfter,,) = _mainPositionState();
+        assertGt(liquidityAfter, 0, "main range should keep liquidity (partial burn)");
+        assertLt(liquidityAfter, liquidityBefore, "main range should be partially burned");
         assertApproxEqRel(
             strategy.navInETH(), navBefore - PARTIAL_WITHDRAW_AMOUNT, WITHDRAW_TOLERANCE, "NAV should shrink by payout"
         );
@@ -366,9 +452,11 @@ contract AeroCLStratForkTest is Test {
         vm.prank(strategyManager);
         uint256 withdrawn = strategy.withdraw(receiver, amount);
 
-        assertGe(withdrawn, amount * 95 / 100, "full withdrawal should recover ~all NAV");
+        assertGe(withdrawn, amount * FULL_WITHDRAW_MIN_PAYOUT_BPS / BPS, "full withdrawal should pay out ~all NAV");
         assertEq(receiver.balance, withdrawn);
-        assertLt(strategy.navInETH(), DEPOSIT_AMOUNT * 5 / 100, "only dust should remain");
+        // The burn happens at the moved spot while NAV was marked at the (lagging) TWAP, so a
+        // small surplus can remain after paying out the full TWAP-marked NAV.
+        assertLt(strategy.navInETH(), DEPOSIT_AMOUNT * FULL_WITHDRAW_MAX_RESIDUAL_BPS / BPS, "only a residual remains");
     }
 
     // ============ Sync (real unstaked swap fees) ============
@@ -378,19 +466,102 @@ contract AeroCLStratForkTest is Test {
     function test_Fork_Sync_PokesRealUnstakedSwapFeesIntoTokensOwed() public onlyFork {
         _prepareCalmAlignedPool();
         _deposit(DEPOSIT_AMOUNT);
-        (, uint128 owed0Before, uint128 owed1Before) = _mainPositionState();
+        (uint256 owedWethBefore, uint256 owedUsdtBefore) = _owedByToken();
 
-        // Round-trip in-range volume through the Aero pool.
-        (int256 amount0, int256 amount1) = _swapExactIn(!wethIsToken0, FEE_SWAP_USDT_AMOUNT);
-        uint256 wethOut = uint256(-(wethIsToken0 ? amount0 : amount1));
-        _swapExactIn(wethIsToken0, wethOut);
-
+        _roundTripFeeVolume();
         vm.prank(strategyManager);
         strategy.sync();
 
-        (, uint128 owed0After, uint128 owed1After) = _mainPositionState();
-        assertGt(uint256(owed0After) + owed1After, uint256(owed0Before) + owed1Before, "sync should poke fees");
-        assertGt(strategy.pendingPerformanceFeeInETH(1_000), 0, "pending fee should reflect real LP fees");
+        (uint256 owedWethAfter, uint256 owedUsdtAfter) = _owedByToken();
+        assertGt(owedUsdtAfter, owedUsdtBefore, "USDT-in leg should accrue USDT fees");
+        assertGt(owedWethAfter, owedWethBefore, "WETH-in leg should accrue WETH fees");
+
+        // The strategy's view must equal an independent oracle valuation of the poked fees.
+        uint256 feeBaseETH = _valueInETH(owedWethAfter - owedWethBefore, owedUsdtAfter - owedUsdtBefore);
+        assertApproxEqRel(
+            strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS),
+            feeBaseETH * PERFORMANCE_FEE_BPS / BPS,
+            FEE_VALUATION_TOLERANCE,
+            "pending fee should be bps of the oracle value of the poked tokensOwed"
+        );
+    }
+
+    function test_Fork_SettlePerformanceFee_ChargesPendingAndResets() public onlyFork {
+        _prepareCalmAlignedPool();
+        _deposit(DEPOSIT_AMOUNT);
+        _roundTripFeeVolume();
+        vm.prank(strategyManager);
+        strategy.sync();
+        uint256 pending = strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS);
+        assertGt(pending, 0, "precondition: real fees pending");
+
+        vm.prank(strategyManager);
+        uint256 settled = strategy.settlePerformanceFee(PERFORMANCE_FEE_BPS);
+
+        assertEq(settled, pending, "settlement should charge exactly the pending view");
+        assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), 0, "nothing left to charge");
+    }
+
+    /// @dev Unstaked LPs keep their pro-rata swap fees net of `CLFactory.getUnstakedFee(pool)`.
+    ///      Raising it through the real fee module (as its manager) must shrink the accrued
+    ///      `tokensOwed` by exactly that share, and the pending fee must follow the net amount —
+    ///      the claim FREEZE_RUNBOOK §6.4 relies on ("on-chain accounting stays correct").
+    function test_Fork_Sync_UnstakedFeeReducesAccruedFeesProRata() public onlyFork {
+        _prepareCalmAlignedPool();
+        _deposit(DEPOSIT_AMOUNT);
+        (uint256 owedWeth0, uint256 owedUsdt0) = _owedByToken();
+        uint256 snapshot = vm.snapshotState();
+
+        // Baseline: the mainnet default (no diversion).
+        assertEq(ICLFactory(AERO_CL_FACTORY).getUnstakedFee(AERO_WETH_USDT_POOL), 0, "precondition: default is 0");
+        _roundTripFeeVolume();
+        vm.prank(strategyManager);
+        strategy.sync();
+        (uint256 grossWeth, uint256 grossUsdt) = _owedByToken();
+        grossWeth -= owedWeth0;
+        grossUsdt -= owedUsdt0;
+
+        // Same state and volume, with a quarter of unstaked LP fees diverted.
+        vm.revertToState(snapshot);
+        _setUnstakedFee(TEST_UNSTAKED_FEE);
+        assertEq(ICLFactory(AERO_CL_FACTORY).getUnstakedFee(AERO_WETH_USDT_POOL), TEST_UNSTAKED_FEE);
+        _roundTripFeeVolume();
+        vm.prank(strategyManager);
+        strategy.sync();
+        (uint256 netWeth, uint256 netUsdt) = _owedByToken();
+        netWeth -= owedWeth0;
+        netUsdt -= owedUsdt0;
+
+        uint256 keptShare = (PIPS - TEST_UNSTAKED_FEE) * 1e18 / PIPS;
+        assertApproxEqRel(netUsdt * 1e18 / grossUsdt, keptShare, UNSTAKED_FEE_RATIO_TOLERANCE, "USDT fees net");
+        assertApproxEqRel(netWeth * 1e18 / grossWeth, keptShare, UNSTAKED_FEE_RATIO_TOLERANCE, "WETH fees net");
+        assertApproxEqRel(
+            strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS),
+            _valueInETH(netWeth, netUsdt) * PERFORMANCE_FEE_BPS / BPS,
+            FEE_VALUATION_TOLERANCE,
+            "pending fee should follow tokensOwed net of the unstaked fee"
+        );
+    }
+
+    // ============ Invest idle ETH ============
+
+    function test_Fork_InvestIdleETH_DeploysDonationIntoAeroPool() public onlyFork {
+        _prepareCalmAlignedPool();
+        _deposit(DEPOSIT_AMOUNT);
+        (uint128 liquidityBefore,,) = _mainPositionState();
+        uint256 navBefore = strategy.navInETH();
+        vm.deal(address(strategy), INVEST_IDLE_AMOUNT);
+
+        vm.prank(admin);
+        uint256 invested = strategy.investIdleETH();
+
+        assertEq(invested, INVEST_IDLE_AMOUNT, "all idle ETH fits under maxTotalNAV");
+        assertEq(address(strategy).balance, 0, "no native ETH left idle");
+        (uint128 liquidityAfter,,) = _mainPositionState();
+        assertGt(liquidityAfter, liquidityBefore, "main range should grow");
+        assertApproxEqRel(
+            strategy.navInETH(), navBefore + INVEST_IDLE_AMOUNT, NAV_TOLERANCE, "NAV should grow by the donation"
+        );
     }
 
     // ============ Rebalance ============
@@ -409,7 +580,7 @@ contract AeroCLStratForkTest is Test {
         _deposit(DEPOSIT_AMOUNT);
         (int24 lowerBefore, int24 upperBefore) = strategy.positionMain();
 
-        // Opposite the detune so the Uni-routed rebalance swap stays inside the oracle band.
+        // Past rebalanceTickThreshold but inside maxTickDeviation: unhealthy yet still calm.
         _movePoolTickBy(-REBALANCE_TICK_OFFSET);
         _alignPoolToTickBoundaryAndSettle();
 
@@ -457,7 +628,8 @@ contract AeroCLStratForkTest is Test {
         assertEq(IERC20(USDT).allowance(address(strategy), address(converter)), type(uint256).max);
     }
 
-    function test_Fork_EmergencyExit_UnwindsRealPositionWhilePaused() public onlyFork {
+    /// @dev `pause()` unwinds the position; `emergencyExit()` only sweeps what the strategy holds.
+    function test_Fork_PauseThenEmergencyExit_SweepsUnwoundPosition() public onlyFork {
         _prepareCalmAlignedPool();
         _deposit(DEPOSIT_AMOUNT);
         uint256 navBefore = strategy.navInETH();
@@ -485,9 +657,11 @@ contract AeroCLStratForkTest is Test {
         if (_amount1Delta > 0) IERC20(aeroPool.token1()).safeTransfer(msg.sender, uint256(_amount1Delta));
     }
 
+    /// @dev Puts the Aero pool on the Chainlink price. Inventory swaps route through the untouched
+    ///      Uniswap pool, so (unlike the UniCLStrat USDT suite) no detune is needed for them.
     function _prepareCalmAlignedPool() internal {
         uint256 oracleEthPrice = oracle.convert(address(0), USDT, 1 ether, 18, USDT_DECIMALS);
-        _movePoolSqrtPriceTo(_sqrtPriceX96ForEthPrice(oracleEthPrice * POOL_DETUNE_BPS / BPS));
+        _movePoolSqrtPriceTo(_sqrtPriceX96ForEthPrice(oracleEthPrice));
         _alignPoolToTickBoundaryAndSettle();
     }
 
@@ -544,6 +718,66 @@ contract AeroCLStratForkTest is Test {
         (int24 tickLower, int24 tickUpper) = strategy.positionMain();
         bytes32 key = keccak256(abi.encodePacked(address(strategy), tickLower, tickUpper));
         (liquidity,,, owed0, owed1) = IUniswapV3Pool(AERO_WETH_USDT_POOL).positions(key);
+    }
+
+    /// @dev `tokensOwed` summed over main and alt (the strategy's fee base), split by token.
+    function _owedByToken() internal view returns (uint256 owedWeth, uint256 owedUsdt) {
+        (int24 mainLower, int24 mainUpper) = strategy.positionMain();
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        (uint256 owed0Main, uint256 owed1Main) = _owed(mainLower, mainUpper);
+        (uint256 owed0Alt, uint256 owed1Alt) = _owed(altLower, altUpper);
+        uint256 owed0 = owed0Main + owed0Alt;
+        uint256 owed1 = owed1Main + owed1Alt;
+        (owedWeth, owedUsdt) = wethIsToken0 ? (owed0, owed1) : (owed1, owed0);
+    }
+
+    function _owed(int24 _tickLower, int24 _tickUpper) internal view returns (uint256 owed0, uint256 owed1) {
+        bytes32 key = keccak256(abi.encodePacked(address(strategy), _tickLower, _tickUpper));
+        (,,, uint128 tokensOwed0, uint128 tokensOwed1) = IUniswapV3Pool(AERO_WETH_USDT_POOL).positions(key);
+        (owed0, owed1) = (tokensOwed0, tokensOwed1);
+    }
+
+    /// @dev Independent valuation: WETH at par, USDT through the Oracle (as the strategy does).
+    function _valueInETH(uint256 _weth, uint256 _usdt) internal view returns (uint256) {
+        return _weth + oracle.convert(USDT, address(0), _usdt, USDT_DECIMALS, 18);
+    }
+
+    /// @dev Swaps USDT -> WETH and back through the Aero pool, so both tokens accrue LP fees.
+    function _roundTripFeeVolume() internal {
+        (int256 amount0, int256 amount1) = _swapExactIn(!wethIsToken0, FEE_SWAP_USDT_AMOUNT);
+        uint256 wethOut = uint256(-(wethIsToken0 ? amount0 : amount1));
+        _swapExactIn(wethIsToken0, wethOut);
+    }
+
+    /// @dev Sets the pool's unstaked fee through the real module, as the factory's fee manager.
+    function _setUnstakedFee(uint24 _fee) internal {
+        IAeroCLFactoryForkAdmin factoryAdmin = IAeroCLFactoryForkAdmin(AERO_CL_FACTORY);
+        IAeroCustomUnstakedFeeModule feeModule = IAeroCustomUnstakedFeeModule(factoryAdmin.unstakedFeeModule());
+        vm.prank(factoryAdmin.unstakedFeeManager());
+        feeModule.setCustomFee(AERO_WETH_USDT_POOL, _fee);
+    }
+
+    /// @dev Creates a real WETH/USDT pool through the CLFactory (permissionless) at the live
+    ///      price. It is factory-provenanced but has a single observation (cardinality 1).
+    function _createFreshAeroPool() internal returns (address fresh) {
+        IAeroCLFactoryForkAdmin factoryAdmin = IAeroCLFactoryForkAdmin(AERO_CL_FACTORY);
+        fresh = factoryAdmin.createPool(WETH, USDT, FRESH_POOL_TICK_SPACING, _currentSqrtPrice());
+        (,,, uint16 cardinality,,) = ICLPool(fresh).slot0();
+        assertEq(cardinality, FRESH_POOL_CARDINALITY, "precondition: a fresh pool has one observation");
+    }
+
+    /// @dev Points the factory at a stub swap-fee hook reporting `_feeCap` for the real pool.
+    function _mockPoolFeeCap(uint256 _feeCap) internal {
+        address hook = makeAddr("mockSwapFeeHook");
+        vm.etch(hook, hex"00");
+        vm.mockCall(
+            AERO_CL_FACTORY, abi.encodeCall(ICLFactory.getPoolSwapHook, (AERO_WETH_USDT_POOL)), abi.encode(hook)
+        );
+        vm.mockCall(
+            hook,
+            abi.encodeCall(IDynamicSwapFeeHook.dynamicFeeConfig, (AERO_WETH_USDT_POOL)),
+            abi.encode(uint24(0), uint24(_feeCap), uint64(0), false, uint24(0))
+        );
     }
 
     function _deposit(uint256 _amount) internal {
