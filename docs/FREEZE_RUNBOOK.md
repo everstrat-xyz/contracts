@@ -955,6 +955,14 @@ Do not page on moves with an obvious on-chain explanation:
 `StrategyManagerNoBalanceToRecover()`, `ExitQueueRequestCannotBeClosed()`,
 `ControllerInsufficientBalance()`, `EnforcedPause()` (OpenZeppelin).
 
+`AeroCLStrat` shares the `IUniCLStrat` interface, so it reverts with the same
+`UniCLStrat*` selectors and emits the same `UniCLStrat` events
+(`LiquidityUnwindSkipped`, `ConverterAllowanceRevocationSkipped`,
+`PairedTokenTransferSkipped`, config events). A selector or event topic does not
+tell you which strategy fired: route alerts on the emitting / reverting
+strategy address, and make sure every rule keyed on a `UniCLStrat*` name also
+covers the AeroCLStrat address.
+
 Keeper executors (`QueueKeeperExecutor` / `StrategyKeeperExecutor`) — these tell you *why* a
 Mimic execution bounced, which is the difference between a trigger bug and an outage:
 

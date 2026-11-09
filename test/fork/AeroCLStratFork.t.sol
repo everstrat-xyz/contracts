@@ -59,6 +59,10 @@ contract DeployAeroCLStratProbeHarness is DeployAeroCLStrat {
         _checkFeeCapWithinQuoteBudget(_factory, _pool, _strict);
     }
 
+    function maxNavLargeVsPoolDepth(address _pool, address _weth, uint256 _maxTotalNAV) external view returns (bool) {
+        return _warnIfMaxNavLargeVsPoolDepth(_pool, _weth, _maxTotalNAV);
+    }
+
     /// @dev The budget constant is `internal`, so expose it for assertions.
     function feeBudgetPips() external pure returns (uint256) {
         return MAX_QUOTE_DEVIATION_BPS * PIPS_PER_BPS;
@@ -113,6 +117,7 @@ contract AeroCLStratForkTest is Test {
     uint32 internal constant SHORT_TWAP_INTERVAL = 60;
     uint256 internal constant STALENESS_INTERVAL = 30 days;
     uint256 internal constant BPS = 10_000;
+    uint256 internal constant MAX_NAV_POOL_WETH_SHARE_BPS = 1_500; // mirrors DeployAeroCLStrat
     int24 internal constant NOT_CALM_TICK_OFFSET = 350;
     /// @dev Between REBALANCE_TICK_THRESHOLD and MAX_TICK_DEVIATION: unhealthy but still calm.
     int24 internal constant REBALANCE_TICK_OFFSET = 180;
@@ -291,6 +296,16 @@ contract AeroCLStratForkTest is Test {
 
         vm.expectRevert(bytes("POOL_ADDRESS is not an Aero CLFactory pool"));
         harness.probe(AERO_CL_FACTORY, UNIV3_WETH_USDT_POOL_005, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
+    }
+
+    /// @dev Sizing is a warning, keyed on the pool's live WETH balance (15% share threshold).
+    function test_Fork_DeployProbes_WarnsWhenMaxNavIsLargeVsPoolDepth() public onlyFork {
+        DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
+        uint256 poolWeth = IERC20(WETH).balanceOf(AERO_WETH_USDT_POOL);
+        uint256 threshold = (poolWeth * MAX_NAV_POOL_WETH_SHARE_BPS) / BPS;
+
+        assertFalse(harness.maxNavLargeVsPoolDepth(AERO_WETH_USDT_POOL, WETH, threshold), "at threshold");
+        assertTrue(harness.maxNavLargeVsPoolDepth(AERO_WETH_USDT_POOL, WETH, threshold + 1), "above threshold");
     }
 
     // Fee-cap branches use a mocked hook config: the live cap is Aero governance state (it was

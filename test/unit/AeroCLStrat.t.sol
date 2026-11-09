@@ -191,6 +191,44 @@ contract AeroCLStratTest is UniCLStratTestBase {
         aeroStrategy.setShortTwapInterval(TWAP_INTERVAL + 1);
     }
 
+    // ============ TWAP / cardinality gate parity with UniCLStrat ============
+
+    /// @dev AeroCLStrat inlines the gate (`_requireTwapOracle`) that UniCLStrat runs through
+    ///      `UniCLStratLib.requireTwapOracle`. Both pools get the same lookback and cardinality, and
+    ///      both setters must agree: same success, or the same revert data (floors / ceiling
+    ///      `UniCLStratInvalidConfig`, `UniCLStratPoolTWAPNotAvailable`,
+    ///      `UniCLStratInsufficientObservationCardinality(have, need)`).
+    function testFuzz_TwapGate_MatchesUniCLStrat(
+        uint32 _interval,
+        uint32 _shortInterval,
+        uint32 _maxObserveSecondsAgo,
+        uint16 _cardinality
+    ) public {
+        _interval = uint32(bound(_interval, 0, uint256(aeroStrategy.MAX_TWAP_INTERVAL()) + 1));
+        _shortInterval = uint32(bound(_shortInterval, 0, uint256(aeroStrategy.MAX_TWAP_INTERVAL()) + 1));
+        _maxObserveSecondsAgo = uint32(bound(_maxObserveSecondsAgo, 1, uint256(aeroStrategy.MAX_TWAP_INTERVAL()) + 1));
+        _cardinality = uint16(bound(_cardinality, 1, type(uint16).max));
+
+        pool.setMaxObserveSecondsAgo(_maxObserveSecondsAgo);
+        pool.setObservationCardinality(_cardinality);
+        aeroPool.setMaxObserveSecondsAgo(_maxObserveSecondsAgo);
+        aeroPool.setObservationCardinality(_cardinality);
+
+        _assertSameOutcome(abi.encodeCall(UniCLStrat.setTwapInterval, (_interval)));
+        _assertSameOutcome(abi.encodeCall(UniCLStrat.setShortTwapInterval, (_shortInterval)));
+        assertEq(aeroStrategy.twapInterval(), strategy.twapInterval(), "twapInterval");
+        assertEq(aeroStrategy.shortTwapInterval(), strategy.shortTwapInterval(), "shortTwapInterval");
+    }
+
+    function _assertSameOutcome(bytes memory _call) internal {
+        vm.prank(admin);
+        (bool uniOk, bytes memory uniData) = address(strategy).call(_call);
+        vm.prank(admin);
+        (bool aeroOk, bytes memory aeroData) = address(aeroStrategy).call(_call);
+        assertEq(aeroOk, uniOk, "success");
+        assertEq(aeroData, uniData, "revert data");
+    }
+
     // ============ Strategy actions through the Slipstream slot0 path ============
 
     function test_Deposit_MintsLiquidityIntoAeroPool() public {

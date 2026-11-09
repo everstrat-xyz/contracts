@@ -2,6 +2,8 @@ name: CI
 
 on:
   pull_request:
+    # labeled / unlabeled re-run the Aero port check when `aero-port-not-needed` changes.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   push:
     branches:
       - main
@@ -17,6 +19,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
+
+      - name: Check UniCLStrat changes are ported to Aero
+        if: github.event_name == 'pull_request'
+        env:
+          AERO_PORT_ACK: ${{ contains(github.event.pull_request.labels.*.name, 'aero-port-not-needed') }}
+        run: bash script/ci/check-aero-port.sh "origin/${{ github.base_ref }}"
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1

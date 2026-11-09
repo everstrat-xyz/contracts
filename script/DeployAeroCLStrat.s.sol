@@ -2,6 +2,7 @@
 pragma solidity ^0.8.30;
 
 import {Script, console} from "forge-std/Script.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {Registry} from "registry/Registry.sol";
 import {AeroCLStrat} from "../src/contracts/strategies/AeroCLStrat.sol";
@@ -45,6 +46,8 @@ import {Auth} from "../src/libraries/Auth.sol";
  *
  *      Size `MAX_TOTAL_NAV` against the pool's depth: Aero pools are far thinner than their
  *      Uniswap counterparts (issue #55: start at ~10-20 ETH, not the 500 ETH UniCLStrat size).
+ *      The script logs the pool's WETH balance and warns when `MAX_TOTAL_NAV` exceeds
+ *      `MAX_NAV_POOL_WETH_SHARE_BPS` (15%) of it. 20 ETH against ~170 WETH at launch is ~12%.
  *
  *      Env: PRIVATE_KEY, REGISTRY_ADDRESS, WETH_ADDRESS, POOL_ADDRESS (Aero CL pool),
  *      AERO_CL_FACTORY, SWAP_ADAPTER_ADDRESS, WETH_TO_PAIRED_TOKEN_PATH, PAIRED_TOKEN_TO_WETH_PATH,
@@ -61,6 +64,9 @@ contract DeployAeroCLStrat is Script {
     uint256 internal constant MAX_QUOTE_DEVIATION_BPS = 200;
     /// @dev Pool fees are in pips (1e-6): 1 bps = 100 pips.
     uint256 internal constant PIPS_PER_BPS = 100;
+    uint256 internal constant BASIS_POINTS = 10_000;
+    /// @dev Warn when MAX_TOTAL_NAV exceeds this share of the pool's WETH balance.
+    uint256 internal constant MAX_NAV_POOL_WETH_SHARE_BPS = 1_500;
 
     function run() external returns (AeroCLStrat aeroCLStrat) {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
@@ -119,6 +125,7 @@ contract DeployAeroCLStrat is Script {
         _requirePoolObservationCardinality(pool, shortTwapInterval);
         _checkFeeCapWithinQuoteBudget(factory, pool, vm.envOr("STRICT_FEE_CAP", false));
         console.log("Aero pool unstakedFee (pips):", ICLFactory(factory).getUnstakedFee(pool));
+        _warnIfMaxNavLargeVsPoolDepth(pool, vm.envAddress("WETH_ADDRESS"), vm.envUint("MAX_TOTAL_NAV"));
 
         return IUniCLStrat.DeploymentConfig({
             addresses: IUniCLStrat.AddressConfig({
@@ -203,5 +210,25 @@ contract DeployAeroCLStrat is Script {
 
         console.log("WARNING: pool fee cap (pips) >= quote budget; fine while routes skip this pool, but");
         console.log("set STRICT_FEE_CAP=true to enforce, or keep routes off this pool.");
+    }
+
+    /// @dev Warning only: a thin pool makes every re-center and withdrawal move the price more, and
+    ///      a cap that is a large share of the pool's WETH side means the strategy is most of the
+    ///      in-range liquidity. Size against `IERC20(weth).balanceOf(pool)` at deploy time.
+    function _warnIfMaxNavLargeVsPoolDepth(address pool, address weth, uint256 maxTotalNAV)
+        internal
+        view
+        returns (bool warned)
+    {
+        uint256 poolWeth = IERC20(weth).balanceOf(pool);
+        console.log("Aero pool WETH balance (wei):", poolWeth);
+        console.log("MAX_TOTAL_NAV (wei):", maxTotalNAV);
+
+        if (maxTotalNAV * BASIS_POINTS <= poolWeth * MAX_NAV_POOL_WETH_SHARE_BPS) return false;
+
+        console.log("WARNING: MAX_TOTAL_NAV is above 15% of the pool's WETH balance (bps of pool WETH):");
+        console.log(poolWeth == 0 ? type(uint256).max : (maxTotalNAV * BASIS_POINTS) / poolWeth);
+        console.log("Aero pools are thin; start at ~10-20 ETH (docs/STRATEGY_GUARDRAILS.md section 1.1.2).");
+        return true;
     }
 }
