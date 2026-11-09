@@ -844,6 +844,12 @@ Do not page on moves with an obvious on-chain explanation:
   closures) — users self-protecting is an early anomaly signal.
 - Alert on `RedemptionCancelled(viaEscapeHatch = true)` — keeper stalls look
   like (and can be caused by) pricing anomalies.
+- AeroCLStrat: alert on any change to `CLFactory.getUnstakedFee(pool)`. It is
+  governance-adjustable, and the strategy (an unstaked LP) forgoes that share of
+  swap fees. On-chain accounting stays correct because `tokensOwed` is already net
+  of it. Off-chain NAV-growth and yield assumptions do not; re-run the APR
+  comparison before the next deposit-weight change. Also alert on the swap-fee
+  hook's `feeCap` for the pool (STRATEGY_GUARDRAILS §1.1.2).
 
 ---
 
@@ -926,6 +932,8 @@ Do not page on moves with an obvious on-chain explanation:
 | `StrategyManager.strategyNAVInETH(s)` per strategy | reverts → the frozen strategy, isolated |
 | Chainlink `feed.latestRoundData()` per configured token | `now − updatedAt` > 80% of `Oracle.getUsdFeedInfo(token).stalenessInterval` |
 | `UniCLStrat.isHealthy()` | false beyond rebalance cadence |
+| `CLFactory.getUnstakedFee(pool)` (AeroCLStrat) | any change from the last recorded value (0 at launch) — yield assumption change, not a freeze |
+| `DynamicSwapFeeHook.dynamicFeeConfig(pool).feeCap` (AeroCLStrat) | any change; ≥ 20,000 pips matters only if a Converter route trades through this pool (§1.1.2 rule) |
 | `pool.observe([twapInterval, 0])` | reverts `OLD` / fails → ring cannot serve the window (scenario 5) |
 | `pool.slot0().observationCardinality` | below `ceil(twapInterval / 12)` (min 150) → TWAP may be spot-extrapolated; Next is not the gate |
 | `AMM.eveBasePriceInETH()` block-over-block delta | unexplained single-tx move > ~5% (§6 monitoring flow) |
@@ -946,6 +954,14 @@ Do not page on moves with an obvious on-chain explanation:
 `StrategyManagerERC20NotSupported(address)`,
 `StrategyManagerNoBalanceToRecover()`, `ExitQueueRequestCannotBeClosed()`,
 `ControllerInsufficientBalance()`, `EnforcedPause()` (OpenZeppelin).
+
+`AeroCLStrat` shares the `IUniCLStrat` interface, so it reverts with the same
+`UniCLStrat*` selectors and emits the same `UniCLStrat` events
+(`LiquidityUnwindSkipped`, `ConverterAllowanceRevocationSkipped`,
+`PairedTokenTransferSkipped`, config events). A selector or event topic does not
+tell you which strategy fired: route alerts on the emitting / reverting
+strategy address, and make sure every rule keyed on a `UniCLStrat*` name also
+covers the AeroCLStrat address.
 
 Keeper executors (`QueueKeeperExecutor` / `StrategyKeeperExecutor`) — these tell you *why* a
 Mimic execution bounced, which is the difference between a trigger bug and an outage:
