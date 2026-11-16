@@ -3,9 +3,8 @@ ExitQueue::initialize(address _admin)
 │   └── It should revert with ExitQueueZeroAddress
 ├── Given valid parameters
 │   ├── It should set currentBatchId to 1
-│   ├── It should set liveScanFromBatchId to 1
 │   ├── It should grant ADMIN_ROLE to _admin
-│   └── It should report version "1.0.0"
+│   └── It should report version "2.0.0"
 └── Given already initialized
     └── It should revert (InvalidInitialization)
 
@@ -21,29 +20,27 @@ ExitQueue::DEPLOYER_ROLE lifecycle (test_DeployerRole_CannotBeGranted_RenounceFr
 ExitQueue::Access Control
 ├── Given caller has AMM_ROLE
 │   ├── It should allow pushRequest (returns currentBatchId)
-│   ├── It should allow pullRequest (after pricing)
+│   ├── It should allow pullRequest (after sealing)
 │   └── It should allow closeRequest
 ├── Given caller has CONTROLLER_ROLE
-│   └── It should allow priceBatch (when not paused)
+│   └── It should allow sealBatch (when not paused)
 └── Given caller is unauthorized
     ├── It should revert on pushRequest
     ├── It should revert on pullRequest
-    ├── It should revert on priceBatch
+    ├── It should revert on sealBatch
     └── It should revert on closeRequest
 
 ExitQueue::batchInfo(uint256 _batchId)
-├── Given batch exists but not priced
+├── Given batch exists but not sealed
 │   ├── It should return canBeProcessed=false
-│   ├── It should return finalEvePrice=0
 │   ├── It should return totalTokensToBurn (sum of all requests)
 │   ├── It should return createdAt (timestamp when batch was created)
-│   └── It should return pricedAt=0
-└── Given batch exists and is priced
+│   └── It should return sealedAt=0
+└── Given batch exists and is sealed
     ├── It should return canBeProcessed=true
-    ├── It should return finalEvePrice (set by priceBatch)
     ├── It should return totalTokensToBurn
-    ├── It should return createdAt (timestamp when batch was created, not when priced)
-    └── It should return pricedAt (timestamp when priceBatch was called)
+    ├── It should return createdAt (timestamp when batch was created, not when sealed)
+    └── It should return sealedAt (timestamp when sealBatch was called)
 
 ExitQueue::requestInfo(uint256 _batchId, address _user)
 ├── Given request does not exist
@@ -107,43 +104,29 @@ ExitQueue::pushRequest(address _user, uint256 _evePriceAtRequestTime, uint256 _t
     └── When tokensToBurn exceeds uint128
         └── It should revert with ExitQueueTokensOverflow
 
-ExitQueue::liveRedemptionOffsets()
-├── Given current batch is unpriced
-│   └── It should return (0, 0) (cancellable equity)
-├── Given a batch is priced and in-window
-│   ├── It should return escrowedSupply = totalTokensToBurn
-│   └── It should return liabilityETH = convertAssets(tokens, finalEvePrice)
-├── Given the in-window request is pulled
-│   └── It should return (0, 0) and advance liveScanFromBatchId
-└── Given the batch is past MAX_BATCH_PROCESSING_TIME
-    └── It should return (0, 0) with no write (liability lapses on the clock)
-
-ExitQueue::priceBatch(uint256 _evePrice)
+ExitQueue::sealBatch()
 ├── Given caller is not the registered Controller
 │   └── It should revert with RegistryClientInvalidCaller
-├── Given caller is the registered Controller
-│   ├── When contract is paused
-│   │   └── It should revert with EnforcedPause
-│   ├── When _evePrice is zero
-│   │   └── It should revert with ExitQueueZeroPrice
-│   ├── When current batch is empty (no requests)
-│   │   └── It should revert with ExitQueueBatchIsEmpty
-│   └── When current batch has requests
-│       ├── It should set batch.finalEvePrice to _evePrice
-│       ├── It should set batch.canBeProcessed to true
-│       ├── It should set batch.pricedAt to block.timestamp
-│       ├── It should increment currentBatchId
-│       ├── It should emit BatchPriced event
-│       └── When `[liveScanFromBatchId, currentBatchId)` already has MAX_LIVE_PRICED_BATCHES ids
-│           └── It should revert with ExitQueueTooManyLivePricedBatches
-└── Given reentrancy attempt
-    └── It should revert (if reentrancy guard is added)
+└── Given caller is the registered Controller
+    ├── When contract is paused
+    │   └── It should revert with EnforcedPause
+    ├── When current batch is empty (no requests)
+    │   └── It should revert with ExitQueueBatchIsEmpty
+    └── When current batch has requests
+        ├── It should set batch.canBeProcessed to true
+        ├── It should set batch.sealedAt to block.timestamp
+        ├── It should not fix a price (each request settles at the price supplied to pullRequest)
+        ├── It should increment currentBatchId
+        ├── It should emit BatchSealed event
+        └── It should not cap the number of live sealed batches
 
-ExitQueue::pullRequest(uint256 _batchId, address _user)
+ExitQueue::pullRequest(uint256 _batchId, address _user, uint256 _evePrice)
 ├── Given caller does not have AMM_ROLE
 │   └── It should revert (AccessControlUnauthorizedAccount)
 └── Given caller has AMM_ROLE
-    ├── When batch is not priced (canBeProcessed=false)
+    ├── When _evePrice is zero
+    │   └── It should revert with ExitQueueZeroPrice
+    ├── When batch is not sealed (canBeProcessed=false)
     │   └── It should revert with ExitQueueBatchCannotBeProcessed
     ├── When request is already processed
     │   └── It should revert with ExitQueueRequestAlreadyProcessed
@@ -151,9 +134,9 @@ ExitQueue::pullRequest(uint256 _batchId, address _user)
     │   └── It should revert with ExitQueueRequestNotInBatch
     ├── When contract is paused
     │   └── It should revert with EnforcedPause
-    ├── When batch is priced but MAX_BATCH_PROCESSING_TIME exceeded
+    ├── When batch is sealed but MAX_BATCH_PROCESSING_TIME exceeded
     │   └── It should revert with ExitQueueBatchExpired
-    ├── When price slippage exceeds tolerance
+    ├── When _evePrice is below the request price by more than the tolerance
     │   ├── It should set request.closedDueToSlippage=true
     │   ├── It should set request.processed=true
     │   ├── It should remove user from unprocessedUsers
@@ -182,7 +165,7 @@ ExitQueue::closeRequest(uint256 _batchId, address _user) returns (bool _viaEscap
     │   └── It should revert for every user in the batch
     ├── When batch is priced at exactly MAX_BATCH_PROCESSING_TIME
     │   └── It should revert with ExitQueueRequestCannotBeClosed (upper bound exclusive)
-    ├── When batch is priced but MAX_BATCH_PROCESSING_TIME exceeded
+    ├── When batch is sealed but MAX_BATCH_PROCESSING_TIME exceeded
     │   ├── It should allow close (escape hatch for unprocessed requests)
     │   ├── It should emit RequestClosed event with viaEscapeHatch=true
     │   ├── It should completely remove request from batch (request resets to defaults)
@@ -218,15 +201,15 @@ ExitQueue::unpause()
 ExitQueue::Scenarios
 ├── Multiple batches (test_MultipleBatches)
 │   ├── It should assign batchId 1 to the first batch and batchId 2 to the next
-│   ├── It should increment currentBatchId after pricing
-│   └── It should keep batches independent (first priced/processable, second unpriced)
+│   ├── It should increment currentBatchId after sealing
+│   └── It should keep batches independent (first sealed/processable, second unsealed)
 ├── Process multiple requests in a batch (test_ProcessMultipleRequestsInBatch)
-│   ├── It should pull every request after pricing
+│   ├── It should pull every request after sealing
 │   ├── It should drive unprocessedUsersCount to 0
 │   └── It should mark every request processed
 ├── Mix of close and pull (test_MixOfCloseAndPull)
-│   ├── It should close some requests before pricing
-│   ├── It should pull the remaining request after pricing
+│   ├── It should close some requests before sealing
+│   ├── It should pull the remaining request after sealing
 │   └── It should drive unprocessedUsersCount to 0
 ├── Zero tokensToBurn (test_ZeroTokensToBurn)
 │   └── It should keep batch.totalTokensToBurn at 0
@@ -237,9 +220,9 @@ ExitQueue::pause behavior
 ├── Given contract is paused
 │   ├── pushRequest should revert with EnforcedPause
 │   ├── pullRequest should revert with EnforcedPause
-│   ├── priceBatch should revert with EnforcedPause
+│   ├── sealBatch should revert with EnforcedPause
 │   └── closeRequest should still succeed (emergency withdrawal)
 └── Given contract is unpaused again
     ├── pushRequest should work
-    ├── pullRequest should work (after pricing)
-    └── priceBatch should work
+    ├── pullRequest should work (after sealing)
+    └── sealBatch should work

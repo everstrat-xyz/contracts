@@ -42,8 +42,10 @@ StrategyKeeperExecutor::strategyUpkeepStatus() priority
 StrategyKeeperExecutor::pendingRedemptionNeedsETH()
 ├── It should anchor the scan at QueueKeeperExecutor.nextLiveBatchIdToProcess() (the two
 │   executors must agree on which batch is next, or reserved ETH drifts)
-├── It should not count the unpriced current batch
-└── It should count priced batches inside MAX_BATCH_PROCESSING_TIME
+├── It should not count the unsealed current batch
+├── It should count sealed batches inside MAX_BATCH_PROCESSING_TIME at the live base price
+├── It should track the live price after sealing (a NAV gain raises the reserve)
+└── It should return 0 for a sealed batch past MAX_BATCH_PROCESSING_TIME
 
 StrategyKeeperExecutor::setControllerReserveETH / setExitLiquidityTargetETH / setSyncInterval / setMinWithdrawETH
 └── It should enforce ADMIN_ROLE and accept 0 as a meaningful explicit choice
