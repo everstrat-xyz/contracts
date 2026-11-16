@@ -52,13 +52,13 @@ contract UniCLStratTest is UniCLStratTestBase {
     uint256 public constant IDLE_ETH_DONATION = 3 ether;
 
     function test_Constructor_SetsInitialState() public view {
-        assertEq(strategy.name(), "Uniswap Concentrated Liquidity Strategy");
-        assertEq(strategy.version(), "2.0.0");
+        assertEq(strategy.name(), _expectedName());
+        assertEq(strategy.version(), _expectedVersion());
         assertEq(strategy.genesisTimestamp(), INITIAL_TIMESTAMP);
         assertEq(address(strategy.weth()), address(weth));
         assertEq(address(strategy.pairedToken()), address(pairedToken));
         assertEq(address(strategy.pool()), address(pool));
-        assertEq(address(strategy.factory()), address(factory));
+        assertEq(address(strategy.factory()), _expectedFactory());
         assertEq(address(strategy.swapAdapter()), address(swapAdapter));
         assertEq(strategy.swapSlippageBps(), strategy.DEFAULT_SWAP_SLIPPAGE_BPS());
         assertEq(registry.getContractByKey(Auth.ORACLE), address(oracle));
@@ -86,7 +86,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.addresses.registry = address(0);
 
         vm.expectRevert(IRegistryClient.RegistryClientZeroRegistry.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWithZeroFactory() public {
@@ -94,7 +94,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.addresses.factory = address(0);
 
         vm.expectRevert(IUniCLStrat.UniCLStratZeroAddress.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWithInvalidPool() public {
@@ -105,7 +105,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.addresses.pool = address(invalidPool);
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidPool.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWhenPoolNotRegisteredInFactory() public {
@@ -115,17 +115,17 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.addresses.pool = address(unregisteredPool);
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidPool.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
-    function test_Constructor_RevertsWhenFactoryReturnsDifferentPool() public {
+    function test_Constructor_RevertsWhenFactoryReturnsDifferentPool() public virtual {
         MockUniCLPool otherPool = new MockUniCLPool(address(weth), address(pairedToken), TICK_SPACING, INITIAL_TICK);
         // Rebind the fee tier to a different pool address so provenance fails.
         factory.setPool(address(weth), address(pairedToken), pool.fee(), address(otherPool));
 
         IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidPool.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWithInvalidConfig() public {
@@ -133,7 +133,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.positionWidth = 0;
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWithInvalidRebalanceTickThreshold() public {
@@ -141,7 +141,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.rebalanceTickThreshold = 0;
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWithInvalidMaxTickDeviation() public {
@@ -149,7 +149,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.maxTickDeviation = 0;
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWithInvalidTwapInterval() public {
@@ -157,7 +157,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.twapInterval = INVALID_TWAP_INTERVAL;
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWithInvalidShortTwapInterval() public {
@@ -165,7 +165,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.shortTwapInterval = INVALID_SHORT_TWAP_INTERVAL;
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWhenTwapIntervalExceedsMax() public {
@@ -173,7 +173,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.twapInterval = strategy.MAX_TWAP_INTERVAL() + 1;
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWhenShortTwapIntervalExceedsMax() public {
@@ -181,14 +181,14 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.shortTwapInterval = strategy.MAX_TWAP_INTERVAL() + 1;
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWhenPoolCannotServeTwapInterval() public {
         pool.setMaxObserveSecondsAgo(TWAP_INTERVAL - 1);
 
         vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
-        new UniCLStrat(_defaultConfig());
+        _newStrategy(_defaultConfig());
     }
 
     function test_Constructor_RevertsWhenPoolCannotServeShortTwapInterval() public {
@@ -198,7 +198,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.strategy.shortTwapInterval = TWAP_INTERVAL + 1;
 
         vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_Constructor_RevertsWhenObservationCardinalityBelowMinimum() public {
@@ -210,7 +210,7 @@ contract UniCLStratTest is UniCLStratTestBase {
                 IUniCLStrat.UniCLStratInsufficientObservationCardinality.selector, required - 1, required
             )
         );
-        new UniCLStrat(_defaultConfig());
+        _newStrategy(_defaultConfig());
     }
 
     function test_Constructor_RevertsWithInvalidRouteConfig() public {
@@ -218,7 +218,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         config.routes.wethToPairedTokenPath = abi.encodePacked(address(pairedToken), uint24(500), address(weth));
 
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
-        new UniCLStrat(config);
+        _newStrategy(config);
     }
 
     function test_NavInETH_IncludesNativeETH() public {
@@ -2224,6 +2224,25 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         strategy.sync();
         assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), 2 * expectedFee);
+    }
+
+    // ============ Venue hooks (overridden by AeroCLStratParityTest) ============
+
+    /// @dev Deploys the strategy under test from `_config`.
+    function _newStrategy(IUniCLStrat.DeploymentConfig memory _config) internal virtual returns (address) {
+        return address(new UniCLStrat(_config));
+    }
+
+    function _expectedName() internal pure virtual returns (string memory) {
+        return "Uniswap Concentrated Liquidity Strategy";
+    }
+
+    function _expectedVersion() internal pure virtual returns (string memory) {
+        return "2.0.0";
+    }
+
+    function _expectedFactory() internal view virtual returns (address) {
+        return address(factory);
     }
 
     /// @dev Smallest amount that, padded by `swapSlippageBps`, covers the whole NAV.

@@ -91,7 +91,7 @@ contract UniCLStratBootstrapParamsTest is Test {
         if (!vm.envExists("MAINNET_RPC_URL")) return;
 
         string memory rpcUrl = vm.envString("MAINNET_RPC_URL");
-        uint256 forkBlock = vm.envUint("MAINNET_FORK_BLOCK");
+        uint256 forkBlock = vm.envOr("MAINNET_FORK_BLOCK", uint256(0));
         if (forkBlock == 0) {
             vm.createSelectFork(rpcUrl);
         } else {

@@ -59,6 +59,23 @@ The invariant `_isCalm()` actually enforces is **never mint into a dislocated po
 
 **Do not "fix" this by adding `if (!_isCalm()) revert UniCLStratNotCalm()` to `withdraw()`.** Ranked alternatives if the residual swap window is later judged too wide: (1) status quo; (2) burn only the liquidity fraction needed for the shortfall (orthogonal — removes the full-unwind cliff when re-add is skipped); (3) skip `_convertToWeth()` when not calm and return a short fill (StrategyManager already accounts via Controller balance delta); (4) hard calm gate — last.
 
+### 1.1.2 Implementation status — AeroCLStrat (Aero / Slipstream, unstaked)
+
+`AeroCLStrat` (`src/contracts/strategies/AeroCLStrat.sol`, issue #55 Phase 1) is a separate static strategy for Aero (Slipstream) concentrated-liquidity pools. Both strategies inherit `CLStrat` and share `CLRangeLib`, `CLPositionLib`, `CLPoolLib`, `CLStratLib` and the `IUniCLStrat` interface, so every row of §1.1 and §1.2 holds with identical mechanisms, parameters and error names (`UniCLStrat*`). §1.1.1 also applies unchanged. Venue-specific deltas:
+
+| Item | Status | AeroCLStrat mechanism |
+|---|---|---|
+| **TWAP calm check / cardinality** | **Implemented** | Shared `CLStrat._isCalm()` and `CLPoolLib.requireTwapOracle` enforce the same windows, floors and errors. `CLPoolLib.slot0` decodes Slipstream through `ICLPool` (6 fields) and Uniswap through `IUniswapV3Pool` (7 fields). The concrete strategy fixes the venue at construction. |
+| **Pool factory provenance** | **Implemented** | Constructor requires `CLFactory.getPool(token0, token1, tickSpacing) == pool`. Slipstream keys pools by tick spacing; its fee is dynamic. `DeployAeroCLStrat` also checks `isPool(pool)`. |
+| **Slippage / quote bounds** | **Implemented** | Inventory swaps route through the configured Converter route (normally `UniswapV3ConverterAdapter` on a deep Uniswap pool), not the Aero pool. The dynamic fee therefore never enters the quote budget. `DeployAeroCLStrat` logs the pool's dynamic-fee cap (`feeCap` from the swap-fee hook) and warns when it exceeds `MAX_QUOTE_DEVIATION_BPS`. Aero raised the WETH/USDT cap to the 5% factory default after launch. Set `STRICT_FEE_CAP=true` to fail instead (only `true`/`1` enable it; an unparsable value silently means `false`). **Rule:** a Converter route (`WETH_TO_PAIRED_TOKEN_PATH` / `PAIRED_TOKEN_TO_WETH_PATH` + adapter) must not trade through an Aero pool unless `DeployAeroCLStrat` passes against that pool with `STRICT_FEE_CAP=true`. The same applies to any later timelocked route change, which the script does not re-run: the reviewer re-runs the probe against the new route's pool before it is scheduled (pre-deployment checklist §2.1). This is not enforced on-chain, but the only allowlisted adapter, `UniswapV3ConverterAdapter`, resolves its pool through the Uniswap V3 factory, so a route can reach an Aero pool only after a separate, timelocked `setAllowedAdapter` for a Slipstream adapter. Quotes are fee-net, so a cap at or above the 2% quote budget fails closed: when the dynamic fee spikes, the quote drops below the oracle floor (`UniCLStratQuoteBelowOracleFloor`) and every swap on that route reverts, including the paired-token conversion that a withdrawal may need. Below the cap, the fee still uses up part of the price-deviation tolerance. |
+| **Trust surface** | **Reviewed** | Pool (mint callback + `observe`) and `CLFactory` (provenance, construction only). There are no gauge, NFT manager, Voter or reward-token calls; those arrive with Phase 2 (`AeroCLGaugeStrat`). Unstaked LPs keep pro-rata swap fees net of the factory's governance-adjustable `unstakedFee`, which is 0 on mainnet at launch. Monitor `CLFactory.getUnstakedFee(pool)`. |
+| **Monitoring** | **Operational** | Poll `CLFactory.getUnstakedFee(pool)` and the swap-fee hook `feeCap` (`docs/FREEZE_RUNBOOK.md` §6.4 / §7.2). A rising `unstakedFee` does not affect on-chain accounting (`pendingPerformanceFeeInETH` reads `tokensOwed`, which is already net of it) but invalidates off-chain yield assumptions. |
+| **Versioning** | **Note** | `version()` is `1.0.0` and follows its own line. It is independent of `UniCLStrat` (`2.0.0`): AeroCLStrat 1.0.0 already contains the UniCLStrat v2 mechanics. |
+| **Shared implementation** | **Implemented** | Both concrete strategies inherit `CLStrat` for configuration, access control, entry points, safety gates, callbacks and emergency recovery. `CLRangeLib` owns range management; `CLPositionLib` owns direct-pool positions, LP-fee accounting and valuation; `CLStratLib` owns swaps and inventory math. `CLPoolLib` isolates factory lookup and `slot0` layouts. Common fixes have one implementation. `AeroCLStratParityTest` / `AeroCLStratParityFuzzTest` run the full Uni unit/fuzz suites with Slipstream pools. `testFuzz_TwapGate_MatchesUniCLStrat` checks both decoders against identical lookback/cardinality inputs. |
+| **TVL cap sizing** | **Operational** | Aero pools are thin; WETH/USDT held ~170 WETH at launch. Size `maxTotalNAV` at roughly 10–20 ETH, not the UniCLStrat launch size. `DeployAeroCLStrat` logs the pool's WETH balance and warns when `MAX_TOTAL_NAV` is above 15% of it. Re-check before any later `setMaxTotalNAV`. |
+
+Tests: `test/unit/AeroCLStrat.t.sol` (6-field `slot0`, tick-spacing provenance, cardinality gate and its parity fuzz, action smoke tests), `test/unit/AeroCLStratParity.t.sol` and `test/fuzz/AeroCLStratParityFuzz.t.sol` (the full `UniCLStrat` unit and fuzz suites run against `AeroCLStrat`), and `test/fork/AeroCLStratFork.t.sol` (real Aero WETH/USDT pool, real CLFactory, real USDT, deploy-script probes).
+
 ### 1.2 Recommended guardrails
 
 | Guardrail | Status (UniCLStrat / protocol) | Notes |
@@ -119,7 +136,15 @@ is verifiable on-chain or in the repo's test suite.
 - [ ] **Pool factory provenance**: UniCLStrat was constructed with the canonical
   Uniswap V3 factory and `factory.getPool(token0, token1, pool.fee()) == pool`
   (constructor-enforced). Prevents a malicious interface-compatible pool from
-  draining inventory via `uniswapV3MintCallback`.
+  draining inventory via `uniswapV3MintCallback`. AeroCLStrat: the canonical
+  Aero `CLFactory` with `getPool(token0, token1, tickSpacing) == pool`
+  (constructor) and `isPool(pool)` (`DeployAeroCLStrat`).
+- [ ] **Aero routes and sizing** (AeroCLStrat only): neither Converter route
+  (`wethToPairedTokenPath` / `pairedTokenToWethPath` + adapter) trades through
+  an Aero pool, or `DeployAeroCLStrat` passed against that pool with
+  `STRICT_FEE_CAP=true` (§1.1.2). Re-check on every timelocked
+  `setRouteConfig`. `maxTotalNAV` is within the script's pool-depth warning
+  (≤ 15% of the pool's WETH balance), or the excess is justified in the proposal.
 - [ ] **Access control**: `deposit`/`withdraw`/`rebalance`/`sync` callable only
   by the registered StrategyManager; configuration and unpause behind
   `ADMIN_ROLE` (48h timelock); `pause`/`emergencyExit` behind `ADMIN_ROLE` or
