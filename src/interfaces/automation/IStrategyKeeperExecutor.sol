@@ -60,8 +60,8 @@ interface IStrategyKeeperExecutor is IKeeperExecutorBase {
     function lastSyncAt() external view returns (uint256);
     function exitLiquidityTargetETH() external view returns (uint256);
     function minExitLiquidityTopUpETH() external view returns (uint256);
-    /// @notice ETH the Controller must hold to settle in-window priced batches.
-    ///         The current unpriced batch is excluded (cancellable equity).
+    /// @notice ETH the Controller must hold to settle in-window sealed batches, at the live
+    ///         EVE base price. The current unsealed batch is excluded (still cancellable).
     function pendingRedemptionNeedsETH() external view returns (uint256 needsETH);
 
     /**
@@ -75,7 +75,7 @@ interface IStrategyKeeperExecutor is IKeeperExecutorBase {
     /// @notice On-chain checker; execPayload targets `perform`
     function checker() external view returns (bool canExec, bytes memory execPayload);
 
-    /// @notice Gas-bounded scan of priced batches. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
+    /// @notice Gas-bounded scan of sealed batches. Aliased from `ExitQueueLimits.MAX_BATCH_SCAN`.
     function MAX_BATCH_SCAN() external pure returns (uint256);
     function MAX_USERS_COST_SCAN() external pure returns (uint256);
 }

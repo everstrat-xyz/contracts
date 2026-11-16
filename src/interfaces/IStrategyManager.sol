@@ -71,12 +71,6 @@ interface IStrategyManager {
     /// @notice Thrown when total NAV cannot cover the fee (degenerate case)
     error StrategyManagerFeeMintOverflow();
 
-    /// @notice Thrown when in-window priced redemption liability exceeds gross NAV
-    error StrategyManagerQueuedLiabilityExceedsNAV();
-
-    /// @notice Thrown when in-window escrowed EVE exceeds `totalSupply`
-    error StrategyManagerEscrowExceedsSupply();
-
     /// @notice Thrown when performance fee bps exceeds MAX_PERFORMANCE_FEE_BPS
     error StrategyManagerInvalidPerformanceFeeBps();
 
@@ -540,10 +534,8 @@ interface IStrategyManager {
      * @dev Sums each registered strategy's `navInETH()` (any revert freezes the protocol),
      *      then adds StrategyManager, Controller, and AMM ETH balances, then adds the ETH
      *      value of each whitelisted supported-ERC-20 balance priced via the protocol Oracle
-     *      (see `addSupportedERC20()`), then deducts in-window priced ExitQueue liability
-     *      (`liveRedemptionOffsets`). Unpriced queued EVE is still equity and is not deducted.
-     *      Liability lapses when a batch exceeds `MAX_BATCH_PROCESSING_TIME` (view-only).
-     *      Reverts if liability exceeds gross NAV (fail-closed). Zero supported-ERC-20
+     *      (see `addSupportedERC20()`). Nothing is deducted for the ExitQueue: queued EVE is
+     *      equity until it is burned and settles at the live price when paid. Zero supported-ERC-20
      *      balances skip the Oracle entirely; a non-zero balance with a stale or invalid feed
      *      reverts and freezes NAV. Recover via `forceRemoveStrategy()` (ADMIN) or
      *      `removeSupportedERC20()` (ADMIN or SECURITY).

@@ -10,7 +10,6 @@ import {RegistryClientUpgradeable} from "registry/client/RegistryClientUpgradeab
 
 import {Auth} from "../libraries/Auth.sol";
 import {Math} from "../libraries/Math.sol";
-import {ExitQueueLimits} from "../libraries/ExitQueueLimits.sol";
 
 import {IExitQueue} from "../interfaces/IExitQueue.sol";
 
@@ -26,11 +25,6 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
      */
     uint256 public constant MAX_BATCH_PROCESSING_TIME = 3 days;
 
-    /**
-     * @inheritdoc IExitQueue
-     */
-    uint256 public constant MAX_LIVE_PRICED_BATCHES = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
-
     // ============ State Variables ============
 
     /**
@@ -41,16 +35,11 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     /**
      * @notice Current batch ID, i.e. ID of the batch where the next request will be added.
      *
-     * Note: since this variable is incremented in {priceBatch}, batch with this ID
-     * is NOT priced yet. Also, batch IDs start from 1, as ID 0 is used in AMM::exit()
+     * Note: since this variable is incremented in {sealBatch}, batch with this ID
+     * is NOT sealed yet. Also, batch IDs start from 1, as ID 0 is used in AMM::exit()
      * to indicate that the request was processed immediately.
      */
     uint256 public currentBatchId;
-
-    /**
-     * @inheritdoc IExitQueue
-     */
-    uint256 public liveScanFromBatchId;
 
     // ============ Initialization ============
 
@@ -70,7 +59,6 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     function initialize(address _registry) external initializer {
         // Initializing the first batch.
         currentBatchId = 1;
-        liveScanFromBatchId = 1;
         _redemptionRequestBatches[currentBatchId].createdAt = uint64(block.timestamp);
 
         __UUPSUpgradeable_init();
@@ -84,7 +72,7 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
      * @return string The version of the exit queue
      */
     function version() public pure returns (string memory) {
-        return "1.0.0";
+        return "2.0.0";
     }
 
     // ============ View Functions ============
@@ -95,32 +83,10 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     function batchInfo(uint256 _batchId)
         external
         view
-        returns (
-            bool canBeProcessed,
-            uint256 finalEvePrice,
-            uint256 totalTokensToBurn,
-            uint256 createdAt,
-            uint256 pricedAt
-        )
+        returns (bool canBeProcessed, uint256 totalTokensToBurn, uint256 createdAt, uint256 sealedAt)
     {
         RedemptionRequestBatch storage batch = _redemptionRequestBatches[_batchId];
-        return (batch.canBeProcessed, batch.finalEvePrice, batch.totalTokensToBurn, batch.createdAt, batch.pricedAt);
-    }
-
-    /**
-     * @inheritdoc IExitQueue
-     */
-    function liveRedemptionOffsets() public view returns (uint256 liabilityETH, uint256 escrowedSupply) {
-        uint256 lo_ = liveScanFromBatchId;
-        uint256 current_ = currentBatchId;
-        for (uint256 id = lo_; id < current_; ++id) {
-            RedemptionRequestBatch storage batch = _redemptionRequestBatches[id];
-            uint128 tokens = batch.totalTokensToBurn;
-            if (tokens == 0) continue;
-            if (block.timestamp - batch.pricedAt > MAX_BATCH_PROCESSING_TIME) continue;
-            escrowedSupply += tokens;
-            liabilityETH += uint256(tokens).convertAssets(batch.finalEvePrice);
-        }
+        return (batch.canBeProcessed, batch.totalTokensToBurn, batch.createdAt, batch.sealedAt);
     }
 
     /**
@@ -197,25 +163,20 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     /**
      * @inheritdoc IExitQueue
      */
-    function priceBatch(uint256 _evePrice) external onlyAuthContract(Auth.CONTROLLER) whenNotPaused {
-        if (_evePrice == 0) revert ExitQueueZeroPrice();
-
-        _advanceLo();
-        if (currentBatchId - liveScanFromBatchId >= MAX_LIVE_PRICED_BATCHES) {
-            revert ExitQueueTooManyLivePricedBatches();
-        }
-
+    function sealBatch() external onlyAuthContract(Auth.CONTROLLER) whenNotPaused {
         RedemptionRequestBatch storage batch = _redemptionRequestBatches[currentBatchId];
 
-        // No sense to price an empty batch - wait for the requests to be pushed.
+        // No sense to seal an empty batch - wait for the requests to be pushed.
         if (batch.unprocessedUsers.length() == 0) revert ExitQueueBatchIsEmpty();
 
-        batch.finalEvePrice = _evePrice;
+        // Sealing fixes the batch's membership and starts its processing window. It does not
+        // fix a price: each request settles at the live EVE price of the transaction that
+        // pays it (see {pullRequest}), so the escrowed EVE stays ordinary equity until then.
         batch.canBeProcessed = true;
-        batch.pricedAt = uint64(block.timestamp);
-        emit BatchPriced(currentBatchId);
+        batch.sealedAt = uint64(block.timestamp);
+        emit BatchSealed(currentBatchId);
 
-        // A new batch is created after the old batch is priced.
+        // A new batch is created after the old batch is sealed.
         _redemptionRequestBatches[++currentBatchId].createdAt = uint64(block.timestamp);
     }
 
@@ -234,7 +195,7 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
         RedemptionRequestBatch storage batch = _redemptionRequestBatches[batchId_];
 
         // No need to check whether the request was processed, because
-        // we push the request to the batch that is not priced yet,
+        // we push the request to the batch that is not sealed yet,
         // which means that `batch.canBeProcessed` is false.
         if (batch.unprocessedUsers.contains(_user)) {
             revert ExitQueueRequestAlreadyInBatch();
@@ -258,18 +219,24 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     /**
      * @inheritdoc IExitQueue
      */
-    function pullRequest(uint256 _batchId, address _user) external onlyAuthContract(Auth.AMM) whenNotPaused {
+    function pullRequest(uint256 _batchId, address _user, uint256 _evePrice)
+        external
+        onlyAuthContract(Auth.AMM)
+        whenNotPaused
+    {
+        if (_evePrice == 0) revert ExitQueueZeroPrice();
+
         RedemptionRequestBatch storage batch = _redemptionRequestBatches[_batchId];
         RedemptionRequest storage request = batch.requests[_user];
 
         if (!batch.canBeProcessed) revert ExitQueueBatchCannotBeProcessed();
-        if (block.timestamp - batch.pricedAt > MAX_BATCH_PROCESSING_TIME) revert ExitQueueBatchExpired();
+        if (block.timestamp - batch.sealedAt > MAX_BATCH_PROCESSING_TIME) revert ExitQueueBatchExpired();
         if (request.processed) revert ExitQueueRequestAlreadyProcessed();
         if (!batch.unprocessedUsers.contains(_user)) {
             revert ExitQueueRequestNotInBatch();
         }
 
-        if (batch.finalEvePrice.isRelativelyLessThan(request.evePriceAtRequestTime, request.priceTolerance)) {
+        if (_evePrice.isRelativelyLessThan(request.evePriceAtRequestTime, request.priceTolerance)) {
             // If slippage is too high, the request must be closed.
             request.closedDueToSlippage = true;
         }
@@ -278,9 +245,7 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
         batch.totalTokensToBurn -= uint128(request.tokensToBurn);
         request.processed = true;
 
-        _advanceLo();
-
-        emit RequestPulled(_batchId, _user, !request.closedDueToSlippage);
+        emit RequestPulled(_batchId, _user, _evePrice, !request.closedDueToSlippage);
     }
 
     /**
@@ -295,38 +260,16 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
         RedemptionRequest storage request = batch.requests[_user];
 
         _validateRequestCanBeClosed(batch, request, _user);
-        _closedViaEscapeHatch = batch.canBeProcessed && block.timestamp - batch.pricedAt > MAX_BATCH_PROCESSING_TIME;
+        _closedViaEscapeHatch = batch.canBeProcessed && block.timestamp - batch.sealedAt > MAX_BATCH_PROCESSING_TIME;
 
         batch.unprocessedUsers.remove(_user);
         batch.totalTokensToBurn -= uint128(request.tokensToBurn);
         delete batch.requests[_user];
 
-        _advanceLo();
-
         emit RequestClosed(_batchId, _user, _closedViaEscapeHatch);
     }
 
     // ============ Internal Functions ============
-
-    /**
-     * @notice Advance {liveScanFromBatchId} past priced batches that are empty or past
-     * `MAX_BATCH_PROCESSING_TIME`. Ids in `[liveScanFromBatchId, currentBatchId)` are
-     * priced by construction. Does not change live offsets (the view already time-filters);
-     * keeps the scan bounded after writes.
-     */
-    function _advanceLo() internal {
-        uint256 lo_ = liveScanFromBatchId;
-        uint256 current_ = currentBatchId;
-        while (lo_ < current_) {
-            RedemptionRequestBatch storage batch = _redemptionRequestBatches[lo_];
-            bool expired = block.timestamp - batch.pricedAt > MAX_BATCH_PROCESSING_TIME;
-            if (!expired && batch.unprocessedUsers.length() > 0) break;
-            unchecked {
-                ++lo_;
-            }
-        }
-        liveScanFromBatchId = lo_;
-    }
 
     /**
      * @notice Validate if a request can be closed
@@ -343,13 +286,13 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
         if (!_batch.unprocessedUsers.contains(_user)) {
             revert ExitQueueRequestNotInBatch();
         }
-        /* If the batch is priced, all the requests are considered final and
+        /* If the batch is sealed, all the requests are considered final and
         must be pulled from the queue by the AMM.
 
         The only possible exception here is if the maximum time allowed for processing a batch
         has been exceeded.
         */
-        if (_batch.canBeProcessed && block.timestamp - _batch.pricedAt <= MAX_BATCH_PROCESSING_TIME) {
+        if (_batch.canBeProcessed && block.timestamp - _batch.sealedAt <= MAX_BATCH_PROCESSING_TIME) {
             revert ExitQueueRequestCannotBeClosed();
         }
     }
@@ -368,7 +311,7 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     ) internal view returns (bool) {
         if (_request.processed) return false;
         if (!_batch.unprocessedUsers.contains(_user)) return false;
-        if (_batch.canBeProcessed && block.timestamp - _batch.pricedAt <= MAX_BATCH_PROCESSING_TIME) {
+        if (_batch.canBeProcessed && block.timestamp - _batch.sealedAt <= MAX_BATCH_PROCESSING_TIME) {
             return false;
         }
         return true;
@@ -403,5 +346,5 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
      * variables without shifting down storage in the inheritance chain.
      * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
      */
-    uint256[49] private __gap;
+    uint256[50] private __gap;
 }

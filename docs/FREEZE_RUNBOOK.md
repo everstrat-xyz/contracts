@@ -22,7 +22,7 @@ enforced on-chain.
 | **Security multisig** | holds `SECURITY_ROLE` on the Registry directly | none | `pause()` on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, Converter, and Registry; `Controller.emergencyExitToAMM()`; `StrategyManager.emergencyWithdrawToController()`; `UniCLStrat.emergencyExit()`; `StrategyManager.removeSupportedERC20()` (instant stale-feed / dust-NAV unfreeze; `addSupportedERC20` stays ADMIN-only); `CANCELLER_ROLE` on the admin timelock. **Cannot** unpause, configure, or upgrade. |
 | **ADMIN timelock** | 48h OpenZeppelin `TimelockController` holding `ADMIN_ROLE` on the Registry | 48h minimum | All configuration: Oracle feed/token setters, `unpause()` everywhere (including Converter), strategy add/remove, Registry contract registration and role management, all `set*` functions, UUPS upgrades, Converter adapter allowlist. ADMIN can also `pause()` (same gate as SECURITY). |
 | **DAO multisig** | `PROPOSER_ROLE` (and `CANCELLER_ROLE`) on the admin timelock | schedules ops | Holds **no direct protocol role**. Every ADMIN action below is: DAO proposes on the timelock → 48h elapses → anyone executes (executor is `address(0)`, open execution). |
-| **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `priceBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup `KEEPER_ROLE` is held by the two Mimic-driven keeper executors (`QueueKeeperExecutor`, `StrategyKeeperExecutor`) and by nothing else; a manual break-glass multisig is an **optional, opt-in** additional holder — see §0.1 for the decision, risks, and policy. `StrategyKeeperExecutor` funds the AMM immediate-exit float via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
+| **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `sealBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup `KEEPER_ROLE` is held by the two Mimic-driven keeper executors (`QueueKeeperExecutor`, `StrategyKeeperExecutor`) and by nothing else; a manual break-glass multisig is an **optional, opt-in** additional holder — see §0.1 for the decision, risks, and policy. `StrategyKeeperExecutor` funds the AMM immediate-exit float via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
 | **Anyone** | — | none | `AMM.claim()`, `AMM.cancelRedemption()`, timelock execution after delay, Uniswap `pool.increaseObservationCardinalityNext()`. |
 
 Key asymmetries to remember under incident pressure:
@@ -54,7 +54,7 @@ decision; every other mention in the repo points here.
 
 **Why it exists as an option.** The Mimic functions are a *liveness* dependency:
 if Mimic stops executing, or a trigger is misconfigured, or the executor caller
-allowlist is emptied, every keeper path stops — `priceBatch()`,
+allowlist is emptied, every keeper path stops — `sealBatch()`,
 `processRequests()`, `provideExitLiquidity()`, strategy deposits/withdrawals and
 rebalances. The protocol keeps working for users on the paths that need no
 keeper (`enter()`, immediate `exit()` against existing AMM float, `claim()`,
@@ -63,7 +63,7 @@ and the AMM float is not topped up. The relevant clocks are unforgiving:
 
 | Clock | Value | What runs out |
 |---|---|---|
-| `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | Priced batches go unprocessed; `pullRequest` is forbidden (`ExitQueueBatchExpired`); live NAV drops the liability with no reset tx; users fall back to `AMM.cancelRedemption()` (escape hatch) |
+| `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | Sealed batches go unprocessed; `pullRequest` is forbidden (`ExitQueueBatchExpired`); the share price does not move (queued EVE was equity throughout); users fall back to `AMM.cancelRedemption()` (escape hatch) |
 | Admin timelock delay | 48h minimum | Time to grant `KEEPER_ROLE` to a replacement address *after* the incident starts |
 
 Granting a keeper reactively therefore consumes most of the escape-hatch window
@@ -81,9 +81,10 @@ and user payouts still route through the AMM pull-over-push `claim()`.
 so a compromised keeper multisig is a real economic surface even though it is
 not a fund-drain vector:
 
-- **Timing selection.** `priceBatch()` settles a batch at the current
-  `eveBasePriceInETH()`. A keeper chooses *which block* that happens in, and so
-  picks a NAV print within the range the market offers.
+- **Timing selection.** `processRequest(s)()` settles each request at the
+  `eveBasePriceInETH()` live in that transaction. A keeper chooses *which block*
+  that happens in, and so picks a NAV print within the range the market offers
+  (bounded per user by their own `priceTolerance`).
 - **Griefing / value leakage.** Repeated deposit → withdraw churn and forced
   `checkAndRebalanceStrategies()` calls make the strategy cross Uniswap spreads
   and pay LP/gas costs on every cycle. The strategy-layer guardrails (calm
@@ -124,15 +125,15 @@ execute.
 | # | Scenario | Symptom | Who acts | Action | Time constraint |
 |---|---|---|---|---|---|
 | 1 | Chainlink feed stale / broken | `OracleStalePrice`, `OracleInvalidPrice`, `OracleNoRoundData`, `OracleInvalidTimestamp` reverts; if a UniCLStrat holds paired-token inventory or the StrategyManager holds a non-zero supported-ERC-20 balance, `enter()`/`exit()`/`eveBasePriceInETH()` also revert | ADMIN timelock (DAO proposes) | `Oracle.updateUsdFeedInfo(token, newFeed, stalenessInterval)` — this is also how a token is (re)registered | 48h timelock; per-token `stalenessInterval` defines when the freeze starts |
-| 2 | Strategy `navInETH()` reverts | Every `AMM.enter/exit`, `eveBasePriceInETH()`, `Controller.priceBatch()` reverts (bubbled from `StrategyManager.totalNAVInETH()`) | SECURITY, then ADMIN | `UniCLStrat.pause()` → `UniCLStrat.emergencyExit()` → `StrategyManager.emergencyWithdrawToController()` → `Controller.emergencyExitToAMM()`; then ADMIN `StrategyManager.forceRemoveStrategy()` | pause/exit instant; `forceRemoveStrategy` needs 48h timelock |
+| 2 | Strategy `navInETH()` reverts | Every `AMM.enter/exit`, `eveBasePriceInETH()`, `Controller.processRequest(s)()` reverts (bubbled from `StrategyManager.totalNAVInETH()`) | SECURITY, then ADMIN | `UniCLStrat.pause()` → `UniCLStrat.emergencyExit()` → `StrategyManager.emergencyWithdrawToController()` → `Controller.emergencyExitToAMM()`; then ADMIN `StrategyManager.forceRemoveStrategy()` | pause/exit instant; `forceRemoveStrategy` needs 48h timelock |
 | 3 | Strategy unhealthy (`isHealthy() == false`) but not reverting | No freeze; batch deposits skip it; keeper `checkAndRebalance*` triggers `rebalance()`. `isHealthy() == false` now means the rebalance is also *actionable* (unpaused **and** calm), so this is never a guaranteed-revert upkeep | Keeper (SECURITY only if funds at risk) | `Controller.checkAndRebalanceStrategy(strategy)` | none |
 | 4 | Uniswap pool not calm | `UniCLStratNotCalm` reverts on deposit/rebalance/`investIdleETH`; `maxDeposit() == 0`; **withdrawals still work** (burn/convert ungated; re-add skipped) — intentional, see STRATEGY_GUARDRAILS §1.1.1 | Keeper | Back off deposits/rebalances; retry when pool calms. Do not treat ungated withdraw as a bug. No governance action needed | TWAP windows: long ≥ 1800s, short ≥ 60s |
 | 5 | Pool observation buffer too small | Constructor/setters revert `UniCLStratPoolTWAPNotAvailable` or `UniCLStratInsufficientObservationCardinality` (deploy/retune blocked); `navInETH()` reverts `UniCLStratPoolTWAPNotAvailable` if a registered pool later bricks `observe` → full pricing freeze | Anyone, then wait | Grow via `pool.increaseObservationCardinalityNext(n)` *before* deploy/setter; buffer fills as the pool trades. If already registered and urgent: escalate to scenario-2 chain | buffer fill time depends on pool activity |
 | 6 | Unexplained NAV anomaly (monitoring alert) | Off-chain NAV tracking flags a large single-tx base-price move not explained by enter/exit flow; on-chain there is **no deviation guard** — enter/exit keep working | Investigate first; SECURITY if unexplained | Reconcile NAV component-by-component (§6); if unexplained: SECURITY full-freeze (§5.4) → fix → staged un-freeze (§5.5) | pause instant for SECURITY; un-freeze always 48h |
 | 7 | Active exploit / unknown anomaly | Anything not matching a known pattern | SECURITY | Full-freeze procedure (§5.4), then staged un-freeze (§5.5) | un-freeze requires 48h per timelock batch |
-| 8 | Keeper stops processing a priced exit batch | Batch `pricedAt` older than 3 days, requests unprocessed; `pullRequest` reverts `ExitQueueBatchExpired`; `liveRedemptionOffsets` no longer deducts that batch | Users (self-service) | `AMM.cancelRedemption(batchId)` — escape hatch returns escrowed EVE (the only remaining path; pull is forbidden) | `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` |
+| 8 | Keeper stops processing a sealed exit batch | Batch `sealedAt` older than 3 days, requests unprocessed; `pullRequest` reverts `ExitQueueBatchExpired`; share price unaffected | Users (self-service) | `AMM.cancelRedemption(batchId)` — escape hatch returns escrowed EVE (the only remaining path; pull is forbidden) | `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` |
 | 9 | Registry paused | Role grants/revokes and contract registration revert; `StrategyManager.addStrategy()` reverts | ADMIN timelock | `Registry.unpause()` | 48h |
-| 10 | In-window priced liability exceeds NAV | `StrategyManagerQueuedLiabilityExceedsNAV` (and/or `AMMEscrowExceedsSupply`) freeze `enter()`/`exit()`/`eveBasePriceInETH()`/`priceBatch()` | SECURITY, then wait | Pause ExitQueue so no new batches can be priced. Do **not** try to pull expired or underwater claims. Wait out `MAX_BATCH_PROCESSING_TIME` so remaining L lapses in the view; users `cancelRedemption` remaining requests; recap AMM prices. Investigate how L exceeded NAV (NAV bug vs oversize queue) | pause instant; L lapses after 3 days from each batch's `pricedAt` |
+| 10 | *(retired)* In-window priced liability exceeds NAV | Cannot occur since the audit-G1 change: sealed batches carry no price and no liability, so a NAV drop after sealing reprices every EVE instead of freezing NAV. `StrategyManagerQueuedLiabilityExceedsNAV` / `AMMEscrowExceedsSupply` no longer exist | — | — | — |
 
 ---
 
@@ -266,7 +267,7 @@ with **no try/catch**. One reverting strategy therefore reverts:
 
 - `AMM.enter()` and `AMM.exit()` (both read NAV),
 - `AMM.eveBasePriceInETH()` / `evePremiumPriceInETH()` / USD views,
-- `Controller.priceBatch()` (reads `eveBasePriceInETH()`),
+- `Controller.processRequest(s)()` (read `eveBasePriceInETH()` to settle),
 - performance-fee minting (`_mintPerformanceFeeEVE` reads total NAV).
 
 This is intentional: minting or burning EVE against an under-reported NAV
@@ -638,17 +639,17 @@ payout processing halts). Still working:
 - all views.
 
 **Controller paused** — blocks every keeper function: deposits, withdrawals,
-rebalance, sync, fee harvest, `provideExitLiquidity()`, `priceBatch()`,
+rebalance, sync, fee harvest, `provideExitLiquidity()`, `sealBatch()`,
 `processRequest(s)()`. Still working: `emergencyExitToAMM()` (no pause gate)
 and receiving ETH. Effect on users: entry/exit still work at the AMM while it
 is unpaused (ETH just accumulates on the Controller; queued batches stop being
-priced/processed — watch the 3-day escape hatch, §5.3).
+sealed/processed — watch the 3-day escape hatch, §5.3).
 
 **ExitQueue paused** — blocks `pushRequest()` (queued exits revert, so
 `AMM.exit()` only works up to available `freeBalance()`; immediate exits are
 unaffected), `pullRequest()` (batch processing halts even if the Controller
-is live), and `priceBatch()` (`whenNotPaused` on the ExitQueue itself, so a
-batch cannot be priced while the queue is paused — the Controller entry point
+is live), and `sealBatch()` (`whenNotPaused` on the ExitQueue itself, so a
+batch cannot be sealed while the queue is paused — the Controller entry point
 is separately Controller-pause-gated). Still working: `closeRequest()` —
 **explicitly not pause-gated** so `AMM.cancelRedemption()` remains a user
 escape route (subject to the batch-window rule in §5.3).
@@ -681,37 +682,35 @@ and swap through the Converter). `UniCLStrat.emergencyExit()` is unaffected
 
 `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` (constant).
 
-Live share-price accounting (see `ExitQueue.liveRedemptionOffsets()`):
+Queued redemptions settle at the live price (audit G1):
 
-- Until `priceBatch`, queued EVE is still **cancellable equity** — NAV and
-  supply are unchanged. Users can close the current unpriced batch at any time.
-  `StrategyKeeperExecutor.pendingRedemptionNeedsETH` also ignores it, so
-  `WithdrawShortfall` cannot be griefed by queue-then-cancel.
-- Once a batch is **priced** (`Controller.priceBatch()` → `BatchPriced`,
-  `pricedAt` set), live NAV deducts `remainingTokens * finalEvePrice` and live
-  supply deducts remaining escrow. Requests **cannot be closed** for 3 days
-  (`ExitQueueRequestCannotBeClosed`). Within that window they must be settled
-  via `pullRequest()`.
-- If **more than 3 days** pass after `pricedAt` without processing:
-  - Liability **lapses in the view** with no reset transaction — enter/exit
-    no longer reserve ETH for that batch.
-  - `pullRequest` is **forbidden** (`ExitQueueBatchExpired`) so a keeper
-    cannot pay a claim live NAV already dropped.
+- Queued EVE is ordinary equity for as long as it is queued — it stays in
+  `totalSupply` and is backed by NAV like any other EVE. Nothing is deducted
+  from NAV or supply for the queue, sealed or not.
+- Until `sealBatch`, users can close their request in the current batch at any
+  time. `StrategyKeeperExecutor.pendingRedemptionNeedsETH` ignores the unsealed
+  batch, so `WithdrawShortfall` cannot be griefed by queue-then-cancel.
+- Once a batch is **sealed** (`Controller.sealBatch()` → `BatchSealed`,
+  `sealedAt` set), requests **cannot be closed** for 3 days
+  (`ExitQueueRequestCannotBeClosed`). Within that window they are settled via
+  `pullRequest()` at the base price live in that transaction; a request whose
+  `priceTolerance` that price violates is closed and its EVE returned.
+- If **more than 3 days** pass after `sealedAt` without processing:
+  - `pullRequest` is **forbidden** (`ExitQueueBatchExpired`).
+  - The share price does **not** move: there was never a carve-out to re-add.
   - Any user can self-rescue: `AMM.cancelRedemption(batchId)` →
     `ExitQueue.closeRequest()` returns `viaEscapeHatch = true` and the AMM
     transfers the escrowed EVE back. This works **during a full protocol
     freeze** (neither function is pause-gated).
-- Operational rule: **if you freeze the protocol while a priced batch is
+- Operational rule: **if you freeze the protocol while a sealed batch is
   pending, you have a 3-day SLA.** Either finish processing the batch before
   pausing (preferred: `Controller.processRequests(batchId)` needs Controller,
   ExitQueue, and AMM all unpaused), or accept that after 3 days pull is
-  forbidden, L drops out of NAV, and users exit the batch via the escape
-  hatch. Monitor: alert when `block.timestamp - pricedAt > 2 days` on any
-  batch with `unprocessedUsersCount(batchId) > 0`.
-- If `totalNAVInETH()` reverts `StrategyManagerQueuedLiabilityExceedsNAV`
-  (or AMM `AMMEscrowExceedsSupply`): pause ExitQueue so no further batches
-  can be priced; wait for remaining in-window batches to lapse; users cancel
-  leftover requests; then recap AMM. See scenario 10.
+  forbidden and users exit the batch via the escape hatch. Monitor: alert when
+  `block.timestamp - sealedAt > 2 days` on any batch with
+  `unprocessedUsersCount(batchId) > 0`.
+- A NAV drop after sealing no longer freezes anything: sealed EVE floats with
+  NAV, so every holder is repriced together (former scenario 10, retired).
 
 ### 5.4 Full-freeze procedure (SECURITY multisig, single transaction batch if possible)
 
@@ -742,8 +741,8 @@ freeze privilege escalation first, then user flows, then capital movement:
    holds `CANCELLER_ROLE` — cancel it on the `TimelockController` directly.
 
 What users can still do while fully frozen (by design):
-`AMM.claim()`, `AMM.cancelRedemption()` (un-priced batches immediately;
-priced batches after the 3-day window), `Registry.renounceRole()`, and all
+`AMM.claim()`, `AMM.cancelRedemption()` (unsealed batches immediately;
+sealed batches after the 3-day window), `Registry.renounceRole()`, and all
 view functions.
 
 ### 5.5 Staged un-freeze procedure (ADMIN timelock; DAO proposes; 48h per schedule)
@@ -769,8 +768,8 @@ observed (and the next one cancelled) if something is still wrong:
    Verify: `isHealthy()` true, pool calm, a small test
    deposit/withdraw round-trips.
 4. **Stage 3 — flows:** `Controller.unpause()`, `ExitQueue.unpause()`.
-   Keeper prices/processes any batch left from before the freeze
-   (`priceBatch()` — note it reverts `ExitQueueBatchIsEmpty` if users escaped
+   Keeper seals/processes any batch left from before the freeze
+   (`sealBatch()` — note it reverts `ExitQueueBatchIsEmpty` if users escaped
    via the hatch, which is fine).
 5. **Stage 4 — user entry/exit, last:** `AMM.unpause()`. Immediately verify a
    dust-sized `enter()` and `exit()` from an ops account, then announce
@@ -786,8 +785,9 @@ The AMM base-price deviation guard (`lastSettledBasePrice` checkpoint +
 `maxPriceDeviation` band + once-per-block rule) was **removed** (see issue #241):
 its only remaining rationale was catching NAV calculation bugs, at the cost of
 freezing the AMM on any legitimate large NAV move. `enter()`/`exit()` now always
-settle at the current NAV-backed price, and `ExitQueue.priceBatch()` accepts the
-Controller-submitted base price without an on-chain band check.
+settle at the current NAV-backed price, and `ExitQueue.pullRequest()` settles
+queued requests at the Controller-submitted live base price without an on-chain
+band check (each user's own `priceTolerance` is the only per-request bound).
 
 Protection against bad prices now comes from the layers that remain on-chain:
 
@@ -862,9 +862,9 @@ Do not page on moves with an obvious on-chain explanation:
 - `Bootstrapped(address user, uint256 deposit, uint256 userTokensMinted, uint256 timestamp)`
 
 **ExitQueue** (`src/interfaces/IExitQueue.sol`)
-- `BatchPriced(uint256 batchId)` — start the 3-day processing SLA clock
+- `BatchSealed(uint256 batchId)` — start the 3-day processing SLA clock
 - `RequestPushed(uint256 batchId, address user)`
-- `RequestPulled(uint256 batchId, address user, bool isWithinTolerance)` — **alert on `isWithinTolerance = false`** clusters (slippage closures)
+- `RequestPulled(uint256 batchId, address user, uint256 evePrice, bool isWithinTolerance)` (`evePrice` = the live price the request settled against) — **alert on `isWithinTolerance = false`** clusters (slippage closures)
 - `RequestClosed(uint256 batchId, address user, bool viaEscapeHatch)` — **alert on `viaEscapeHatch = true`**
 
 **StrategyManager** (`src/interfaces/IStrategyManager.sol`)
@@ -929,7 +929,7 @@ Do not page on moves with an obvious on-chain explanation:
 | `pool.observe([twapInterval, 0])` | reverts `OLD` / fails → ring cannot serve the window (scenario 5) |
 | `pool.slot0().observationCardinality` | below `ceil(twapInterval / 12)` (min 150) → TWAP may be spot-extrapolated; Next is not the gate |
 | `AMM.eveBasePriceInETH()` block-over-block delta | unexplained single-tx move > ~5% (§6 monitoring flow) |
-| `ExitQueue.batchInfo(id)` for open batches | `canBeProcessed && unprocessedUsersCount(id) > 0 && now − pricedAt > 2 days` (1-day margin before the 3-day hatch) |
+| `ExitQueue.batchInfo(id)` for open batches | `canBeProcessed && unprocessedUsersCount(id) > 0 && now − sealedAt > 2 days` (1-day margin before the 3-day hatch) |
 | `paused()` on every pausable contract | any unexpected `true` |
 | Keeper account transactions | any revert; decode selector against §7.3 |
 

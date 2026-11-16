@@ -8,6 +8,7 @@ import {Auth} from "../../libraries/Auth.sol";
 import {ExitQueueLimits} from "../../libraries/ExitQueueLimits.sol";
 
 import {IRegistry} from "interfaces/IRegistry.sol";
+import {IAMM} from "../../interfaces/IAMM.sol";
 import {IController} from "../../interfaces/IController.sol";
 import {IExitQueue} from "../../interfaces/IExitQueue.sol";
 import {IQueueKeeperExecutor} from "../../interfaces/automation/IQueueKeeperExecutor.sol";
@@ -28,8 +29,12 @@ import {KeeperExecutorBase} from "./KeeperExecutorBase.sol";
  * Params are a hint — every action is re-validated against live state
  * before Controller calls.
  *
+ * Queued requests settle at the live EVE base price of the transaction that pays
+ * them, so affordability is costed at `AMM.eveBasePriceInETH()` at check time and
+ * again at perform time.
+ *
  * Params:
- *   PriceBatch      abi.encode(batchId)
+ *   SealBatch       abi.encode(batchId)
  *   ProcessRequests abi.encode(batchId, startIndex, endIndex) — endIndex exclusive
  *   AdvanceCursor   abi.encode(batchId)
  */
@@ -37,11 +42,11 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
     using Math for uint256;
     using Auth for IRegistry;
 
-    /// @dev Gas-bounded fallback scan. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
-    ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
-    ///      desync the keeper. A DoS bound, not cadence — `minBatchAge` vs
-    ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping priced batches.
-    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
+    /// @dev Gas-bounded fallback scan. Bound to `ExitQueueLimits.MAX_BATCH_SCAN` (shared with
+    ///      `StrategyKeeperExecutor`) so a change cannot silently desync the two keepers.
+    ///      A DoS bound, not cadence — `minBatchAge` vs `MAX_BATCH_PROCESSING_TIME` implies
+    ///      ~3 overlapping sealed batches.
+    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_BATCH_SCAN;
     uint256 public constant MIN_BATCH_AGE_UPPER_BOUND = 7 days;
     uint256 public constant MIN_BATCH_AGE_LOWER_BOUND = 1 days;
     uint256 public constant MAX_USERS_PER_UPKEEP_UPPER_BOUND = 100;
@@ -130,7 +135,7 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
 
     function affordableRequests(uint256 _batchId) external view returns (uint256 count) {
         IRegistry registry_ = registry();
-        return _affordableRequests(IExitQueue(registry_.exitQueue()), registry_.controller(), _batchId);
+        return _affordableRequests(IExitQueue(registry_.exitQueue()), registry_.controller(), registry_.amm(), _batchId);
     }
 
     function version() external pure returns (string memory) {
@@ -145,13 +150,13 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         IController controller = IController(registry_.controller());
         IExitQueue queue = IExitQueue(registry_.exitQueue());
 
-        if (queueAction == QueueAction.PriceBatch) {
+        if (queueAction == QueueAction.SealBatch) {
             uint256 batchId = abi.decode(params, (uint256));
             if (batchId != queue.currentBatchId()) revert KeeperExecutorNoUpkeepNeeded();
-            (,,, uint256 createdAt,) = queue.batchInfo(batchId);
+            (,, uint256 createdAt,) = queue.batchInfo(batchId);
             if (block.timestamp - createdAt < minBatchAge) revert KeeperExecutorNoUpkeepNeeded();
 
-            controller.priceBatch();
+            controller.sealBatch();
             _advanceBatchCursor(queue);
             emit QueueUpkeepPerformed(queueAction, batchId, 0);
         } else if (queueAction == QueueAction.ProcessRequests) {
@@ -160,7 +165,7 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
 
             // Re-validate: claimed range must be a prefix of the affordable set
             // starting at index 0 (the TS function may claim a shorter prefix).
-            uint256 affordable = _affordableRequests(queue, address(controller), batchId);
+            uint256 affordable = _affordableRequests(queue, address(controller), registry_.amm(), batchId);
             if (startIndex != 0 || endIndex > affordable) revert KeeperExecutorNoUpkeepNeeded();
 
             controller.processRequests(batchId, startIndex, endIndex);
@@ -204,16 +209,16 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
 
         for (uint256 id = cursor; id < currentBatchId && id < scanLimit; id++) {
             if (_isBatchSkippable(queue, id)) continue;
-            uint256 affordable = _affordableRequests(queue, controller, id);
+            uint256 affordable = _affordableRequests(queue, controller, amm, id);
             if (affordable > 0) {
                 return (QueueAction.ProcessRequests, id, affordable);
             }
         }
 
         if (queue.unprocessedUsersCount(currentBatchId) > 0) {
-            (,,, uint256 createdAt,) = queue.batchInfo(currentBatchId);
+            (,, uint256 createdAt,) = queue.batchInfo(currentBatchId);
             if (block.timestamp - createdAt >= minBatchAge) {
-                return (QueueAction.PriceBatch, currentBatchId, 0);
+                return (QueueAction.SealBatch, currentBatchId, 0);
             }
         }
 
@@ -226,22 +231,22 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
 
     /**
      * @notice Whether the cursor may advance past `_batchId` without work being lost.
-     * @dev `ExitQueue.priceBatch` sets `canBeProcessed` and `pricedAt` in the same write, so
-     *      `canBeProcessed` alone is the "is priced" predicate (`pricedAt == 0` is the same check
-     *      and is therefore not repeated). The unpriced guard comes FIRST so the helper is correct
+     * @dev `ExitQueue.sealBatch` sets `canBeProcessed` and `sealedAt` in the same write, so
+     *      `canBeProcessed` alone is the "is sealed" predicate (`sealedAt == 0` is the same check
+     *      and is therefore not repeated). The unsealed guard comes FIRST so the helper is correct
      *      for any `_batchId`, not just the `_batchId < currentBatchId` range the callers use: an
-     *      unpriced batch — the current one, or any future id — is never skippable, even when it
-     *      is still empty, because it can still receive requests and must be priced first.
+     *      unsealed batch — the current one, or any future id — is never skippable, even when it
+     *      is still empty, because it can still receive requests and must be sealed first.
      */
     function _isBatchSkippable(IExitQueue _queue, uint256 _batchId) internal view returns (bool) {
-        (bool canBeProcessed,,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
+        (bool canBeProcessed,,, uint256 sealedAt) = _queue.batchInfo(_batchId);
         if (!canBeProcessed) return false;
 
         if (_queue.unprocessedUsersCount(_batchId) == 0) return true;
 
-        // Priced but past the processing window: users may self-serve via the ExitQueue
+        // Sealed but past the processing window: users may self-serve via the ExitQueue
         // escape hatch, so the keeper stops blocking on it.
-        return block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME();
+        return block.timestamp > sealedAt + _queue.MAX_BATCH_PROCESSING_TIME();
     }
 
     function _peekAdvancedCursor(IExitQueue _queue) internal view returns (uint256 cursor) {
@@ -254,17 +259,23 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         }
     }
 
-    function _affordableRequests(IExitQueue _queue, address _controller, uint256 _batchId)
+    /// @dev Longest prefix of the batch's unprocessed users the Controller can pay right now,
+    ///      costed at the live EVE base price — the price `Controller.processRequests` settles
+    ///      at when called in the same state. The price is read only once a sealed, in-window,
+    ///      non-empty batch is found, so an idle queue never touches NAV.
+    function _affordableRequests(IExitQueue _queue, address _controller, address _amm, uint256 _batchId)
         internal
         view
         returns (uint256 count)
     {
-        (bool canBeProcessed, uint256 finalEvePrice,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
+        (bool canBeProcessed,,, uint256 sealedAt) = _queue.batchInfo(_batchId);
         if (!canBeProcessed) return 0;
-        if (pricedAt > 0 && block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
+        if (sealedAt > 0 && block.timestamp > sealedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
 
         uint256 unprocessedCount = _queue.unprocessedUsersCount(_batchId);
         if (unprocessedCount == 0) return 0;
+
+        uint256 evePrice = IAMM(_amm).eveBasePriceInETH();
 
         uint256 cap = unprocessedCount > maxUsersPerUpkeep ? maxUsersPerUpkeep : unprocessedCount;
         address[] memory users = _queue.unprocessedUsers(_batchId, 0, cap);
@@ -275,9 +286,9 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
             (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
                 _queue.requestInfo(_batchId, users[i]);
 
-            uint256 cost = finalEvePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)
+            uint256 cost = evePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)
                 ? 0
-                : tokensToBurn.convertAssets(finalEvePrice);
+                : tokensToBurn.convertAssets(evePrice);
 
             if (cumulativeCost + cost > budget) break;
             cumulativeCost += cost;

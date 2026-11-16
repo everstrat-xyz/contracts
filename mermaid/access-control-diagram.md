@@ -41,7 +41,7 @@ graph TB
     Registry -.->|"ADMIN / CONTROLLER caller"| StrategyManager
     Registry -.->|"ADMIN"| Oracle
     Registry -.->|"ADMIN; SM caller"| UniCLStrat
-    QueueKeeper -.->|"priceBatch / processRequests"| Controller
+    QueueKeeper -.->|"sealBatch / processRequests"| Controller
     StrategyKeeper -.->|"deposit / withdraw / rebalance / sync / harvest / exitLiquidity"| Controller
     BreakGlass -.->|"same surface, manually"| Controller
     Security -->|"pause() — instant keeper stop"| Controller

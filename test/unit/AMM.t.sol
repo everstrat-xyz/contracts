@@ -84,6 +84,9 @@ contract AMMTest is ProtocolTestBase {
     uint256 public constant BATCH_EXIT_ABOVE_UPPER_BOUND_ETH = 5e16 + 1;
     uint256 public constant GENESIS_CONFIG_INITIAL = 0;
     uint256 public constant EXCESS_ETH = 0.05 ether; // excess ETH sent beyond redemption amount
+    uint256 public constant NAV_GAIN_ETH = 0.3 ether; // NAV move while a sealed batch sits unpaid
+    uint256 public constant NAV_LOSS_ETH = 0.3 ether;
+    uint256 public constant PRICE_DUST_TOLERANCE = 10; // wei of price left by payout rounding
 
     function setUp() public {
         _setupAddresses();
@@ -144,17 +147,18 @@ contract AMMTest is ProtocolTestBase {
         uint256 batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
         assertGt(ethToRedeem, 0, "slippage must not zero redemption in test setup");
 
-        vm.deal(address(controller), ethToRedeem);
+        // The Controller already holds the deposits, which cover the payout.
+        assertGe(address(controller).balance, ethToRedeem);
         controller.processRequest(batchId, user2);
     }
 
@@ -421,22 +425,21 @@ contract AMMTest is ProtocolTestBase {
         vm.stopPrank();
 
         // Price the batch
-        controller.priceBatch();
+        controller.sealBatch();
 
         // Get the expected ETH to redeem from the request
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
 
         // Calculate ETH needed (Controller will do this, but we need to fund it)
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
 
-        // Fund controller with ETH for processing (only if needed)
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         // Process via Controller (which handles ETH transfer)
         vm.expectEmit(true, true, true, true);
@@ -503,7 +506,7 @@ contract AMMTest is ProtocolTestBase {
         vm.deal(address(controller), address(controller).balance / 2);
 
         // Verify that ethToRedeem would be 0 due to slippage
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         bool isSlippageTooHigh = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance);
         assertTrue(isSlippageTooHigh, "Slippage should be detected as too high");
 
@@ -512,7 +515,7 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = isSlippageTooHigh ? 0 : Math.convertAssets(tokensToBurn, finalEvePrice);
         assertEq(ethToRedeem, 0, "ETH should be 0 when slippage is too high");
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         // Process without funding Controller (should work since no ETH needed)
         vm.expectEmit(true, true, true, true);
@@ -579,7 +582,7 @@ contract AMMTest is ProtocolTestBase {
         vm.stopPrank();
 
         // Price the batch
-        controller.priceBatch();
+        controller.sealBatch();
 
         // Non-keeper should not be able to process
         vm.prank(user1);
@@ -853,18 +856,18 @@ contract AMMTest is ProtocolTestBase {
         vm.stopPrank();
 
         // Price the batch
-        controller.priceBatch();
+        controller.sealBatch();
 
         // Calculate and fund ETH needed
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         // Process the redemption first time
         controller.processRequest(batchId, user2);
@@ -898,18 +901,18 @@ contract AMMTest is ProtocolTestBase {
         vm.stopPrank();
 
         // Price the batch
-        controller.priceBatch();
+        controller.sealBatch();
 
         // Calculate and fund ETH needed
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         // Process the redemption first
         controller.processRequest(batchId, user2);
@@ -935,7 +938,7 @@ contract AMMTest is ProtocolTestBase {
         vm.stopPrank();
 
         // Price the batch (user cannot cancel within MAX_BATCH_PROCESSING_TIME)
-        controller.priceBatch();
+        controller.sealBatch();
 
         vm.prank(user2);
         vm.expectRevert(IExitQueue.ExitQueueRequestCannotBeClosed.selector);
@@ -1124,17 +1127,17 @@ contract AMMTest is ProtocolTestBase {
         uint256 batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         uint256 user2ETHBefore = address(user2).balance;
 
@@ -1161,17 +1164,17 @@ contract AMMTest is ProtocolTestBase {
         uint256 batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         controller.processRequest(batchId, user2);
 
@@ -1201,17 +1204,17 @@ contract AMMTest is ProtocolTestBase {
         uint256 batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), address(controller).balance + ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         controller.processRequest(batchId, user2);
 
@@ -1246,11 +1249,11 @@ contract AMMTest is ProtocolTestBase {
         uint256 batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
@@ -1263,7 +1266,7 @@ contract AMMTest is ProtocolTestBase {
         uint256 controllerBalanceBefore = address(controller).balance;
 
         vm.prank(address(controller));
-        bondingCurve.processRedemption{value: totalSent}(batchId, user2);
+        bondingCurve.processRedemption{value: totalSent}(batchId, user2, finalEvePrice);
 
         // Excess must be returned to controller, not retained in AMM
         // Controller paid totalSent and received EXCESS_ETH back → net deduction is ethToRedeem only
@@ -1295,11 +1298,11 @@ contract AMMTest is ProtocolTestBase {
         // Reduce controller ETH to cause a price drop (reduces NAV)
         vm.deal(address(controller), address(controller).balance / 2);
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         // Verify slippage is triggered (ethToRedeem == 0 from Controller's perspective)
         (,, uint256 evePriceAtRequestTime,,) = exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         assertTrue(
             Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance), "Slippage must be detected"
         );
@@ -1310,7 +1313,7 @@ contract AMMTest is ProtocolTestBase {
         uint256 controllerBalanceBefore = address(controller).balance;
 
         vm.prank(address(controller));
-        bondingCurve.processRedemption{value: EXCESS_ETH}(batchId, user2);
+        bondingCurve.processRedemption{value: EXCESS_ETH}(batchId, user2, finalEvePrice);
 
         // Controller paid EXCESS_ETH and received all of it back (no ethToRedeem on slippage)
         assertEq(
@@ -1348,17 +1351,17 @@ contract AMMTest is ProtocolTestBase {
         uint256 batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), address(controller).balance + ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         controller.processRequest(batchId, user2);
 
@@ -1389,18 +1392,17 @@ contract AMMTest is ProtocolTestBase {
         uint256 batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        controller.priceBatch();
+        controller.sealBatch();
 
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
-        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        uint256 finalEvePrice = bondingCurve.eveBasePriceInETH();
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            // Use additive deal so controller retains its original balance for NAV calculations
-            vm.deal(address(controller), address(controller).balance + ethToRedeem);
-        }
+        // The Controller already holds the deposits, which cover the payout. (Topping it up
+        // here would move NAV, and with it the live price the request settles at.)
+        assertGe(address(controller).balance, ethToRedeem);
 
         controller.processRequest(batchId, user2);
 
@@ -2216,7 +2218,10 @@ contract AMMTest is ProtocolTestBase {
         assertGt(batchId, 0, "exit should queue against the new NAV");
     }
 
-    function test_PricedQueue_ExcludedFromLiveSharePrice() public {
+    // ============ Queued Redemptions Settle At The Live Price (audit G1) ============
+
+    /// @dev user1 bootstraps, user2 enters and queues an exit of `EXIT_SMALL_ETH`.
+    function _queueExitForUser2() internal returns (uint256 batchId) {
         vm.prank(user1);
         bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
         vm.roll(block.number + 1);
@@ -2227,53 +2232,109 @@ contract AMMTest is ProtocolTestBase {
         uint256 user2Balance = eve.balanceOf(user2);
         vm.startPrank(user2);
         eve.approve(address(bondingCurve), user2Balance);
-        bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
+        batchId = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, Math.SCALE_FACTOR);
         vm.stopPrank();
-
-        (uint256 liabilityBefore, uint256 escrowedBefore) = exitQueue.liveRedemptionOffsets();
-        assertEq(liabilityBefore, 0, "unpriced queue is still equity");
-        assertEq(escrowedBefore, 0);
-
-        uint256 priceBefore = bondingCurve.eveBasePriceInETH();
-        controller.priceBatch();
-        uint256 priceAfter = bondingCurve.eveBasePriceInETH();
-
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertGt(escrowed, 0);
-        assertGt(liability, 0);
-        // Unchanged NAV: residual price equals the settlement price up to floor rounding.
-        assertApproxEqRel(priceAfter, priceBefore, 1e12);
-
-        uint256 navNet = strategyManager.totalNAVInETH();
-        vm.deal(address(controller), address(controller).balance + 10 ether);
-        uint256 navAfterGift = strategyManager.totalNAVInETH();
-        assertEq(navAfterGift, navNet + 10 ether, "gift accrues to residual holders, not the priced claim");
-        assertGt(bondingCurve.eveBasePriceInETH(), priceAfter);
+        assertGt(batchId, 0, "exit must queue");
     }
 
-    function test_PricedQueue_LiabilityLapsesAfterExpiry() public {
-        vm.prank(user1);
-        bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
-        vm.roll(block.number + 1);
+    function test_SealedQueue_StaysEquityAtTheLivePrice() public {
+        _queueExitForUser2();
+
+        uint256 navBefore = strategyManager.totalNAVInETH();
+        uint256 priceBefore = bondingCurve.eveBasePriceInETH();
+        controller.sealBatch();
+
+        // Sealing moves neither NAV nor the price: nothing is carved out for the batch.
+        assertEq(strategyManager.totalNAVInETH(), navBefore);
+        assertEq(bondingCurve.eveBasePriceInETH(), priceBefore);
+
+        // A gain after sealing is shared by every EVE, queued or not.
+        vm.deal(address(controller), address(controller).balance + NAV_GAIN_ETH);
+        assertEq(strategyManager.totalNAVInETH(), navBefore + NAV_GAIN_ETH);
+        assertEq(bondingCurve.eveBasePriceInETH(), Math.basePrice(navBefore + NAV_GAIN_ETH, eve.totalSupply()));
+    }
+
+    function test_SealedQueue_SettlesAtThePriceLiveAtPayout() public {
+        uint256 batchId = _queueExitForUser2();
+        controller.sealBatch();
+        uint256 priceAtSeal = bondingCurve.eveBasePriceInETH();
+
+        vm.deal(address(controller), address(controller).balance + NAV_GAIN_ETH);
+        uint256 priceAtPayout = bondingCurve.eveBasePriceInETH();
+        assertGt(priceAtPayout, priceAtSeal);
+
+        (,,, uint256 tokensToBurn,) = exitQueue.requestInfo(batchId, user2);
+        controller.processRequest(batchId, user2);
+
+        assertEq(bondingCurve.claimableBalances(user2), Math.convertAssets(tokensToBurn, priceAtPayout));
+    }
+
+    function test_SealedQueue_SettlementLeavesThePriceUnchangedForRemainingHolders() public {
+        uint256 batchId = _queueExitForUser2();
+        controller.sealBatch();
+        vm.deal(address(controller), address(controller).balance + NAV_GAIN_ETH);
+
+        uint256 priceBefore = bondingCurve.eveBasePriceInETH();
+        controller.processRequest(batchId, user2);
+        uint256 priceAfter = bondingCurve.eveBasePriceInETH();
+
+        // Burning EVE against exactly its value is price-neutral; payout rounding (down) can
+        // only leave dust behind for the holders who stay.
+        assertGe(priceAfter, priceBefore);
+        assertApproxEqAbs(priceAfter, priceBefore, PRICE_DUST_TOLERANCE);
+    }
+
+    /// @dev Audit G1. A sealed batch used to be a fixed-price liability carved out of NAV and
+    ///      supply, and was re-added at exactly `MAX_BATCH_PROCESSING_TIME` after pricing — a
+    ///      share-price step at a known second whenever NAV had moved in between. Queued EVE is
+    ///      now equity at the live price throughout, so the lapse changes nothing.
+    function test_SealedQueue_NoPriceStepWhenTheProcessingWindowLapses() public {
+        uint256 batchId = _queueExitForUser2();
+        controller.sealBatch();
+        (,,, uint256 sealedAt) = exitQueue.batchInfo(batchId);
+
+        // NAV moves while the batch sits unpaid — the precondition for the old price step.
+        vm.deal(address(controller), address(controller).balance + NAV_GAIN_ETH);
+
+        vm.warp(sealedAt + exitQueue.MAX_BATCH_PROCESSING_TIME());
+        uint256 navLastSecondOfWindow = strategyManager.totalNAVInETH();
+        uint256 priceLastSecondOfWindow = bondingCurve.eveBasePriceInETH();
+        uint256 premiumLastSecondOfWindow = bondingCurve.evePremiumPriceInETH();
+
+        vm.warp(sealedAt + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+        assertEq(strategyManager.totalNAVInETH(), navLastSecondOfWindow);
+        assertEq(bondingCurve.eveBasePriceInETH(), priceLastSecondOfWindow);
+        assertEq(bondingCurve.evePremiumPriceInETH(), premiumLastSecondOfWindow);
+
+        // The escape hatch hands the EVE back without moving the price either.
         vm.prank(user2);
-        bondingCurve.enter{value: ENTER_ETH_DEPOSIT}(ENTER_MIN_TOKENS);
-        vm.roll(block.number + 1);
+        bondingCurve.cancelRedemption(batchId);
+        assertEq(bondingCurve.eveBasePriceInETH(), priceLastSecondOfWindow);
+    }
 
-        uint256 user2Balance = eve.balanceOf(user2);
-        vm.startPrank(user2);
-        eve.approve(address(bondingCurve), user2Balance);
-        bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
-        vm.stopPrank();
+    /// @dev Audit G1, attacker's view: entering in the last second of the window and exiting
+    ///      right after the lapse must not profit from the lapse. With no price step, the
+    ///      round trip only pays the bonding-curve premium.
+    function test_SealedQueue_EnteringBeforeTheLapseGainsNothing() public {
+        uint256 batchId = _queueExitForUser2();
+        controller.sealBatch();
+        (,,, uint256 sealedAt) = exitQueue.batchInfo(batchId);
 
-        controller.priceBatch();
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertGt(liability, 0);
-        assertGt(escrowed, 0);
+        // NAV falls while the batch sits unpaid: under the old model the price would jump up
+        // at the lapse, rewarding an entrant who bought just before it.
+        vm.deal(address(controller), address(controller).balance - NAV_LOSS_ETH);
 
-        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
-        (liability, escrowed) = exitQueue.liveRedemptionOffsets();
-        assertEq(liability, 0);
-        assertEq(escrowed, 0);
+        vm.warp(sealedAt + exitQueue.MAX_BATCH_PROCESSING_TIME());
+        address attacker = makeAddr("attacker");
+        vm.deal(attacker, ENTER_ETH_DEPOSIT);
+        vm.prank(attacker);
+        bondingCurve.enter{value: ENTER_ETH_DEPOSIT}(1);
+        uint256 attackerTokens = eve.balanceOf(attacker);
+
+        vm.warp(sealedAt + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+        uint256 attackerValueAfterLapse = Math.convertAssets(attackerTokens, bondingCurve.eveBasePriceInETH());
+
+        assertLe(attackerValueAfterLapse, ENTER_ETH_DEPOSIT);
     }
 
     // ============ Helper Functions ============

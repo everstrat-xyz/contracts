@@ -162,11 +162,6 @@ interface IAMM {
     error AMMNAVUnderflow();
 
     /**
-     * @notice Escrowed EVE for in-window priced redemptions exceeds `totalSupply`.
-     */
-    error AMMEscrowExceedsSupply();
-
-    /**
      * @notice Caller is not whitelisted (see `Whitelist.isWhitelisted()`). Only gates
      * `enter()`/`enterWithInvite()` — `exit()` is never gated so users can always leave.
      */
@@ -187,15 +182,16 @@ interface IAMM {
 
     /**
      * @notice Gets the current base price per token in terms of ETH.
-     * @dev Uses live NAV / live supply: in-window priced ExitQueue liability and escrowed
-     *      EVE are excluded. Unpriced queued shares remain equity until `priceBatch`.
+     * @dev NAV / `totalSupply`. EVE queued for redemption (escrowed on the AMM) stays in both
+     *      until it is settled: a queued request is paid at this price in the transaction that
+     *      settles it, so it never becomes a fixed-price liability.
      * @return uint256 The base price of 1 EVE in ETH terms.
      */
     function eveBasePriceInETH() external view returns (uint256);
 
     /**
      * @notice Gets the current premium price per token in terms of ETH.
-     * @dev Same live NAV / live supply as `eveBasePriceInETH()`.
+     * @dev Same NAV / `totalSupply` as `eveBasePriceInETH()`.
      * @return uint256 The premium price of 1 EVE in ETH terms.
      */
     function evePremiumPriceInETH() external view returns (uint256);
@@ -250,10 +246,11 @@ interface IAMM {
 
     /**
      * @notice Function to redeem ETH by burning protocol tokens.
-     * Burning is priced at the live base price (NAV−L) / liveSupply, so EVE is always redeemed
+     * Burning is priced at the live base price NAV / supply, so EVE is always redeemed
      * against the assets backing it and the base price grows with supply as the
-     * bonding-curve premium is retained by remaining holders. Unpriced queued EVE stays
-     * in the denominator (cancellable equity).
+     * bonding-curve premium is retained by remaining holders. When the AMM cannot pay
+     * immediately the request is queued: the EVE is escrowed (it stays in supply, as equity)
+     * and is settled later at the base price live at that moment, subject to `_priceTolerance`.
      *
      * Requirements:
      * - Amount of requested ETH is positive
@@ -289,8 +286,10 @@ interface IAMM {
      * - Caller is the controller contract
      * @param _batchId ID of the redemption request batch to process.
      * @param _user User who requested the redemption.
+     * @param _evePrice Live EVE base price (ETH terms, 18 decimals) the request settles at,
+     * read by the Controller in the same transaction.
      */
-    function processRedemption(uint256 _batchId, address _user) external payable;
+    function processRedemption(uint256 _batchId, address _user, uint256 _evePrice) external payable;
 
     /**
      * @notice Function to claim a redemption for the given user.
