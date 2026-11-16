@@ -14,6 +14,7 @@ import {QueueKeeperExecutor} from "../../src/contracts/automation/QueueKeeperExe
 import {StrategyKeeperExecutor} from "../../src/contracts/automation/StrategyKeeperExecutor.sol";
 
 import {Auth} from "../../src/libraries/Auth.sol";
+import {Math} from "../../src/libraries/Math.sol";
 import {IKeeperExecutorBase} from "../../src/interfaces/automation/IKeeperExecutorBase.sol";
 import {IStrategyKeeperExecutor} from "../../src/interfaces/automation/IStrategyKeeperExecutor.sol";
 import {IRegistryClient} from "interfaces/IRegistryClient.sol";
@@ -36,6 +37,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
 
     uint256 public constant DEPOSIT_TO_STRATEGY = 9.5 ether;
     uint256 public constant EXIT_ETH = 1 ether;
+    uint256 public constant NAV_GAIN_ETH = 1 ether;
     uint256 public constant EXIT_LIQUIDITY_TARGET = 2 ether;
 
     uint8 public constant DEPOSIT_WEIGHT = 100;
@@ -144,10 +146,10 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         vm.stopPrank();
     }
 
-    /// @dev `priceBatch` is Controller/KEEPER-gated; the strategy executor already holds the role.
-    function _priceQueuedBatch() internal {
+    /// @dev `sealBatch` is Controller/KEEPER-gated; the strategy executor already holds the role.
+    function _sealQueuedBatch() internal {
         vm.prank(address(executor));
-        controller.priceBatch();
+        controller.sealBatch();
     }
 
     function _enablePerformanceFees() internal {
@@ -280,9 +282,8 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         executor.perform(uint8(IStrategyKeeperExecutor.StrategyAction.None));
     }
 
-    function test_MaxBatchScan_MatchesExitQueueLiveCap() public view {
-        assertEq(executor.MAX_BATCH_SCAN(), exitQueue.MAX_LIVE_PRICED_BATCHES());
-        assertEq(queueExecutor.MAX_BATCH_SCAN(), exitQueue.MAX_LIVE_PRICED_BATCHES());
+    function test_MaxBatchScan_MatchesQueueExecutor() public view {
+        assertEq(executor.MAX_BATCH_SCAN(), queueExecutor.MAX_BATCH_SCAN());
     }
 
     // ============ Rebalance ============
@@ -386,7 +387,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     function test_WithdrawShortfall_PullsFromStrategies() public {
         _deployCapitalToStrategy();
         _queueExit(user, EXIT_ETH);
-        _priceQueuedBatch();
+        _sealQueuedBatch();
 
         uint256 needsETH = executor.pendingRedemptionNeedsETH();
         uint256 controllerBalance = address(controller).balance;
@@ -406,7 +407,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         assertEq(address(controller).balance, controllerBalance + shortfall);
     }
 
-    function test_WithdrawShortfall_NoUpkeepWhenUnpriced() public {
+    function test_WithdrawShortfall_NoUpkeepWhenUnsealed() public {
         _deployCapitalToStrategy();
         _queueExit(user, EXIT_ETH);
         assertEq(executor.pendingRedemptionNeedsETH(), 0);
@@ -416,7 +417,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     function test_WithdrawShortfall_NoUpkeepWhenCovered() public {
         // Controller still holds the full bootstrap deposit — nothing to pull.
         _queueExit(user, EXIT_ETH);
-        _priceQueuedBatch();
+        _sealQueuedBatch();
         assertLe(executor.pendingRedemptionNeedsETH(), address(controller).balance);
         _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
     }
@@ -569,15 +570,42 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         assertEq(executor.pendingRedemptionNeedsETH(), 0);
     }
 
-    function test_PendingRedemptionNeedsETH_DoesNotCountUnpricedCurrentBatch() public {
+    function test_PendingRedemptionNeedsETH_DoesNotCountUnsealedCurrentBatch() public {
         _queueExit(user, EXIT_ETH);
         assertEq(executor.pendingRedemptionNeedsETH(), 0);
     }
 
-    function test_PendingRedemptionNeedsETH_CountsPricedInWindowBatch() public {
+    function test_PendingRedemptionNeedsETH_CountsSealedInWindowBatch() public {
         _queueExit(user, EXIT_ETH);
-        _priceQueuedBatch();
+        _sealQueuedBatch();
         assertApproxEqAbs(executor.pendingRedemptionNeedsETH(), EXIT_ETH, 1);
+    }
+
+    /// @dev Sealed batches settle at the live price, so the reserve tracks NAV until they are
+    ///      paid: a NAV gain after sealing raises what the Controller must hold (audit G1).
+    function test_PendingRedemptionNeedsETH_TracksLivePriceAfterSeal() public {
+        uint256 batchId = _queueExit(user, EXIT_ETH);
+        _sealQueuedBatch();
+        uint256 needsBefore = executor.pendingRedemptionNeedsETH();
+        uint256 priceBefore = amm.eveBasePriceInETH();
+
+        vm.deal(address(controller), address(controller).balance + NAV_GAIN_ETH);
+
+        uint256 priceAfter = amm.eveBasePriceInETH();
+        assertGt(priceAfter, priceBefore);
+        (,,, uint256 tokensToBurn,) = exitQueue.requestInfo(batchId, user);
+        assertEq(executor.pendingRedemptionNeedsETH(), Math.convertAssets(tokensToBurn, priceAfter));
+        assertGt(executor.pendingRedemptionNeedsETH(), needsBefore);
+    }
+
+    function test_PendingRedemptionNeedsETH_ZeroAfterWindowLapses() public {
+        _queueExit(user, EXIT_ETH);
+        _sealQueuedBatch();
+        assertGt(executor.pendingRedemptionNeedsETH(), 0);
+
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+
+        assertEq(executor.pendingRedemptionNeedsETH(), 0);
     }
 
     /// @dev The strategy executor reads the cursor from the registered queue executor — the
@@ -587,9 +615,9 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         assertEq(queueExecutor.nextLiveBatchIdToProcess(), exitQueue.currentBatchId());
         assertEq(executor.pendingRedemptionNeedsETH(), 0);
 
-        uint256 pricedBatchId = exitQueue.currentBatchId();
-        _priceQueuedBatch();
-        assertEq(queueExecutor.nextLiveBatchIdToProcess(), pricedBatchId);
+        uint256 sealedBatchId = exitQueue.currentBatchId();
+        _sealQueuedBatch();
+        assertEq(queueExecutor.nextLiveBatchIdToProcess(), sealedBatchId);
         assertGt(executor.pendingRedemptionNeedsETH(), 0);
     }
 

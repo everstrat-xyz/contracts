@@ -152,9 +152,9 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         uint256 nav = _navInETH();
 
         // Burning settles at the base (NAV) price, so EVE is always redeemed against
-        // the assets backing it. Live supply excludes in-window priced escrow (NAV is
-        // already net of that liability via StrategyManager).
-        uint256 basePrice = _basePriceFromNAV(nav, _liveSupply(totalSupply));
+        // the assets backing it. Queued EVE (escrowed on this contract) is still in
+        // `totalSupply` and still equity: it settles at the live price when it is paid.
+        uint256 basePrice = _basePriceFromNAV(nav, totalSupply);
 
         uint256 evePrice = basePrice;
 
@@ -213,7 +213,7 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
     /**
      * @inheritdoc IAMM
      */
-    function processRedemption(uint256 _batchId, address _user)
+    function processRedemption(uint256 _batchId, address _user, uint256 _evePrice)
         external
         payable
         onlyAuthContract(Auth.CONTROLLER)
@@ -223,7 +223,7 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         ExitQueue exitQueue = ExitQueue(_registry.exitQueue());
         EVE eve = EVE(_registry.eve());
 
-        exitQueue.pullRequest(_batchId, _user);
+        exitQueue.pullRequest(_batchId, _user, _evePrice);
         (, bool closedDueToSlippage,, uint256 tokensToBurn,) = exitQueue.requestInfo(_batchId, _user);
 
         uint256 ethToRedeem = 0;
@@ -232,9 +232,10 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         } else {
             eve.burn(tokensToBurn);
 
-            (, uint256 evePrice,,,) = exitQueue.batchInfo(_batchId);
-
-            ethToRedeem = _calculateETHToTransfer(tokensToBurn, evePrice);
+            // Settles at the live base price the Controller read for this transaction — the
+            // same price an immediate `exit()` would get. Burning `tokensToBurn` against
+            // `tokensToBurn * price` of NAV leaves the price of the remaining EVE unchanged.
+            ethToRedeem = _calculateETHToTransfer(tokensToBurn, _evePrice);
             if (msg.value < ethToRedeem) revert AMMInsufficientSentETH();
 
             claimableBalances[_user] += ethToRedeem;
@@ -291,7 +292,7 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
      */
     function eveBasePriceInETH() external view returns (uint256) {
         uint256 supply = EVE(_registry.eve()).totalSupply();
-        return _basePriceFromNAV(_navInETH(), _liveSupply(supply));
+        return _basePriceFromNAV(_navInETH(), supply);
     }
 
     /**
@@ -299,21 +300,21 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
      */
     function evePremiumPriceInETH() external view returns (uint256) {
         uint256 supply = EVE(_registry.eve()).totalSupply();
-        return _premiumPriceFromNAV(_navInETH(), _liveSupply(supply));
+        return _premiumPriceFromNAV(_navInETH(), supply);
     }
 
     /**
      * @inheritdoc IAMM
      */
     function eveBasePriceInUSD() external view returns (uint256) {
-        return _eveBasePriceInUSD(_liveSupply(EVE(_registry.eve()).totalSupply()));
+        return _eveBasePriceInUSD(EVE(_registry.eve()).totalSupply());
     }
 
     /**
      * @inheritdoc IAMM
      */
     function evePremiumPriceInUSD() external view returns (uint256) {
-        return _evePremiumPriceInUSD(_liveSupply(EVE(_registry.eve()).totalSupply()));
+        return _evePremiumPriceInUSD(EVE(_registry.eve()).totalSupply());
     }
 
     // ============ Internal Functions ============
@@ -341,7 +342,7 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
         uint256 totalSupply = eve.totalSupply();
         uint256 nav = _navInETHPendingTransfer();
 
-        uint256 evePrice = _premiumPriceFromNAV(nav, _liveSupply(totalSupply));
+        uint256 evePrice = _premiumPriceFromNAV(nav, totalSupply);
         uint256 tokensToMint = _ethToProtocolTokens(msg.value, evePrice);
         if (tokensToMint < _minTokensToMint) revert AMMInsufficientDeposit();
 
@@ -474,16 +475,6 @@ contract AMM is IAMM, RegistryClient, Pausable, ReentrancyGuard {
      */
     function _freeBalance() internal view returns (uint256) {
         return address(this).balance - lockedForClaims;
-    }
-
-    /**
-     * @dev EVE supply participating in live share price: `totalSupply` minus in-window
-     * priced escrow. Unpriced queued tokens stay in the denominator (cancellable equity).
-     */
-    function _liveSupply(uint256 _totalSupply) internal view returns (uint256) {
-        (, uint256 escrowed) = ExitQueue(payable(_registry.exitQueue())).liveRedemptionOffsets();
-        if (_totalSupply < escrowed) revert AMMEscrowExceedsSupply();
-        return _totalSupply - escrowed;
     }
 
     /**

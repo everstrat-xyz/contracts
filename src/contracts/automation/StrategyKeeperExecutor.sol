@@ -48,11 +48,11 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
     using Math for uint256;
     using Auth for IRegistry;
 
-    /// @dev Gas-bounded scan of priced batches. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
-    ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
-    ///      desync the keeper. A DoS bound, not cadence — `minBatchAge` vs
-    ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping batches.
-    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
+    /// @dev Gas-bounded scan of sealed batches. Bound to `ExitQueueLimits.MAX_BATCH_SCAN` (shared
+    ///      with `QueueKeeperExecutor`) so a change cannot silently desync the two keepers.
+    ///      A DoS bound, not cadence — `minBatchAge` vs `MAX_BATCH_PROCESSING_TIME` implies
+    ///      ~3 overlapping batches.
+    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_BATCH_SCAN;
     uint256 public constant MAX_USERS_COST_SCAN = 50;
 
     uint256 private constant _DEFAULT_MIN_DEPOSIT_ETH = 0.1 ether;
@@ -317,28 +317,36 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         return shortfall < excess ? shortfall : excess;
     }
 
-    /// @dev ETH the Controller must hold to settle in-window priced batches. Matches
-    ///      share-price accounting: the current unpriced batch is still cancellable
-    ///      equity (`liveRedemptionOffsets` is 0), so counting it here would let a
-    ///      queue-then-cancel loop pull LP (`WithdrawShortfall`) and re-deposit
-    ///      (`DepositExcess`). After `priceBatch` the batch is in
-    ///      `[cursor, currentBatchId)` and is costed at `finalEvePrice`.
+    /// @dev ETH the Controller must hold to settle in-window sealed batches, costed at the
+    ///      live EVE base price — the price they will actually settle at, so the figure moves
+    ///      with NAV until they are paid. The current unsealed batch is still cancellable, so
+    ///      counting it here would let a queue-then-cancel loop pull LP (`WithdrawShortfall`)
+    ///      and re-deposit (`DepositExcess`). After `sealBatch` the batch is in
+    ///      `[cursor, currentBatchId)`. The price is read only when that range is non-empty,
+    ///      so an idle queue never touches NAV.
     function _pendingRedemptionNeedsETH(IRegistry _registry) internal view returns (uint256 needsETH) {
         IExitQueue queue = IExitQueue(_registry.exitQueue());
         uint256 currentBatchId = queue.currentBatchId();
 
         uint256 cursor = IQueueKeeperExecutor(_registry.queueKeeperExecutor()).nextLiveBatchIdToProcess();
+        if (cursor >= currentBatchId) return 0;
+
+        uint256 evePrice = IAMM(_registry.amm()).eveBasePriceInETH();
 
         uint256 scanLimit = cursor + MAX_BATCH_SCAN;
         for (uint256 batchId = cursor; batchId < currentBatchId && batchId < scanLimit; batchId++) {
-            needsETH += _batchSettlementCost(queue, batchId);
+            needsETH += _batchSettlementCost(queue, batchId, evePrice);
         }
     }
 
-    function _batchSettlementCost(IExitQueue _queue, uint256 _batchId) internal view returns (uint256 cost) {
-        (bool canBeProcessed, uint256 finalEvePrice,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
+    function _batchSettlementCost(IExitQueue _queue, uint256 _batchId, uint256 _evePrice)
+        internal
+        view
+        returns (uint256 cost)
+    {
+        (bool canBeProcessed,,, uint256 sealedAt) = _queue.batchInfo(_batchId);
         if (!canBeProcessed) return 0;
-        if (pricedAt > 0 && block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
+        if (sealedAt > 0 && block.timestamp > sealedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
 
         uint256 count = _queue.unprocessedUsersCount(_batchId);
         if (count == 0) return 0;
@@ -350,8 +358,8 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
             (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
                 _queue.requestInfo(_batchId, users[i]);
 
-            if (!finalEvePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)) {
-                cost += tokensToBurn.convertAssets(finalEvePrice);
+            if (!_evePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)) {
+                cost += tokensToBurn.convertAssets(_evePrice);
             }
         }
     }

@@ -265,11 +265,11 @@ contract ControllerTest is ProtocolTestBase {
         controller.provideExitLiquidity(LIQUIDITY_AMOUNT);
     }
 
-    function test_PriceBatch_WhenPaused_Reverts() public {
+    function test_SealBatch_WhenPaused_Reverts() public {
         controller.pause();
 
         vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
-        controller.priceBatch();
+        controller.sealBatch();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -301,7 +301,7 @@ contract ControllerTest is ProtocolTestBase {
         vm.stopPrank();
 
         assertGt(batchId, 0);
-        controller.priceBatch();
+        controller.sealBatch();
         controller.processRequests(batchId);
         assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
 

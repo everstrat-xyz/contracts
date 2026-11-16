@@ -82,11 +82,10 @@ contract StrategyManagerTest is ProtocolTestBase {
     /// @dev `amm.enter` in setUp bootstraps the AMM and forwards this ETH to the Controller,
     ///      which `totalNAVInETH()` always counts as in-flight protocol NAV.
     uint256 internal constant BOOTSTRAP_CONTROLLER_ETH = 1 ether;
-    uint256 internal constant PRICED_QUEUE_EXIT_ETH = 0.5 ether;
-    uint256 internal constant UNPRICED_QUEUE_EXIT_ETH = 0.1 ether;
+    uint256 internal constant SEALED_QUEUE_EXIT_ETH = 0.5 ether;
     uint256 internal constant SECOND_USER_DEPOSIT = 1 ether;
     uint256 internal constant LATE_ENTER_ETH = 0.1 ether;
-    uint256 internal constant LEFTOVER_EXIT_ETH = 0.01 ether;
+    uint256 internal constant POST_DROP_CONTROLLER_ETH = 0.1 ether;
 
     event StrategyAdded(address indexed strategy);
 
@@ -967,132 +966,100 @@ contract StrategyManagerTest is ProtocolTestBase {
         assertEq(totalNAV, INITIAL_NAV_1 + 2 ether + BOOTSTRAP_CONTROLLER_ETH);
     }
 
-    function test_TotalNAVInETH_DoesNotDeductUnpricedQueue() public {
+    function test_TotalNAVInETH_DoesNotDeductUnsealedQueue() public {
         uint256 navBefore = strategyManager.totalNAVInETH();
-        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
 
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertEq(liability, 0);
-        assertEq(escrowed, 0);
         assertEq(strategyManager.totalNAVInETH(), navBefore);
     }
 
-    function test_TotalNAVInETH_DeductsPricedQueueLiability() public {
+    /// @dev Audit G1: a sealed batch is not a fixed-price liability. Its EVE stays equity and
+    ///      settles at the live price, so NAV carries no deduction for it at any point.
+    function test_TotalNAVInETH_DoesNotDeductSealedQueue() public {
         uint256 navBefore = strategyManager.totalNAVInETH();
-        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
-        controllerContract.priceBatch();
+        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
+        controllerContract.sealBatch();
 
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertGt(liability, 0);
-        assertGt(escrowed, 0);
-        assertEq(strategyManager.totalNAVInETH(), navBefore - liability);
-    }
-
-    function test_TotalNAVInETH_PricedQueueLiabilityLapsesAfterExpiry() public {
-        uint256 navBefore = strategyManager.totalNAVInETH();
-        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
-        controllerContract.priceBatch();
-
-        (uint256 liability,) = exitQueue.liveRedemptionOffsets();
-        assertEq(strategyManager.totalNAVInETH(), navBefore - liability);
-
-        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
-
-        (uint256 liabilityAfter, uint256 escrowedAfter) = exitQueue.liveRedemptionOffsets();
-        assertEq(liabilityAfter, 0);
-        assertEq(escrowedAfter, 0);
         assertEq(strategyManager.totalNAVInETH(), navBefore);
     }
 
-    function test_TotalNAVInETH_RevertsWhenQueuedLiabilityExceedsNAV() public {
-        uint256 grossNav = strategyManager.totalNAVInETH();
-        vm.mockCall(
-            address(exitQueue),
-            abi.encodeWithSelector(IExitQueue.liveRedemptionOffsets.selector),
-            abi.encode(grossNav + 1, uint256(0))
-        );
+    /// @dev Audit G1: with nothing deducted there is nothing to re-add when the processing
+    ///      window lapses — NAV is identical in the last second of the window and the first
+    ///      second after it.
+    function test_TotalNAVInETH_UnchangedWhenSealedQueueWindowLapses() public {
+        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
+        controllerContract.sealBatch();
 
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        strategyManager.totalNAVInETH();
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME());
+        uint256 navLastSecondOfWindow = strategyManager.totalNAVInETH();
+
+        vm.warp(block.timestamp + 1);
+        assertEq(strategyManager.totalNAVInETH(), navLastSecondOfWindow);
     }
 
-    function test_TotalNAVInETH_QueuedLiabilityFreeze_BlastRadiusAndEscapeHatch() public {
+    /// @dev The fixed-price model froze NAV (and with it enter / exit / pricing) for up to the
+    ///      whole processing window when NAV fell below a sealed batch's locked-in claim
+    ///      (FREEZE_RUNBOOK scenario 10). Sealed EVE now floats with NAV, so the same NAV drop
+    ///      just reprices everyone and the protocol keeps working.
+    function test_TotalNAVInETH_NavDropAfterSealDoesNotFreezePricing() public {
         vm.deal(user1, SECOND_USER_DEPOSIT);
         vm.prank(user1);
         amm.enter{value: SECOND_USER_DEPOSIT}(1);
 
-        uint256 pricedBatchId = _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
-        controllerContract.priceBatch();
-        uint256 unpricedBatchId = _queueExitAs(user1, UNPRICED_QUEUE_EXIT_ETH);
-        assertGt(unpricedBatchId, pricedBatchId);
+        uint256 sealedBatchId = _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
+        controllerContract.sealBatch();
+        uint256 priceAtSeal = amm.eveBasePriceInETH();
 
-        // Simulate a post-price NAV drop (IL / market move): wipe in-flight ETH so
-        // gross NAV < locked-in liability. Documented freeze — FREEZE_RUNBOOK scenario 10.
-        vm.deal(controller, 0);
+        // Post-seal NAV drop (IL / market move): wipe most in-flight ETH.
+        vm.deal(controller, POST_DROP_CONTROLLER_ETH);
         vm.deal(address(strategyManager), 0);
         vm.deal(address(amm), 0);
 
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        strategyManager.totalNAVInETH();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        strategyManager.totalNAVInUSD();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.eveBasePriceInETH();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        assertEq(strategyManager.totalNAVInETH(), POST_DROP_CONTROLLER_ETH);
+        uint256 priceAfterDrop = amm.eveBasePriceInETH();
+        assertGt(priceAfterDrop, 0);
+        assertLt(priceAfterDrop, priceAtSeal);
         amm.evePremiumPriceInETH();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
         amm.eveBasePriceInUSD();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.evePremiumPriceInUSD();
 
         address lateEntrant = makeAddr("lateEntrant");
         vm.deal(lateEntrant, LATE_ENTER_ETH);
         vm.prank(lateEntrant);
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
         amm.enter{value: LATE_ENTER_ETH}(1);
+        assertGt(token.balanceOf(lateEntrant), 0);
 
-        uint256 leftover = token.balanceOf(address(this));
-        token.approve(address(amm), leftover);
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.exit(LEFTOVER_EXIT_ETH, leftover, 0);
-
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        controllerContract.priceBatch();
-
-        // Unpriced requests do not read NAV — cancel still works during the freeze.
-        vm.prank(user1);
-        amm.cancelRedemption(unpricedBatchId);
-        assertGt(token.balanceOf(user1), 0);
-
-        // Priced in-window requests cannot close; users wait out the 3-day window.
+        // The sealed request is still locked for its window, and settles at the live price:
+        // the queued user's zero tolerance closes it and returns their EVE.
         vm.expectRevert(IExitQueue.ExitQueueRequestCannotBeClosed.selector);
-        amm.cancelRedemption(pricedBatchId);
+        amm.cancelRedemption(sealedBatchId);
 
-        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertEq(liability, 0);
-        assertEq(escrowed, 0);
-        strategyManager.totalNAVInETH();
-
-        amm.cancelRedemption(pricedBatchId);
+        uint256 balanceBefore = token.balanceOf(address(this));
+        controllerContract.processRequest(sealedBatchId, address(this));
+        (bool processed, bool closedDueToSlippage,,,) = exitQueue.requestInfo(sealedBatchId, address(this));
+        assertTrue(processed);
+        assertTrue(closedDueToSlippage);
+        assertGt(token.balanceOf(address(this)), balanceBefore);
     }
 
-    function test_Harvest_RevertsWhenQueuedLiabilityExceedsNAV() public {
+    function test_Harvest_MintsAgainstFullSupplyWithSealedQueue() public {
         vm.prank(admin);
         strategyManager.addStrategy(strategy1, 80, 70);
         _configurePerformanceFees();
         _accrueMockLpFees(mockStrategy1, LP_FEE_BASE_1);
 
-        uint256 grossNav = strategyManager.totalNAVInETH();
-        vm.mockCall(
-            address(exitQueue),
-            abi.encodeWithSelector(IExitQueue.liveRedemptionOffsets.selector),
-            abi.encode(grossNav + 1, uint256(0))
-        );
+        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
+        controllerContract.sealBatch();
+
+        // Fee mint dilutes every EVE, queued or not: dS = fee * supply / (NAV - fee).
+        uint256 supply = token.totalSupply();
+        uint256 nav = strategyManager.totalNAVInETH();
+        uint256 feeETH = strategyManager.pendingPerformanceFeeInETH(strategy1);
+        assertGt(feeETH, 0);
 
         vm.prank(controller);
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        strategyManager.harvestPerformanceFeeFromStrategy(strategy1);
+        (uint256 eveMinted,) = strategyManager.harvestPerformanceFeeFromStrategy(strategy1);
+
+        assertEq(eveMinted, feeETH * supply / (nav - feeETH));
     }
 
     /*//////////////////////////////////////////////////////////////
