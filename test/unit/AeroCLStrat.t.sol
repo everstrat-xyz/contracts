@@ -5,6 +5,7 @@ pragma solidity ^0.8.30;
 
 import {AeroCLStrat} from "../../src/contracts/strategies/AeroCLStrat.sol";
 import {UniCLStrat} from "../../src/contracts/strategies/UniCLStrat.sol";
+import {CLStrat} from "../../src/contracts/strategies/CLStrat.sol";
 import {IUniCLStrat} from "../../src/interfaces/strategies/IUniCLStrat.sol";
 import {IStrategy} from "../../src/interfaces/IStrategy.sol";
 import {UniCLStratTestBase} from "../helpers/UniCLStratTestBase.sol";
@@ -13,10 +14,10 @@ import {MockAeroCLPool, MockAeroCLFactory} from "../mocks/AeroCLStratMocks.sol";
 
 /**
  * @title AeroCLStratTest
- * @notice Unit tests for AeroCLStrat. Strategy mechanics are shared with UniCLStrat (same
- *         `UniCLStratLib`) and covered exhaustively by `UniCLStrat.t.sol`; this suite targets the
+ * @notice Unit tests for AeroCLStrat. Strategy mechanics use the same CLStrat base and libraries
+ *         as UniCLStrat and are covered by `UniCLStrat.t.sol`; this suite targets the
  *         Aero-specific surface — the 6-field Slipstream `slot0`, tick-spacing-keyed factory
- *         provenance, and the locally inlined observation-cardinality gate — and smoke-tests each
+ *         provenance, and the shared observation-cardinality gate — and smoke-tests each
  *         strategy action through that `slot0` path.
  * @dev Reuses `UniCLStratTestBase` for registry / oracle / converter / token wiring; the Aero pool
  *      and factory are deployed alongside, on the same WETH / paired-token pair.
@@ -193,8 +194,8 @@ contract AeroCLStratTest is UniCLStratTestBase {
 
     // ============ TWAP / cardinality gate parity with UniCLStrat ============
 
-    /// @dev AeroCLStrat inlines the gate (`_requireTwapOracle`) that UniCLStrat runs through
-    ///      `UniCLStratLib.requireTwapOracle`. Both pools get the same lookback and cardinality, and
+    /// @dev Both strategies use CLPoolLib's gate with different slot0 decoders.
+    ///      Both pools get the same lookback and cardinality, and
     ///      both setters must agree: same success, or the same revert data (floors / ceiling
     ///      `UniCLStratInvalidConfig`, `UniCLStratPoolTWAPNotAvailable`,
     ///      `UniCLStratInsufficientObservationCardinality(have, need)`).
@@ -214,8 +215,8 @@ contract AeroCLStratTest is UniCLStratTestBase {
         aeroPool.setMaxObserveSecondsAgo(_maxObserveSecondsAgo);
         aeroPool.setObservationCardinality(_cardinality);
 
-        _assertSameOutcome(abi.encodeCall(UniCLStrat.setTwapInterval, (_interval)));
-        _assertSameOutcome(abi.encodeCall(UniCLStrat.setShortTwapInterval, (_shortInterval)));
+        _assertSameOutcome(abi.encodeCall(CLStrat.setTwapInterval, (_interval)));
+        _assertSameOutcome(abi.encodeCall(CLStrat.setShortTwapInterval, (_shortInterval)));
         assertEq(aeroStrategy.twapInterval(), strategy.twapInterval(), "twapInterval");
         assertEq(aeroStrategy.shortTwapInterval(), strategy.shortTwapInterval(), "shortTwapInterval");
     }

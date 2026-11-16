@@ -7,18 +7,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {FixedPoint96} from "../integrations/uniswap/FixedPoint96.sol";
 import {FullMath} from "../integrations/uniswap/FullMath.sol";
-import {LiquidityAmounts} from "../integrations/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "../integrations/uniswap/TickMath.sol";
-import {TickUtils} from "../integrations/uniswap/TickUtils.sol";
 
 import {IConverter} from "../../interfaces/IConverter.sol";
 import {IOracle} from "../../interfaces/IOracle.sol";
 import {IUniCLStrat} from "../../interfaces/strategies/IUniCLStrat.sol";
-import {IUniswapV3Pool} from "../../interfaces/integrations/uniswap/IUniswapV3Pool.sol";
 
 /**
- * @title UniCLStratLib
- * @notice Externally linked library holding UniCLStrat's oracle-bounded swap execution and its
+ * @title CLStratLib
+ * @notice Shared externally linked library holding oracle-bounded swap execution and
  *         inventory-ratio math, so the strategy stays under the EIP-170 runtime size limit.
  * @dev Entry points are `public` on purpose — `internal` library functions are inlined into the
  *      caller and would not shrink the strategy. Public library functions run via DELEGATECALL in
@@ -27,7 +24,7 @@ import {IUniswapV3Pool} from "../../interfaces/integrations/uniswap/IUniswapV3Po
  *      the `IUniCLStrat` errors unchanged. The library holds no state and no funds, and its address
  *      is fixed at link time, so it adds no trust surface beyond the strategy bytecode itself.
  */
-library UniCLStratLib {
+library CLStratLib {
     using SafeERC20 for IERC20Metadata;
 
     /// @notice Swap routing / bounds snapshot read from strategy storage at call time.
@@ -38,24 +35,6 @@ library UniCLStratLib {
         address weth;
         address pairedToken;
         uint256 slippageBps;
-    }
-
-    /**
-     * @notice Strategy-local LP-fee accounting, in native pool-token amounts.
-     * @dev `earned*`: lifetime LP fees, advanced by accrue passes (settle / remove-collect /
-     *      emergency exit), not by `sync()`. `charged*`: already charged via
-     *      `settlePerformanceFee`, or written off on emergency exit. `snapshot*`: aggregate
-     *      `tokensOwed` at the last accrue pass — pending/settle include the live
-     *      `tokensOwed - snapshot` delta without a sync flush, and the best-effort accrue falls
-     *      back to it when a `positions` read reverts.
-     */
-    struct LpFeeState {
-        uint256 earned0;
-        uint256 earned1;
-        uint256 charged0;
-        uint256 charged1;
-        uint256 snapshot0;
-        uint256 snapshot1;
     }
 
     uint256 internal constant BASIS_POINTS = 10_000;
@@ -452,72 +431,6 @@ library UniCLStratLib {
         }
     }
 
-    // ============ Partial Burn ============
-
-    /**
-     * @notice Burns (and collects) roughly `_value` ETH worth of pool inventory: `_alt` first (it
-     *         is out of range and earns nothing), then `_main`.
-     * @dev Pokes and accrues LP fees first, and re-bases the fee snapshot on the remaining
-     *      aggregate `tokensOwed` after, since a burn credits principal to `tokensOwed`. Positions
-     *      are valued at `_twapSqrtPriceX96` (including owed tokens) and priced via the Oracle.
-     *      Each burn rounds up and is capped at the whole position; everything owed is collected.
-     */
-    function decreaseLiquidityForValue(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt,
-        SwapConfig memory _config,
-        address _token0,
-        address _token1,
-        uint256 _value,
-        uint160 _twapSqrtPriceX96
-    ) public {
-        // Poke + accrue before any burn: a burn credits principal to `tokensOwed`, which must
-        // never be mistaken for LP fees.
-        _pokePositions(_pool, _main, _alt);
-        _accrueLpFees(_pool, _fees, _main, _alt);
-
-        uint256 _remaining = _burnForValue(_pool, _config, _token0, _token1, _alt, _value, _twapSqrtPriceX96);
-        if (_remaining > 0) _burnForValue(_pool, _config, _token0, _token1, _main, _remaining, _twapSqrtPriceX96);
-
-        _refreshSnapshot(_pool, _fees, _main, _alt);
-    }
-
-    function _burnForValue(
-        IUniswapV3Pool _pool,
-        SwapConfig memory _config,
-        address _token0,
-        address _token1,
-        IUniCLStrat.Position memory _position,
-        uint256 _value,
-        uint160 _twapSqrtPriceX96
-    ) private returns (uint256 _remaining) {
-        if (
-            _position.tickLower >= _position.tickUpper || _position.tickLower < TickMath.MIN_TICK
-                || _position.tickUpper > TickMath.MAX_TICK
-        ) return _value;
-
-        (uint128 _liquidity,,,,) =
-            _pool.positions(keccak256(abi.encodePacked(address(this), _position.tickLower, _position.tickUpper)));
-        if (_liquidity == 0) return _value;
-
-        (uint256 _amount0, uint256 _amount1) = _positionAmounts(_pool, _position, _twapSqrtPriceX96);
-        uint256 _positionValue =
-            _tokenValueInETH(_config, _token0, _amount0) + _tokenValueInETH(_config, _token1, _amount1);
-
-        uint128 _burnLiquidity = _liquidity;
-        if (_positionValue > _value) {
-            uint256 _share = FullMath.mulDiv(_liquidity, _value, _positionValue) + 1;
-            if (_share < _liquidity) _burnLiquidity = uint128(_share);
-        } else {
-            _remaining = _value - _positionValue;
-        }
-
-        _pool.burn(_position.tickLower, _position.tickUpper, _burnLiquidity);
-        _pool.collect(address(this), _position.tickLower, _position.tickUpper, type(uint128).max, type(uint128).max);
-    }
-
     // ============ Configuration Validation ============
 
     /// @notice Reverts unless the adapter/routes are valid WETH <-> paired-token routes on the Converter.
@@ -545,210 +458,6 @@ library UniCLStratLib {
         if (_tokenIn != _pairedToken || _tokenOut != _weth) revert IUniCLStrat.UniCLStratInvalidRouteConfig();
     }
 
-    /**
-     * @notice Constructor / setter gate for a TWAP window. `observe` succeeding is necessary so
-     *         `navInETH` will compute; in-use cardinality (`slot0.observationCardinality`, not Next)
-     *         covering `ceil(_interval / _maxBlockSeconds)` slots, floored at `_minCardinality`, is
-     *         necessary so the TWAP is not a one-observation spot extrapolation. Neither suffices alone.
-     */
-    function requireTwapOracle(IUniswapV3Pool _pool, uint32 _interval, uint16 _minCardinality, uint32 _maxBlockSeconds)
-        public
-        view
-    {
-        (bool _available,) = TickUtils.tryMeanTick(_pool, _interval);
-        if (!_available) revert IUniCLStrat.UniCLStratPoolTWAPNotAvailable();
-
-        uint256 _required = (uint256(_interval) + _maxBlockSeconds - 1) / _maxBlockSeconds;
-        if (_required < _minCardinality) _required = _minCardinality;
-        // Uniswap's ring is uint16; a window that needs more slots cannot be densely served by
-        // any V3 pool. Callers must reject `> MAX_TWAP_INTERVAL` first.
-        if (_required > type(uint16).max) revert IUniCLStrat.UniCLStratInvalidConfig();
-
-        (,,, uint16 _cardinality,,,) = _pool.slot0();
-        if (_cardinality < _required) {
-            revert IUniCLStrat.UniCLStratInsufficientObservationCardinality(_cardinality, uint16(_required));
-        }
-    }
-
-    // ============ Liquidity Management & LP-Fee Accounting ============
-
-    /// @notice Pokes both positions (`burn(…, 0)`) so accrued fees materialize in `tokensOwed`.
-    function pokePositions(IUniswapV3Pool _pool, IUniCLStrat.Position storage _main, IUniCLStrat.Position storage _alt)
-        public
-    {
-        _pokePositions(_pool, _main, _alt);
-    }
-
-    /**
-     * @notice Removes all liquidity from both positions and collects everything owed.
-     * @dev Poke before accruing so fee growth since the last update is folded into `tokensOwed`.
-     *      Accrue before collect so the delta is locked into `earned*` before owed is zeroed (the
-     *      pending view's live delta would otherwise be lost). Accruing after a full burn would
-     *      also pick up withdrawn principal briefly sitting in `tokensOwed` and inflate the fee base.
-     */
-    function removeAllLiquidity(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt
-    ) public {
-        _pokePositions(_pool, _main, _alt);
-        _accrueLpFees(_pool, _fees, _main, _alt);
-        _removePosition(_pool, _main);
-        _removePosition(_pool, _alt);
-        _fees.snapshot0 = 0;
-        _fees.snapshot1 = 0;
-    }
-
-    /// @notice Removes the alt position entirely (poke → accrue → burn → collect → re-base snapshot).
-    function removeAltLiquidity(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt
-    ) public {
-        _pokePositions(_pool, _main, _alt);
-        _accrueLpFees(_pool, _fees, _main, _alt);
-        _removePosition(_pool, _alt);
-        _refreshSnapshot(_pool, _fees, _main, _alt);
-    }
-
-    /**
-     * @notice Flushes `tokensOwed - snapshot` into `earned*`, advances the snapshot, and returns
-     *         the uncharged amounts. Required before collect and before settle charges.
-     */
-    function accrueLpFees(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt
-    ) public returns (uint256 _uncharged0, uint256 _uncharged1) {
-        _accrueLpFees(_pool, _fees, _main, _alt);
-        return (_fees.earned0 - _fees.charged0, _fees.earned1 - _fees.charged1);
-    }
-
-    /**
-     * @notice Writes off pending LP fees (emergency exit): best-effort accrue, then charged = earned.
-     * @dev On a degraded pool the owed read falls back to the snapshot, so accrue is a no-op and
-     *      this cannot revert. In-pool fees at reset time (including fees already charged via
-     *      settle, which leaves tokens in-pool) become wind-down value and are never charged again
-     *      on resume. Zeroing the counters instead would let the `tokensOwed - snapshot(0)` delta
-     *      re-accrue already-charged fees as freshly earned, double-charging them at the next
-     *      settle. Any unread live growth above the snapshot stays feeable on resume.
-     */
-    function resetLpFeeAccounting(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt
-    ) public {
-        (bool _ok, uint256 _current0, uint256 _current1) = _tryLpFeesOwed(_pool, _main, _alt);
-        if (_ok) _accrueFrom(_fees, _current0, _current1);
-        _fees.charged0 = _fees.earned0;
-        _fees.charged1 = _fees.earned1;
-    }
-
-    /**
-     * @notice Uncharged LP fees including the live `tokensOwed - snapshot` delta, so pending/settle
-     *         see fees materialized since the last accrue without a sync flush (sync is poke-only).
-     */
-    function unchargedLpFeeAmounts(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt
-    ) public view returns (uint256 _uncharged0, uint256 _uncharged1) {
-        (uint256 _current0, uint256 _current1) = _lpFeesOwed(_pool, _main, _alt);
-        uint256 _earned0 = _fees.earned0;
-        uint256 _earned1 = _fees.earned1;
-        if (_current0 > _fees.snapshot0) _earned0 += _current0 - _fees.snapshot0;
-        if (_current1 > _fees.snapshot1) _earned1 += _current1 - _fees.snapshot1;
-        return (_earned0 - _fees.charged0, _earned1 - _fees.charged1);
-    }
-
-    function _accrueLpFees(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt
-    ) private {
-        (uint256 _current0, uint256 _current1) = _lpFeesOwed(_pool, _main, _alt);
-        _accrueFrom(_fees, _current0, _current1);
-    }
-
-    function _accrueFrom(LpFeeState storage _fees, uint256 _current0, uint256 _current1) private {
-        if (_current0 > _fees.snapshot0) _fees.earned0 += _current0 - _fees.snapshot0;
-        if (_current1 > _fees.snapshot1) _fees.earned1 += _current1 - _fees.snapshot1;
-        _fees.snapshot0 = _current0;
-        _fees.snapshot1 = _current1;
-    }
-
-    /// @dev Re-bases the snapshot on the aggregate `tokensOwed` left after a partial collect.
-    function _refreshSnapshot(
-        IUniswapV3Pool _pool,
-        LpFeeState storage _fees,
-        IUniCLStrat.Position storage _main,
-        IUniCLStrat.Position storage _alt
-    ) private {
-        (_fees.snapshot0, _fees.snapshot1) = _lpFeesOwed(_pool, _main, _alt);
-    }
-
-    /// @dev Fail-closed aggregate `tokensOwed` across both positions.
-    function _lpFeesOwed(IUniswapV3Pool _pool, IUniCLStrat.Position storage _main, IUniCLStrat.Position storage _alt)
-        private
-        view
-        returns (uint256 _amount0, uint256 _amount1)
-    {
-        (,,, uint128 _main0, uint128 _main1) = _pool.positions(_key(_main));
-        (,,, uint128 _alt0, uint128 _alt1) = _pool.positions(_key(_alt));
-        return (uint256(_main0) + uint256(_alt0), uint256(_main1) + uint256(_alt1));
-    }
-
-    /// @dev Best-effort aggregate `tokensOwed`; `_ok == false` if either read reverts (all-or-nothing:
-    ///      the snapshot is aggregate, so mixing a live leg with it is unsafe). Parameterless
-    ///      catches — binding revert data would copy unbounded returndata from a degraded pool.
-    function _tryLpFeesOwed(IUniswapV3Pool _pool, IUniCLStrat.Position storage _main, IUniCLStrat.Position storage _alt)
-        private
-        view
-        returns (bool _ok, uint256 _amount0, uint256 _amount1)
-    {
-        try _pool.positions(_key(_main)) returns (uint128, uint256, uint256, uint128 _main0, uint128 _main1) {
-            try _pool.positions(_key(_alt)) returns (uint128, uint256, uint256, uint128 _alt0, uint128 _alt1) {
-                return (true, uint256(_main0) + uint256(_alt0), uint256(_main1) + uint256(_alt1));
-            } catch {}
-        } catch {}
-    }
-
-    function _pokePositions(IUniswapV3Pool _pool, IUniCLStrat.Position storage _main, IUniCLStrat.Position storage _alt)
-        private
-    {
-        _pokePosition(_pool, _main);
-        _pokePosition(_pool, _alt);
-    }
-
-    function _pokePosition(IUniswapV3Pool _pool, IUniCLStrat.Position storage _position) private {
-        if (!_isValid(_position.tickLower, _position.tickUpper)) return;
-        (uint128 _liquidity,,,,) = _pool.positions(_key(_position));
-        if (_liquidity > 0) _pool.burn(_position.tickLower, _position.tickUpper, 0);
-    }
-
-    function _removePosition(IUniswapV3Pool _pool, IUniCLStrat.Position storage _position) private {
-        int24 _lower = _position.tickLower;
-        int24 _upper = _position.tickUpper;
-        if (!_isValid(_lower, _upper)) return;
-        (uint128 _liquidity,,,,) = _pool.positions(_key(_position));
-        if (_liquidity > 0) _pool.burn(_lower, _upper, _liquidity);
-        _pool.collect(address(this), _lower, _upper, type(uint128).max, type(uint128).max);
-    }
-
-    function _key(IUniCLStrat.Position storage _position) private view returns (bytes32) {
-        return keccak256(abi.encodePacked(address(this), _position.tickLower, _position.tickUpper));
-    }
-
-    function _isValid(int24 _tickLower, int24 _tickUpper) private pure returns (bool) {
-        return _tickLower < _tickUpper && _tickLower >= TickMath.MIN_TICK && _tickUpper <= TickMath.MAX_TICK;
-    }
-
     // ============ Alt Position ============
 
     /**
@@ -765,53 +474,6 @@ library UniCLStratLib {
         uint256 _value1 = IERC20Metadata(_token1).balanceOf(address(this));
         _leftoverIsToken1 = _value1 > _value0;
         _hasLeftover = (_leftoverIsToken1 ? _value1 : _value0) > _minValue;
-    }
-
-    /**
-     * @notice State of the alt position relative to a leftover token.
-     * @return _occupied Alt currently holds liquidity
-     * @return _holdsOnlyLeftover Alt sits entirely on the side that holds only the leftover token
-     *         (Uniswap V3: all token1 when `tick >= tickUpper`, all token0 when `tick < tickLower`)
-     */
-    function altState(IUniswapV3Pool _pool, IUniCLStrat.Position storage _alt, int24 _tick, bool _leftoverIsToken1)
-        public
-        view
-        returns (bool _occupied, bool _holdsOnlyLeftover)
-    {
-        int24 _lower = _alt.tickLower;
-        int24 _upper = _alt.tickUpper;
-        if (!_isValid(_lower, _upper)) return (false, false);
-        (uint128 _liquidity,,,,) = _pool.positions(_key(_alt));
-        _occupied = _liquidity > 0;
-        _holdsOnlyLeftover = _leftoverIsToken1 ? _tick >= _upper : _tick < _lower;
-    }
-
-    /**
-     * @notice Places the single-sided alt range next to spot: below it for a token1 leftover,
-     *         above it for a token0 leftover.
-     * @dev Reverts `UniCLStratPositionNotEmpty` if the current alt position still holds liquidity
-     *      or owed tokens — NAV and fee accounting only read the current keys, so reassigning a
-     *      non-empty position would orphan its value.
-     */
-    function placeAlt(
-        IUniswapV3Pool _pool,
-        IUniCLStrat.Position storage _alt,
-        int24 _tick,
-        bool _leftoverIsToken1,
-        int24 _tickSpacing,
-        int24 _width
-    ) public {
-        if (_isValid(_alt.tickLower, _alt.tickUpper)) {
-            (uint128 _liquidity,,, uint128 _owed0, uint128 _owed1) = _pool.positions(_key(_alt));
-            if (_liquidity > 0 || _owed0 > 0 || _owed1 > 0) revert IUniCLStrat.UniCLStratPositionNotEmpty();
-        }
-
-        int24 _tickFloor = TickUtils.floor(_tick, _tickSpacing);
-        if (_leftoverIsToken1) {
-            (_alt.tickLower, _alt.tickUpper) = (_tickFloor - _width, _tickFloor - _tickSpacing);
-        } else {
-            (_alt.tickLower, _alt.tickUpper) = (_tickFloor + _tickSpacing, _tickFloor + _width);
-        }
     }
 
     // ============ Emergency ============
@@ -834,33 +496,6 @@ library UniCLStratLib {
 
     // ============ Valuation ============
 
-    /**
-     * @notice ETH value of the strategy's (`address(this)`) idle token0/token1 balances plus both
-     *         pool positions (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens).
-     * @dev Excludes native ETH (added by the caller). Priced via Oracle cross-rates.
-     */
-    function inventoryValueInETH(
-        IUniswapV3Pool _pool,
-        IOracle _oracle,
-        address _weth,
-        address _token0,
-        address _token1,
-        IUniCLStrat.Position memory _main,
-        IUniCLStrat.Position memory _alt,
-        uint160 _twapSqrtPriceX96
-    ) public view returns (uint256) {
-        (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _main, _twapSqrtPriceX96);
-        (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _alt, _twapSqrtPriceX96);
-        return pairValueInETH(
-            _oracle,
-            _weth,
-            _token0,
-            _token1,
-            IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0,
-            IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1
-        );
-    }
-
     /// @notice ETH value of `_amount0` token0 plus `_amount1` token1.
     function pairValueInETH(
         IOracle _oracle,
@@ -871,31 +506,6 @@ library UniCLStratLib {
         uint256 _amount1
     ) public view returns (uint256) {
         return _valueInETH(_oracle, _weth, _token0, _amount0) + _valueInETH(_oracle, _weth, _token1, _amount1);
-    }
-
-    /// @dev Amounts held by a position (liquidity at `_sqrtPriceX96` plus owed); zero for invalid ticks.
-    function _positionAmounts(IUniswapV3Pool _pool, IUniCLStrat.Position memory _position, uint160 _sqrtPriceX96)
-        private
-        view
-        returns (uint256 _amount0, uint256 _amount1)
-    {
-        if (
-            _position.tickLower >= _position.tickUpper || _position.tickLower < TickMath.MIN_TICK
-                || _position.tickUpper > TickMath.MAX_TICK
-        ) return (0, 0);
-
-        (uint128 _liquidity,,, uint128 _owed0, uint128 _owed1) =
-            _pool.positions(keccak256(abi.encodePacked(address(this), _position.tickLower, _position.tickUpper)));
-        if (_liquidity > 0) {
-            (_amount0, _amount1) = LiquidityAmounts.getAmountsForLiquidity(
-                _sqrtPriceX96,
-                TickMath.getSqrtRatioAtTick(_position.tickLower),
-                TickMath.getSqrtRatioAtTick(_position.tickUpper),
-                _liquidity
-            );
-        }
-        _amount0 += _owed0;
-        _amount1 += _owed1;
     }
 
     function _valueInETH(IOracle _oracle, address _weth, address _token, uint256 _amount)

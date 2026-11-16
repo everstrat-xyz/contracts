@@ -12,13 +12,13 @@ import {TickUtils} from "../integrations/uniswap/TickUtils.sol";
 import {IOracle} from "../../interfaces/IOracle.sol";
 import {IUniCLStrat} from "../../interfaces/strategies/IUniCLStrat.sol";
 import {IUniswapV3Pool} from "../../interfaces/integrations/uniswap/IUniswapV3Pool.sol";
-import {ICLPool} from "../../interfaces/integrations/aero/ICLPool.sol";
+import {CLPoolLib} from "./CLPoolLib.sol";
 
-import {UniCLStratLib} from "./UniCLStratLib.sol";
+import {CLStratLib} from "./CLStratLib.sol";
 
 /**
- * @title AeroCLPositionLib
- * @notice Position layer of the Aero (Slipstream) concentrated-liquidity strategies: how the
+ * @title CLPositionLib
+ * @notice Shared direct-pool position layer for Uniswap V3 and Slipstream strategies: how the
  *         strategy's main and alt ranges are held, read, minted, burned and collected, plus the
  *         LP-fee accounting and valuation built on those reads.
  * @dev Externally linked (`public` entry points run via DELEGATECALL in the strategy's context, so
@@ -29,16 +29,30 @@ import {UniCLStratLib} from "./UniCLStratLib.sol";
  *      section (`_read`, `_tryRead`, `_mint`, `_burn`, `_collect`). They are the only code that
  *      knows *how* a position is held — today, directly in the pool, keyed by
  *      `keccak256(owner, tickLower, tickUpper)`. Range decisions (which ticks, how much, in what
- *      order) live in {AeroCLRangeLib} and never touch the pool directly, so a different holding
+ *      order) live in {CLRangeLib} and never touch the pool directly, so a different holding
  *      model (e.g. NonfungiblePositionManager NFTs staked in a gauge) can be added here without
  *      changing range management.
  *
- *      Slipstream `slot0` has 6 fields; spot is read only through {slot0}. Never call
- *      `UniCLStratLib.requireTwapOracle` or `IUniswapV3Pool.slot0` for an Aero pool (7-field decode
- *      reverts). The LP-fee accounting reuses `UniCLStratLib.LpFeeState` and has the same semantics
- *      as the UniCLStrat implementation.
+ *      Venue-specific spot decoding lives in {CLPoolLib}. Both venues use the same direct-pool
+ *      position API, LP-fee accounting and valuation here.
  */
-library AeroCLPositionLib {
+library CLPositionLib {
+    /**
+     * @notice Strategy-local LP-fee counters and aggregate owed-token snapshot.
+     * @dev earned*: lifetime fees advanced by settle/remove/emergency accrue, never by sync.
+     *      charged*: amounts settled or written off by emergency exit. snapshot*: aggregate
+     *      tokensOwed at the last accrue; pending/settle include the live owed-minus-snapshot
+     *      delta. A failed emergency owed read leaves this snapshot and the earned counters intact.
+     */
+    struct LpFeeState {
+        uint256 earned0;
+        uint256 earned1;
+        uint256 charged0;
+        uint256 charged1;
+        uint256 snapshot0;
+        uint256 snapshot1;
+    }
+
     /**
      * @notice All range-management state of a strategy, passed by storage pointer.
      * @param main Main range (two-sided around spot)
@@ -50,28 +64,9 @@ library AeroCLPositionLib {
     struct RangeState {
         IUniCLStrat.Position main;
         IUniCLStrat.Position alt;
-        UniCLStratLib.LpFeeState lpFees;
+        LpFeeState lpFees;
         bool initTicks;
         bool minting;
-    }
-
-    // ============ Spot ============
-
-    /// @notice Slipstream 6-field `slot0` (no `feeProtocol`). `_observationCardinality` is the in-use cardinality.
-    function slot0(IUniswapV3Pool _pool)
-        internal
-        view
-        returns (uint160 _sqrtPriceX96, int24 _tick, uint16 _observationCardinality)
-    {
-        (_sqrtPriceX96, _tick,, _observationCardinality,,) = ICLPool(address(_pool)).slot0();
-    }
-
-    function sqrtPrice(IUniswapV3Pool _pool) internal view returns (uint160 _sqrtPriceX96) {
-        (_sqrtPriceX96,,) = slot0(_pool);
-    }
-
-    function currentTick(IUniswapV3Pool _pool) internal view returns (int24 _tick) {
-        (, _tick,) = slot0(_pool);
     }
 
     // ============ Mint ============
@@ -88,11 +83,12 @@ library AeroCLPositionLib {
         RangeState storage _state,
         IUniCLStrat.Position memory _position,
         address _token0,
-        address _token1
+        address _token1,
+        CLPoolLib.Venue _venue
     ) public {
         if (!_isValid(_position)) return;
 
-        uint160 _sqrtPriceX96 = sqrtPrice(_pool);
+        uint160 _sqrtPriceX96 = CLPoolLib.sqrtPrice(_pool, _venue);
         uint160 _sqrtA = TickMath.getSqrtRatioAtTick(_position.tickLower);
         uint160 _sqrtB = TickMath.getSqrtRatioAtTick(_position.tickUpper);
         uint128 _liquidity = LiquidityAmounts.getLiquidityForAmounts(
@@ -237,17 +233,20 @@ library AeroCLPositionLib {
         returns (uint256 _uncharged0, uint256 _uncharged1)
     {
         _accrueLpFees(_pool, _state);
-        UniCLStratLib.LpFeeState storage _fees = _state.lpFees;
+        LpFeeState storage _fees = _state.lpFees;
         return (_fees.earned0 - _fees.charged0, _fees.earned1 - _fees.charged1);
     }
 
     /**
      * @notice Writes off pending LP fees (emergency exit): best-effort accrue, then charged = earned.
      * @dev On a degraded pool the owed read falls back to the snapshot, so accrue is a no-op and this
-     *      cannot revert. See `UniCLStratLib.resetLpFeeAccounting` for why counters are not zeroed.
+     *      cannot revert. In-pool fees at reset time (including fees already settled, which leaves
+     *      tokens in-pool) become wind-down value and must not be charged again on resume. Zeroing
+     *      counters would re-accrue already-charged owed tokens as freshly earned. Unread live growth
+     *      above the retained snapshot stays feeable on resume.
      */
     function resetLpFeeAccounting(IUniswapV3Pool _pool, RangeState storage _state) public {
-        UniCLStratLib.LpFeeState storage _fees = _state.lpFees;
+        LpFeeState storage _fees = _state.lpFees;
         (bool _ok, uint256 _current0, uint256 _current1) = _tryLpFeesOwed(_pool, _state);
         if (_ok) _accrueFrom(_fees, _current0, _current1);
         _fees.charged0 = _fees.earned0;
@@ -263,7 +262,7 @@ library AeroCLPositionLib {
         view
         returns (uint256 _uncharged0, uint256 _uncharged1)
     {
-        UniCLStratLib.LpFeeState storage _fees = _state.lpFees;
+        LpFeeState storage _fees = _state.lpFees;
         (uint256 _current0, uint256 _current1) = _lpFeesOwed(_pool, _state);
         uint256 _earned0 = _fees.earned0;
         uint256 _earned1 = _fees.earned1;
@@ -290,7 +289,7 @@ library AeroCLPositionLib {
     ) public view returns (uint256) {
         (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _state.main, _twapSqrtPriceX96);
         (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _state.alt, _twapSqrtPriceX96);
-        return UniCLStratLib.pairValueInETH(
+        return CLStratLib.pairValueInETH(
             _oracle,
             _weth,
             _token0,
@@ -307,7 +306,7 @@ library AeroCLPositionLib {
         _accrueFrom(_state.lpFees, _current0, _current1);
     }
 
-    function _accrueFrom(UniCLStratLib.LpFeeState storage _fees, uint256 _current0, uint256 _current1) private {
+    function _accrueFrom(LpFeeState storage _fees, uint256 _current0, uint256 _current1) private {
         if (_current0 > _fees.snapshot0) _fees.earned0 += _current0 - _fees.snapshot0;
         if (_current1 > _fees.snapshot1) _fees.earned1 += _current1 - _fees.snapshot1;
         _fees.snapshot0 = _current0;
@@ -379,7 +378,7 @@ library AeroCLPositionLib {
         if (_liquidity == 0) return _value;
 
         (uint256 _amount0, uint256 _amount1) = _positionAmounts(_pool, _position, _twapSqrtPriceX96);
-        uint256 _positionValue = UniCLStratLib.pairValueInETH(_oracle, _weth, _token0, _token1, _amount0, _amount1);
+        uint256 _positionValue = CLStratLib.pairValueInETH(_oracle, _weth, _token0, _token1, _amount0, _amount1);
 
         uint128 _burnLiquidity = _liquidity;
         if (_positionValue > _value) {

@@ -622,9 +622,9 @@ Strategy contracts implementing this interface are registered with StrategyManag
 ## Source layout conventions
 
 - **`src/libraries/`** — shared by core protocol contracts (AMM, Controller, StrategyManager, Oracle, Registry).
-- **`src/libraries/strategies/<name>/`** — libraries used by a single strategy implementation only. UniCL math lives under `uni-cl-strategy/` (adapted from Uniswap V3 Core/Periphery).
+- **`src/libraries/strategies/`** — shared concentrated-liquidity logic: `CLRangeLib` (range management), `CLPositionLib` (direct-pool positions and LP fees), `CLPoolLib` (venue ABIs), and `CLStratLib` (swaps and inventory math). V3 math lives under `src/libraries/integrations/uniswap/`.
 - **`src/interfaces/integrations/`** — minimal ABIs for external protocols strategies call (not part of the core interface surface).
-- **`src/contracts/strategies/`** — static strategy contracts; each strategy may import from its matching `libraries/strategies/…` folder.
+- **`src/contracts/strategies/`** — static strategy contracts. `UniCLStrat` and `AeroCLStrat` inherit the shared `CLStrat` implementation; each constructor fixes its venue and each contract exposes its own metadata.
 
 ## Project Structure
 

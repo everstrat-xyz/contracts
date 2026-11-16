@@ -15,15 +15,13 @@ import {UniCLStratTest} from "./UniCLStrat.t.sol";
  * @dev `AeroCLStrat` exposes the same `IStrategy` / `IUniCLStrat` ABI as `UniCLStrat`, and
  *      `MockAeroCLPool` exposes the same test setters as `MockUniCLPool` (only `slot0` differs: 6
  *      fields). So `strategy` and `pool` are re-pointed at the Aero contracts and every inherited
- *      test exercises AeroCLStrat / AeroCLRangeLib / AeroCLPositionLib instead.
+ *      test exercises the shared CLStrat / CLRangeLib / CLPositionLib with Slipstream decoding.
  *
- *      This is the parity guard that replaced the textual drift check: a behaviour change to
- *      UniCLStrat that comes with a new or changed test in `UniCLStrat.t.sol` also runs here, so a
- *      fix that is not ported to the Aero libraries fails CI.
+ *      Both strategies use the same implementation. Running every behavior test with both pool
+ *      layouts checks their integration with that implementation as it evolves.
  *
- *      Tests that only make sense for the Uniswap venue (UniCLStrat constructor / provenance,
- *      metadata, the 7-field `slot0`) are overridden with a skip; their Aero counterparts live in
- *      `AeroCLStrat.t.sol`.
+ *      Venue hooks select the constructor, factory and expected metadata; additional Slipstream
+ *      provenance and slot0 cases live in `AeroCLStrat.t.sol`.
  */
 contract AeroCLStratParityTest is UniCLStratTest {
     MockAeroCLFactory internal aeroFactory;

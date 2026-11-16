@@ -65,11 +65,13 @@ graph TB
     Oracle["Oracle<br/>Implementation"]
     Converter["Converter<br/>Implementation"]
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
+    CLStrat["CLStrat<br/>Shared Abstract Strategy"]
+    CLPoolLib["CLPoolLib<br/>Venue Boundary"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
-    UniCLStratLib["UniCLStratLib<br/>Linked Library"]
+    CLStratLib["CLStratLib<br/>Linked Library"]
     AeroCLStrat["AeroCLStrat<br/>Static Strategy"]
-    AeroCLRangeLib["AeroCLRangeLib<br/>Linked Library"]
-    AeroCLPositionLib["AeroCLPositionLib<br/>Linked Library"]
+    CLRangeLib["CLRangeLib<br/>Linked Library"]
+    CLPositionLib["CLPositionLib<br/>Linked Library"]
 
     %% Automation Subsystem (Mimic)
     IKeeperExecutorBase["IKeeperExecutorBase<br/>Interface"]
@@ -143,33 +145,28 @@ graph TB
     UniswapV3ConverterAdapter --> UniV3Math
     UniswapV3ConverterAdapter --> UniswapV3Path
 
-    UniCLStrat --> AccessControl
-    UniCLStrat --> IStrategy
-    UniCLStrat --> IUniCLStrat
-    UniCLStrat --> IConverter
-    UniCLStrat --> IWETH
-    UniCLStrat --> IUniswapV3Pool
-    UniCLStrat --> UniCLStratLib
-    UniCLStrat --> Oracle
-    UniCLStrat --> UniV3Math
-    UniCLStrat --> OZLibs
-    AeroCLStrat --> IStrategy
-    AeroCLStrat --> IUniCLStrat
-    AeroCLStrat --> IConverter
-    AeroCLStrat --> IWETH
-    AeroCLStrat --> IUniswapV3Pool
-    AeroCLStrat --> ICLPool
-    AeroCLStrat --> ICLFactory
-    AeroCLStrat --> UniCLStratLib
-    AeroCLStrat --> AeroCLRangeLib
-    AeroCLStrat --> AeroCLPositionLib
-    AeroCLRangeLib --> AeroCLPositionLib
-    AeroCLRangeLib --> UniCLStratLib
-    AeroCLPositionLib --> UniCLStratLib
-    AeroCLPositionLib --> ICLPool
-    AeroCLStrat --> Oracle
-    AeroCLStrat --> UniV3Math
-    AeroCLStrat --> OZLibs
+    UniCLStrat --> CLStrat
+    AeroCLStrat --> CLStrat
+    CLStrat --> IStrategy
+    CLStrat --> IUniCLStrat
+    CLStrat --> IConverter
+    CLStrat --> IWETH
+    CLStrat --> IUniswapV3Pool
+    CLStrat --> CLPoolLib
+    CLStrat --> CLRangeLib
+    CLStrat --> CLPositionLib
+    CLStrat --> CLStratLib
+    CLStrat --> Oracle
+    CLStrat --> UniV3Math
+    CLStrat --> OZLibs
+    CLRangeLib --> CLPoolLib
+    CLRangeLib --> CLPositionLib
+    CLRangeLib --> CLStratLib
+    CLPositionLib --> CLPoolLib
+    CLPositionLib --> CLStratLib
+    CLPoolLib --> ICLPool
+    CLPoolLib --> ICLFactory
+    CLPoolLib --> IUniswapV3Pool
     ICLPool --> AeroPool
     ICLFactory --> AeroFactory
     
@@ -424,19 +421,19 @@ graph TB
 - **Swap Protection**: Every swap derives its bound from an on-chain quote (TWAP + Chainlink via the adapter), cross-checks the quote against symmetric Chainlink floor/ceiling bounds (`MAX_QUOTE_DEVIATION_BPS = 200`, which must exceed the route's pool fee tier since adapter quotes are fee-net), applies the configured slippage tolerance, and sets a per-swap deadline. Quote and swap execute atomically in one transaction — the TWAP quote source (not the quote-then-swap pattern itself) is what defeats same-block manipulation.
 - **Exact-Output Top-Ups**: `_convertToWeth()` (used by `withdraw`) swaps for EXACTLY the missing WETH via `_swapViaRouteExactOutput` with a slippage-padded input cap; if the cap exceeds the paired-token balance, it falls back to a best-effort exact-input swap of the whole balance.
 - **External Integrations**: Converter, WETH, Uniswap V3 pool, Oracle (`src/interfaces/integrations/`)
-- **Strategy libraries**: `src/libraries/strategies/uni-cl-strategy/` (`TickMath`, `LiquidityAmounts`, `FullMath`, `FixedPoint96`, `TickUtils`)
+- **Shared implementation**: `src/contracts/strategies/CLStrat.sol` and `src/libraries/strategies/{CLPoolLib,CLRangeLib,CLPositionLib,CLStratLib}.sol`; V3 math lives under `src/libraries/integrations/uniswap/`.
 - **Deployment**: Direct deployment via `script/DeployUniCLStrat.s.sol` (bytecode only; requires prior timelocked `setAllowedAdapter`); `StrategyManager.addStrategy` is always scheduled on the 48h admin timelock — same after modular finalize and after `DeployAll`
 - **Interface**: `src/interfaces/strategies/IUniCLStrat.sol`
 - **Tests**: `test/unit/UniCLStrat.t.sol`, `test/fuzz/UniCLStratFuzz.t.sol`, `test/trees/UniCLStrat.tree`
 
 #### **AeroCLStrat** (Static/Immutable Strategy)
 - **Purpose**: Native-ETH `IStrategy` implementation that deploys funds **unstaked** into an Aero (Slipstream) WETH/paired-token concentrated-liquidity pool and earns swap fees. Issue #55 Phase 1; gauge staking (AERO rewards) is Phase 2 (`AeroCLGaugeStrat`).
-- **Relationship to UniCLStrat**: a separate contract. `UniCLStrat` is unchanged; mechanics, guards, fee accounting, emergency paths and the `IUniCLStrat` interface/errors are the same, and it reuses the venue-agnostic swap and inventory math in `UniCLStratLib`. Slipstream differences: 6-field `slot0` (read via `ICLPool` in `AeroCLPositionLib.slot0`; cardinality gate inlined), provenance via tick-spacing-keyed `CLFactory.getPool`, and a dynamic swap fee.
-- **Layering**: `AeroCLStrat` keeps configuration, access control, the `IStrategy` entry points, pause / emergency exit, the calm / TWAP / cardinality gates and the mint callback. Two linked libraries run in its context (DELEGATECALL) on one `RangeState` storage struct: `AeroCLRangeLib` (range management: main placement / re-centering, ratio swap, alt placement, WETH sourcing for withdrawals) and `AeroCLPositionLib` (how positions are held: mint / burn / collect / positions, LP-fee accounting, valuation). Range management never calls the pool's position API directly, so the Phase 2 gauge strategy can add an NFT position backend in `AeroCLPositionLib` and reuse `AeroCLRangeLib` unchanged.
+- **Relationship to UniCLStrat**: separate static contracts inheriting `CLStrat` for all common configuration, entry points, guards, callbacks and emergency recovery. Both use linked `CLRangeLib` (range management), `CLPositionLib` (direct-pool position operations, LP-fee accounting, valuation) and `CLStratLib` (swap execution, inventory math). `CLPoolLib` decodes 7-field Uniswap / 6-field Slipstream `slot0` and validates fee-keyed / spacing-keyed factory provenance; the concrete constructor fixes the venue.
+- **Layering**: the shared `CLStrat` base owns configuration, access control, the `IStrategy` entry points, pause / emergency exit, the calm / TWAP / cardinality gates and the mint callback for both venues. Two linked libraries run in its context (DELEGATECALL) on one `RangeState` storage struct: `CLRangeLib` (range management: main placement / re-centering, ratio swap, alt placement, WETH sourcing for withdrawals) and `CLPositionLib` (how positions are held: mint / burn / collect / positions, LP-fee accounting, valuation). Range management never calls the pool's position API directly, so the Phase 2 gauge strategy can add an NFT position backend in `CLPositionLib` and reuse `CLRangeLib` unchanged.
 - **Swap Routing**: through the shared Converter on the configured route, normally `UniswapV3ConverterAdapter` on a deep Uniswap pool. No Slipstream adapter is needed.
 - **Interfaces**: `src/interfaces/integrations/aero/` (`ICLPool`, `ICLFactory`, `IDynamicSwapFeeHook`). These are our own declarations; Dromos source is restricted-use and is not vendored.
 - **Deployment**: `script/DeployAeroCLStrat.s.sol` (bytecode only; probes `isPool`/`getPool`, `observe`, cardinality; warns if the fee cap exceeds the quote budget, fatal under `STRICT_FEE_CAP`; logs `unstakedFee`). Then `addStrategy` on the 48h admin timelock.
-- **Porting fixes**: the range logic is no longer a textual copy of `UniCLStrat`, so a security fix to `UniCLStrat`'s range or LP-fee logic must be ported to `AeroCLRangeLib` / `AeroCLPositionLib` by hand (reviewer checklist item).
+- **Common fixes**: implemented once in the shared base/libraries. The full unit/fuzz suites run for both pool layouts; there is no manual port check or label exception.
 - **Tests**: `test/unit/AeroCLStrat.t.sol`, `test/fork/AeroCLStratFork.t.sol`, `test/trees/AeroCLStrat.tree`
 
 #### **Converter** (Upgradeable)
@@ -688,11 +685,13 @@ graph TB
     Oracle["Oracle<br/>Implementation"]
     Converter["Converter<br/>Implementation"]
     UniswapV3ConverterAdapter["UniswapV3<br/>ConverterAdapter<br/>Static Contract"]
+    CLStrat["CLStrat<br/>Shared Abstract Strategy"]
+    CLPoolLib["CLPoolLib<br/>Venue Boundary"]
     UniCLStrat["UniCLStrat<br/>Static Strategy"]
-    UniCLStratLib["UniCLStratLib<br/>Linked Library"]
+    CLStratLib["CLStratLib<br/>Linked Library"]
     AeroCLStrat["AeroCLStrat<br/>Static Strategy"]
-    AeroCLRangeLib["AeroCLRangeLib<br/>Linked Library"]
-    AeroCLPositionLib["AeroCLPositionLib<br/>Linked Library"]
+    CLRangeLib["CLRangeLib<br/>Linked Library"]
+    CLPositionLib["CLPositionLib<br/>Linked Library"]
     
     %% Registry Subsystem
     Registry["Registry<br/>Static Contract<br/>(Address Book + Roles)"]
@@ -778,33 +777,28 @@ graph TB
     UniswapV3ConverterAdapter --> UniV3Math
     UniswapV3ConverterAdapter --> UniswapV3Path
 
-    UniCLStrat --> AccessControl
-    UniCLStrat --> IStrategy
-    UniCLStrat --> IUniCLStrat
-    UniCLStrat --> IConverter
-    UniCLStrat --> IWETH
-    UniCLStrat --> IUniswapV3Pool
-    UniCLStrat --> UniCLStratLib
-    UniCLStrat --> Oracle
-    UniCLStrat --> UniV3Math
-    UniCLStrat --> OZLibs
-    AeroCLStrat --> IStrategy
-    AeroCLStrat --> IUniCLStrat
-    AeroCLStrat --> IConverter
-    AeroCLStrat --> IWETH
-    AeroCLStrat --> IUniswapV3Pool
-    AeroCLStrat --> ICLPool
-    AeroCLStrat --> ICLFactory
-    AeroCLStrat --> UniCLStratLib
-    AeroCLStrat --> AeroCLRangeLib
-    AeroCLStrat --> AeroCLPositionLib
-    AeroCLRangeLib --> AeroCLPositionLib
-    AeroCLRangeLib --> UniCLStratLib
-    AeroCLPositionLib --> UniCLStratLib
-    AeroCLPositionLib --> ICLPool
-    AeroCLStrat --> Oracle
-    AeroCLStrat --> UniV3Math
-    AeroCLStrat --> OZLibs
+    UniCLStrat --> CLStrat
+    AeroCLStrat --> CLStrat
+    CLStrat --> IStrategy
+    CLStrat --> IUniCLStrat
+    CLStrat --> IConverter
+    CLStrat --> IWETH
+    CLStrat --> IUniswapV3Pool
+    CLStrat --> CLPoolLib
+    CLStrat --> CLRangeLib
+    CLStrat --> CLPositionLib
+    CLStrat --> CLStratLib
+    CLStrat --> Oracle
+    CLStrat --> UniV3Math
+    CLStrat --> OZLibs
+    CLRangeLib --> CLPoolLib
+    CLRangeLib --> CLPositionLib
+    CLRangeLib --> CLStratLib
+    CLPositionLib --> CLPoolLib
+    CLPositionLib --> CLStratLib
+    CLPoolLib --> ICLPool
+    CLPoolLib --> ICLFactory
+    CLPoolLib --> IUniswapV3Pool
     ICLPool --> AeroPool
     ICLFactory --> AeroFactory
     IDynamicSwapFeeHook --> AeroPool
