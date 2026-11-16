@@ -21,7 +21,8 @@ contract UniCLStratFuzzTest is UniCLStratTestBase {
         assertTrue(strategy.initTicks());
         assertTrue(strategy.isHealthy());
         assertLe(strategy.navInETH(), _amount);
-        assertApproxEqAbs(strategy.navInETH(), _amount, NAV_TOLERANCE);
+        assertLe(_grossNavInETH(), _amount);
+        assertApproxEqAbs(_grossNavInETH(), _amount, NAV_TOLERANCE);
     }
 
     function testFuzz_WithdrawTracksAccounting(uint256 _depositAmount, uint256 _withdrawAmount) public {
@@ -30,14 +31,22 @@ contract UniCLStratFuzzTest is UniCLStratTestBase {
 
         _deposit(_depositAmount);
         uint256 navBeforeWithdrawal = strategy.navInETH();
+        uint256 grossNavBeforeWithdrawal = _grossNavInETH();
         if (_withdrawAmount > navBeforeWithdrawal) _withdrawAmount = navBeforeWithdrawal;
 
         vm.prank(strategyManager);
-        strategy.withdraw(receiver, _withdrawAmount);
+        uint256 withdrawn = strategy.withdraw(receiver, _withdrawAmount);
 
-        assertEq(receiver.balance, _withdrawAmount);
-        assertEq(strategy.totalWithdrawn(), _withdrawAmount);
-        assertApproxEqAbs(strategy.navInETH(), navBeforeWithdrawal - _withdrawAmount, NAV_TOLERANCE);
+        // A full-NAV request drains the strategy and may pay out more than requested (the
+        // unspent exit-cost mark-down); any other request pays out exactly what was asked.
+        if (_withdrawAmount == navBeforeWithdrawal) {
+            assertGe(withdrawn, _withdrawAmount);
+        } else {
+            assertEq(withdrawn, _withdrawAmount);
+        }
+        assertEq(receiver.balance, withdrawn);
+        assertEq(strategy.totalWithdrawn(), withdrawn);
+        assertApproxEqAbs(_grossNavInETH(), grossNavBeforeWithdrawal - withdrawn, NAV_TOLERANCE);
     }
 
     function testFuzz_MaxDepositReflectsCapacity(uint256 _amount) public {

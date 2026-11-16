@@ -50,6 +50,9 @@ contract UniCLStratTest is UniCLStratTestBase {
     uint256 public constant ACCRUED_FEE_WETH = 0.1 ether;
     uint256 public constant ACCRUED_FEE_PAIRED = 0.05 ether;
     uint256 public constant IDLE_ETH_DONATION = 3 ether;
+    /// @dev Route quoting 1% worse than the oracle: inside the 2% oracle band, and costly enough
+    ///      that a slippage-padded exact-output for the paired half exceeds the paired balance.
+    uint256 public constant EXPENSIVE_ROUTE_QUOTE_MULTIPLIER_BPS = 9_900;
 
     function test_Constructor_SetsInitialState() public view {
         assertEq(strategy.name(), "Uniswap Concentrated Liquidity Strategy");
@@ -247,7 +250,64 @@ contract UniCLStratTest is UniCLStratTestBase {
     function test_NavInETH_IncludesPairedToken() public {
         pairedToken.mint(address(strategy), NAV_BALANCE_AMOUNT);
 
-        assertEq(strategy.navInETH(), NAV_BALANCE_AMOUNT);
+        assertEq(strategy.navInETH(), NAV_BALANCE_AMOUNT - _exitCost(NAV_BALANCE_AMOUNT));
+    }
+
+    function test_NavInETH_MarksDownPairedTokenByPoolFeePlusSlippage() public {
+        pairedToken.mint(address(strategy), NAV_BALANCE_AMOUNT);
+
+        // 0.3% pool fee tier + 1% default slippage tolerance = 1.3% of the paired value.
+        assertEq(strategy.navInETH(), NAV_BALANCE_AMOUNT - NAV_BALANCE_AMOUNT * 130 / 10_000);
+    }
+
+    function test_NavInETH_DoesNotMarkDownWethOrNativeETH() public {
+        vm.deal(address(this), NAV_BALANCE_AMOUNT);
+        weth.deposit{value: NAV_BALANCE_AMOUNT}();
+        weth.transfer(address(strategy), NAV_BALANCE_AMOUNT);
+        _donate(NAV_BALANCE_AMOUNT);
+
+        assertEq(strategy.navInETH(), 2 * NAV_BALANCE_AMOUNT);
+    }
+
+    function test_NavInETH_MarksDownOnlyThePairedShareOfThePosition() public {
+        _deposit(DEPOSIT_AMOUNT);
+
+        uint256 paired = _pairedInventory();
+        assertGt(paired, 0);
+        assertLt(paired, DEPOSIT_AMOUNT);
+        assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT - _exitCost(paired), NAV_TOLERANCE);
+    }
+
+    function test_NavInETH_ExitCostRoundsUp() public {
+        // 1 wei of paired token: 1.3% rounds up to the whole wei, never down to zero.
+        pairedToken.mint(address(strategy), 1);
+
+        assertEq(strategy.navInETH(), 0);
+    }
+
+    function test_NavInETH_MarkDownTracksSwapSlippageBps() public {
+        pairedToken.mint(address(strategy), NAV_BALANCE_AMOUNT);
+        uint256 navBefore = strategy.navInETH();
+
+        vm.prank(admin);
+        strategy.setSwapSlippageBps(UPDATED_SWAP_SLIPPAGE_BPS);
+
+        uint256 extraBps = UPDATED_SWAP_SLIPPAGE_BPS - strategy.DEFAULT_SWAP_SLIPPAGE_BPS();
+        assertEq(strategy.navInETH(), navBefore - NAV_BALANCE_AMOUNT * extraBps / 10_000);
+    }
+
+    function test_NavInETH_CoversRealizedExitCostOfAFullWithdrawal() public {
+        // Route costs 0.3% (within the 1.3% mark-down): a holder exiting the whole strategy at
+        // NAV is paid out of the proceeds in full — the conversion cost was already priced in.
+        _deposit(DEPOSIT_AMOUNT);
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
+        uint256 nav = strategy.navInETH();
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, nav);
+
+        assertGe(withdrawn, nav);
+        assertLt(withdrawn, DEPOSIT_AMOUNT);
     }
 
     function test_NavInETH_UsesTwapForPoolBalances() public {
@@ -373,8 +433,9 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(strategy.totalDeposited(), DEPOSIT_AMOUNT);
         assertTrue(strategy.initTicks());
         assertTrue(strategy.isHealthy());
-        assertLe(strategy.navInETH(), DEPOSIT_AMOUNT);
-        assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT, NAV_TOLERANCE);
+        assertLe(_grossNavInETH(), DEPOSIT_AMOUNT);
+        assertApproxEqAbs(_grossNavInETH(), DEPOSIT_AMOUNT, NAV_TOLERANCE);
+        assertLt(strategy.navInETH(), DEPOSIT_AMOUNT);
         assertEq(address(strategy).balance, 0);
         assertLe(weth.balanceOf(address(strategy)), NAV_TOLERANCE);
         assertLe(pairedToken.balanceOf(address(strategy)), NAV_TOLERANCE);
@@ -396,7 +457,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(address(strategy).balance, 0);
         assertTrue(strategy.initTicks());
         assertTrue(strategy.isHealthy());
-        assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), DEPOSIT_AMOUNT, NAV_TOLERANCE);
 
         IUniCLStrat.Position memory mainPosition = _mainPosition();
         assertEq(mainPosition.tickLower, -POSITION_WIDTH * TICK_SPACING);
@@ -418,7 +479,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(invested, expectedInvested);
         // Idle ETH beyond the cap remains as native ETH (still counted in NAV).
         assertEq(address(strategy).balance, idle - expectedInvested);
-        assertApproxEqAbs(strategy.navInETH(), idle, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), idle, NAV_TOLERANCE);
     }
 
     function test_InvestIdleETH_RevertsWhenPoolIsNotCalm() public {
@@ -469,7 +530,7 @@ contract UniCLStratTest is UniCLStratTestBase {
 
         assertEq(invested, NAV_BALANCE_AMOUNT);
         assertEq(address(strategy).balance, 0);
-        assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT + NAV_BALANCE_AMOUNT, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), DEPOSIT_AMOUNT + NAV_BALANCE_AMOUNT, NAV_TOLERANCE);
     }
 
     function test_DonationRemainsIdleUntilInvest() public {
@@ -513,7 +574,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         _deposit(MAX_TOTAL_NAV);
 
         assertEq(strategy.totalDeposited(), MAX_TOTAL_NAV);
-        assertApproxEqAbs(strategy.navInETH(), MAX_TOTAL_NAV, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), MAX_TOTAL_NAV, NAV_TOLERANCE);
     }
 
     function test_Deposit_AllowsRemainingHeadroom() public {
@@ -524,7 +585,11 @@ contract UniCLStratTest is UniCLStratTestBase {
         _deposit(headroom);
 
         assertEq(strategy.totalDeposited(), DEPOSIT_AMOUNT + headroom);
-        assertEq(strategy.maxDeposit(), 0);
+        // The cap binds on NAV net of the exit-cost mark-down, so deploying the headroom
+        // re-opens only the mark-down on the newly swapped paired half.
+        assertLe(strategy.navInETH(), MAX_TOTAL_NAV);
+        assertEq(strategy.maxDeposit(), MAX_TOTAL_NAV - strategy.navInETH());
+        assertLe(strategy.maxDeposit(), _exitCost(headroom));
     }
 
     function test_Deposit_RevertsWhenPoolIsNotCalm() public {
@@ -547,7 +612,7 @@ contract UniCLStratTest is UniCLStratTestBase {
 
     function test_Withdraw() public {
         _deposit(DEPOSIT_AMOUNT);
-        uint256 navBeforeWithdrawal = strategy.navInETH();
+        uint256 navBeforeWithdrawal = _grossNavInETH();
 
         vm.prank(strategyManager);
         vm.expectEmit(false, false, false, true, address(strategy));
@@ -557,7 +622,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(receiver.balance, WITHDRAW_AMOUNT);
         assertEq(strategy.totalWithdrawn(), WITHDRAW_AMOUNT);
         assertTrue(strategy.isHealthy());
-        assertApproxEqAbs(strategy.navInETH(), navBeforeWithdrawal - WITHDRAW_AMOUNT, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), navBeforeWithdrawal - WITHDRAW_AMOUNT, NAV_TOLERANCE);
     }
 
     function test_Withdraw_UsesExactOutputSwapForMissingWeth() public {
@@ -579,17 +644,20 @@ contract UniCLStratTest is UniCLStratTestBase {
     function test_Withdraw_FallsBackToExactInputWhenPairedBalanceInsufficient() public {
         _deposit(DEPOSIT_AMOUNT);
 
-        // Withdrawing the full NAV needs ~5 ETH of WETH topped up, but the
-        // slippage-padded exact-output maximum exceeds the ~5 ETH paired balance,
-        // so the strategy falls back to a best-effort exact-input swap of the
-        // whole paired balance (no exact-output call is made).
+        // Withdrawing the full NAV needs the ~5 ETH paired half converted. The route costs 1%,
+        // so the slippage-padded exact-output maximum exceeds the paired balance and the
+        // strategy falls back to a best-effort exact-input swap of the whole paired balance
+        // (no exact-output call is made).
+        converter.setQuoteMultiplierBps(EXPENSIVE_ROUTE_QUOTE_MULTIPLIER_BPS);
         uint256 withdrawAmount = strategy.navInETH();
 
         vm.prank(strategyManager);
-        strategy.withdraw(receiver, withdrawAmount);
+        uint256 withdrawn = strategy.withdraw(receiver, withdrawAmount);
 
         assertEq(converter.lastExecuteSwapExactAmountOutCall(), 0);
-        assertApproxEqAbs(receiver.balance, withdrawAmount, NAV_TOLERANCE);
+        // The 1% realized cost is inside the 1.3% mark-down, so the request is still met.
+        assertGe(withdrawn, withdrawAmount);
+        assertEq(receiver.balance, withdrawn);
         assertApproxEqAbs(strategy.navInETH(), 0, NAV_TOLERANCE);
     }
 
@@ -636,7 +704,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(pairedToken.balanceOf(address(strategy)), pairedBalanceBefore);
         assertEq(strategy.totalWithdrawn(), withdrawAmount);
         assertTrue(strategy.isHealthy());
-        assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT + IDLE_ETH_DONATION - withdrawAmount, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), DEPOSIT_AMOUNT + IDLE_ETH_DONATION - withdrawAmount, NAV_TOLERANCE);
     }
 
     function test_Withdraw_UsesIdleNativeETHForFullNAVWithdrawal() public {
@@ -647,13 +715,18 @@ contract UniCLStratTest is UniCLStratTestBase {
         _donate(IDLE_ETH_DONATION);
 
         uint256 withdrawAmount = strategy.maxWithdrawal();
-        assertApproxEqAbs(withdrawAmount, DEPOSIT_AMOUNT + IDLE_ETH_DONATION, NAV_TOLERANCE);
+        uint256 grossNav = _grossNavInETH();
+        assertEq(withdrawAmount, strategy.navInETH());
+        assertApproxEqAbs(grossNav, DEPOSIT_AMOUNT + IDLE_ETH_DONATION, NAV_TOLERANCE);
 
         vm.prank(strategyManager);
         uint256 withdrawn = strategy.withdraw(receiver, withdrawAmount);
 
-        assertApproxEqAbs(withdrawn, withdrawAmount, NAV_TOLERANCE);
-        assertApproxEqAbs(receiver.balance, withdrawAmount, NAV_TOLERANCE);
+        // The mock route converts at no cost, so the full-NAV drain also pays out the
+        // unspent exit-cost mark-down.
+        assertGe(withdrawn, withdrawAmount);
+        assertApproxEqAbs(withdrawn, grossNav, NAV_TOLERANCE);
+        assertEq(receiver.balance, withdrawn);
         assertApproxEqAbs(strategy.navInETH(), 0, NAV_TOLERANCE);
     }
 
@@ -678,7 +751,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(receiver.balance, withdrawAmount);
         // All idle native ETH was consumed by the payout
         assertEq(address(strategy).balance, 0);
-        assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT + IDLE_ETH_DONATION - withdrawAmount, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), DEPOSIT_AMOUNT + IDLE_ETH_DONATION - withdrawAmount, NAV_TOLERANCE);
     }
 
     function test_Withdraw_RevertsWhenExactOutputQuoteFails() public {
@@ -1993,7 +2066,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         _deposit(DEPOSIT_AMOUNT);
 
         assertApproxEqRel(_positionLiquidity(mainPosition), uint256(mainLiquidityBefore) * 2, 1e15);
-        assertApproxEqAbs(strategy.navInETH(), 2 * DEPOSIT_AMOUNT, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), 2 * DEPOSIT_AMOUNT, NAV_TOLERANCE);
     }
 
     function test_Deposit_SwapsToMainRangeRatioWhenSpotIsOffCenter() public {
@@ -2042,7 +2115,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         (int24 oldAltLower, int24 oldAltUpper) = strategy.positionAlt();
         IUniCLStrat.Position memory oldAlt = IUniCLStrat.Position(oldAltLower, oldAltUpper);
         assertGt(_positionLiquidity(oldAlt), 0);
-        uint256 navBefore = strategy.navInETH();
+        uint256 navBefore = _grossNavInETH();
 
         // Next leftover is WETH: the token1-only alt below spot cannot hold it.
         pairedToken.mint(address(strategy), IDLE_PAIRED_DONATION);
@@ -2055,7 +2128,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(oldLiquidity, 0);
         assertEq(oldOwed0, 0);
         assertEq(oldOwed1, 0);
-        assertApproxEqRel(strategy.navInETH(), navBefore + IDLE_PAIRED_DONATION + SMALL_DEPOSIT_AMOUNT, 1e15);
+        assertApproxEqRel(_grossNavInETH(), navBefore + IDLE_PAIRED_DONATION + SMALL_DEPOSIT_AMOUNT, 1e15);
     }
 
     function test_Deposit_SkipsSwapBelowMinInventorySwap() public {
@@ -2082,7 +2155,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertGt(mainLiquidityAfter, 0);
         // Only ~WITHDRAW_AMOUNT (+ buffer) of the 10 ETH position was burned.
         assertGe(uint256(mainLiquidityAfter) * DEPOSIT_AMOUNT, uint256(mainLiquidityBefore) * 6 ether);
-        assertApproxEqRel(strategy.navInETH(), DEPOSIT_AMOUNT - WITHDRAW_AMOUNT, 1e15);
+        assertApproxEqRel(_grossNavInETH(), DEPOSIT_AMOUNT - WITHDRAW_AMOUNT, 1e15);
     }
 
     function test_Withdraw_PartiallyBurnsWhenPoolIsNotCalmButRouteIsTradable() public {
@@ -2137,11 +2210,16 @@ contract UniCLStratTest is UniCLStratTestBase {
     function test_Withdraw_FullNAVUnwindsEverything() public {
         _deposit(DEPOSIT_AMOUNT);
         uint256 nav = strategy.navInETH();
+        uint256 grossNav = _grossNavInETH();
 
         vm.prank(strategyManager);
         uint256 withdrawn = strategy.withdraw(receiver, nav);
 
-        assertApproxEqAbs(withdrawn, nav, NAV_TOLERANCE);
+        // Drains the strategy: nothing is stranded behind the exit-cost mark-down.
+        assertGe(withdrawn, nav);
+        assertApproxEqAbs(withdrawn, grossNav, NAV_TOLERANCE);
+        assertEq(pairedToken.balanceOf(address(strategy)), 0);
+        assertEq(weth.balanceOf(address(strategy)), 0);
         assertEq(_positionLiquidity(_mainPosition()), 0);
         (int24 altLower, int24 altUpper) = strategy.positionAlt();
         assertEq(_positionLiquidity(IUniCLStrat.Position(altLower, altUpper)), 0);

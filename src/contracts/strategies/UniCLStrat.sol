@@ -221,6 +221,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     // ============ Strategy Views ============
+    /// @dev Net of the estimated cost of converting the paired-token inventory back to WETH
+    ///      (pool fee tier + `swapSlippageBps`); see {UniCLStratLib-inventoryValueInETH}.
     function navInETH() public view returns (uint256) {
         return address(this).balance
             + UniCLStratLib.inventoryValueInETH(
@@ -231,7 +233,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
                 address(token1),
                 positionMain,
                 positionAlt,
-                _twapSqrtPrice()
+                _twapSqrtPrice(),
+                swapSlippageBps
             );
     }
 
@@ -347,7 +350,9 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        is independently bounded, and a calm revert would stall exit liquidity when
      *        redemptions spike. See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *      In both paths the receiver gets a single native ETH transfer and the return value
-     *      is the ETH actually delivered.
+     *      is the ETH actually delivered. A request for the whole `navInETH()` drains the
+     *      strategy: NAV is marked net of the estimated exit cost, so the payout can exceed
+     *      `_amount` by the part of that estimate the conversion did not spend.
      */
     function withdraw(address _receiver, uint256 _amount)
         external
@@ -380,8 +385,15 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             bool _nearFullWithdrawal = _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
             _sourceWeth(_remainder, _nearFullWithdrawal);
 
+            // NAV is net of the estimated exit cost, so a full-NAV request that converts for
+            // less than the estimate would strand the difference. Drain it: convert whatever
+            // paired token is left and pay out all WETH (may exceed `_amount` by the unspent
+            // part of the estimate).
+            bool _fullWithdrawal = _amount == _navBeforeWithdrawal;
+            if (_fullWithdrawal) _swapPairedTokenToWeth(type(uint256).max);
+
             uint256 _wethBalance = weth.balanceOf(address(this));
-            uint256 _wethToUnwrap = _wethBalance < _remainder ? _wethBalance : _remainder;
+            uint256 _wethToUnwrap = _fullWithdrawal || _wethBalance < _remainder ? _wethBalance : _remainder;
             _withdrawn = _idleETH + _wethToUnwrap;
             if (_withdrawn == 0) revert UniCLStratInsufficientWETH();
 
@@ -503,6 +515,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     /**
      * @notice Sets the slippage tolerance for inventory-balancing swaps
+     * @dev Also moves `navInETH()`: the paired-token inventory is marked down by this tolerance
+     *      plus the pool fee tier, so a change re-marks NAV in the block it executes.
      * @param _newSwapSlippageBps Slippage in basis points (must not exceed MAX_SWAP_SLIPPAGE_BPS)
      */
     function setSwapSlippageBps(uint256 _newSwapSlippageBps) external onlyAuthRole(Auth.ADMIN_ROLE) {

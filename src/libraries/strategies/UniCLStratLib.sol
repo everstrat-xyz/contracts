@@ -59,6 +59,8 @@ library UniCLStratLib {
     }
 
     uint256 internal constant BASIS_POINTS = 10_000;
+    /// @dev Denominator of Uniswap V3 fee tiers (hundredths of a bip).
+    uint256 internal constant FEE_DENOMINATOR = 1_000_000;
     uint256 internal constant SWAP_DEADLINE_OFFSET = 15 minutes;
     /// @dev Maximum deviation between an adapter quote and the Chainlink-implied amount; see
     ///      `UniCLStrat.MAX_QUOTE_DEVIATION_BPS` for the fee-tier interaction.
@@ -836,8 +838,18 @@ library UniCLStratLib {
 
     /**
      * @notice ETH value of the strategy's (`address(this)`) idle token0/token1 balances plus both
-     *         pool positions (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens).
+     *         pool positions (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens), net of
+     *         the estimated cost of converting the paired-token side back to WETH.
      * @dev Excludes native ETH (added by the caller). Priced via Oracle cross-rates.
+     *
+     *      Exit-cost deduction (audit G2): every payout leaves the strategy as ETH, so the
+     *      paired-token share of the inventory must be swapped before it can be redeemed. Marking
+     *      it at the gross oracle price would let a redeemer exit at a price that ignores that
+     *      cost and leave it with the holders who remain. The paired-token value is therefore
+     *      marked down by `pool fee tier + _slippageBps` — the fee the conversion pays plus the
+     *      slippage the strategy tolerates on it. The WETH side is not marked down: it unwraps 1:1.
+     *      Rounded up, so the mark-down never under-reserves.
+     * @param _slippageBps The strategy's swap slippage tolerance (bps)
      */
     function inventoryValueInETH(
         IUniswapV3Pool _pool,
@@ -847,18 +859,36 @@ library UniCLStratLib {
         address _token1,
         IUniCLStrat.Position memory _main,
         IUniCLStrat.Position memory _alt,
-        uint160 _twapSqrtPriceX96
+        uint160 _twapSqrtPriceX96,
+        uint256 _slippageBps
     ) public view returns (uint256) {
         (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _main, _twapSqrtPriceX96);
         (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _alt, _twapSqrtPriceX96);
-        return pairValueInETH(
-            _oracle,
-            _weth,
-            _token0,
-            _token1,
-            IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0,
-            IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1
-        );
+        uint256 _value0 =
+            _valueInETH(_oracle, _weth, _token0, IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0);
+        uint256 _value1 =
+            _valueInETH(_oracle, _weth, _token1, IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1);
+
+        uint256 _pairedValue = _token0 == _weth ? _value1 : _value0;
+        return _value0 + _value1 - exitCostInETH(_pool, _pairedValue, _slippageBps);
+    }
+
+    /**
+     * @notice Estimated ETH cost of converting `_pairedValue` (ETH terms) of paired token to WETH:
+     *         the pool's fee tier plus `_slippageBps`, rounded up.
+     * @dev The fee tier is read from the strategy pool. The configured route need not trade
+     *      through that pool, but it converts the same pair, and the production route is a single
+     *      hop through it; `_slippageBps` absorbs the difference for other routes. Uniswap V3 fees
+     *      are in hundredths of a bip (1e-6), hence the {FEE_DENOMINATOR} scale.
+     */
+    function exitCostInETH(IUniswapV3Pool _pool, uint256 _pairedValue, uint256 _slippageBps)
+        public
+        view
+        returns (uint256)
+    {
+        if (_pairedValue == 0) return 0;
+        uint256 _costPips = uint256(_pool.fee()) + _slippageBps * (FEE_DENOMINATOR / BASIS_POINTS);
+        return (_pairedValue * _costPips + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR;
     }
 
     /// @notice ETH value of `_amount0` token0 plus `_amount1` token1.
