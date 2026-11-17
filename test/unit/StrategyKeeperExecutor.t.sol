@@ -690,4 +690,66 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         executor.unpause();
         assertFalse(executor.paused());
     }
+
+    // ============ Coverage gaps ============
+
+    /// @dev Ordinal of the QueueKeeperExecutor action that closes the current batch for
+    ///      processing; addressed by ordinal so this does not depend on the member's name.
+    uint8 internal constant QUEUE_CLOSE_BATCH_ACTION = 1;
+
+    /// @dev Matures and closes the current batch through the registered queue executor.
+    function _closeCurrentBatchViaQueueExecutor() internal returns (uint256 batchId) {
+        batchId = exitQueue.currentBatchId();
+        if (!queueExecutor.isExecutorCaller(automationAccount)) queueExecutor.allowExecutorCaller(automationAccount);
+        vm.warp(block.timestamp + queueExecutor.minBatchAge());
+        vm.prank(automationAccount);
+        queueExecutor.perform(QUEUE_CLOSE_BATCH_ACTION, abi.encode(batchId));
+    }
+
+    function test_StrategyUpkeepStatus_HarvestWhenFeesPendingAndNothingOutranksIt() public {
+        _enablePerformanceFees();
+        // Remove deposit capacity so idle Controller ETH does not outrank the harvest.
+        strategy.setMaxDeposit(0);
+
+        uint256 feeETH = strategyManager.pendingPerformanceFeeInETH(address(strategy));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees));
+        assertEq(amount, feeETH);
+
+        (bool canExec, bytes memory execPayload) = executor.checker();
+        assertTrue(canExec);
+        assertEq(
+            execPayload,
+            abi.encodeCall(
+                StrategyKeeperExecutor.perform, (uint8(IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees))
+            )
+        );
+    }
+
+    /// @dev A later batch settled out of order (direct keeper call) costs nothing, while the
+    ///      earlier, still-open batch keeps the scan anchored and is still counted.
+    function test_PendingRedemptionNeedsETH_IgnoresLaterBatchSettledOutOfOrder() public {
+        address user2 = makeAddr("user2");
+        vm.deal(user2, BOOTSTRAP_DEPOSIT);
+        vm.prank(user2);
+        amm.enter{value: BOOTSTRAP_DEPOSIT}(MIN_TOKENS_TO_MINT);
+
+        _queueExit(user, EXIT_ETH);
+        uint256 firstBatchId = _closeCurrentBatchViaQueueExecutor();
+        uint256 needsFirstOnly = executor.pendingRedemptionNeedsETH();
+        assertGt(needsFirstOnly, 0);
+
+        _queueExit(user2, EXIT_ETH);
+        uint256 secondBatchId = _closeCurrentBatchViaQueueExecutor();
+        assertGt(secondBatchId, firstBatchId);
+        assertGt(executor.pendingRedemptionNeedsETH(), needsFirstOnly);
+
+        vm.prank(address(executor));
+        controller.processRequests(secondBatchId, 0, 1);
+        assertEq(exitQueue.unprocessedUsersCount(secondBatchId), 0);
+        assertGt(exitQueue.unprocessedUsersCount(firstBatchId), 0);
+
+        assertEq(queueExecutor.nextLiveBatchIdToProcess(), firstBatchId);
+        assertApproxEqRel(executor.pendingRedemptionNeedsETH(), needsFirstOnly, 1e12);
+    }
 }
