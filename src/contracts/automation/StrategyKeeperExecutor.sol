@@ -173,9 +173,10 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         } else if (strategyAction == StrategyAction.WithdrawShortfall) {
             uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
             uint256 controllerBalance = address(controller).balance;
-            if (needsETH <= controllerBalance || needsETH - controllerBalance < minWithdrawETH) {
-                revert KeeperExecutorNoUpkeepNeeded();
-            }
+            if (
+                needsETH <= controllerBalance || needsETH - controllerBalance < minWithdrawETH
+                    || _totalMaxWithdrawal(strategyManager_) == 0
+            ) revert KeeperExecutorNoUpkeepNeeded();
             uint256 shortfall = needsETH - controllerBalance;
             uint256 actualWithdrawn = controller.withdrawFromStrategies(shortfall);
             emit StrategyUpkeepPerformed(strategyAction, actualWithdrawn);
@@ -268,9 +269,13 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         return false;
     }
 
+    /// @dev Liquidity `withdrawFromStrategies` can actually reach: weight-0 strategies are excluded
+    ///      from batch withdrawals, so counting them would recommend a WithdrawShortfall that
+    ///      cannot pull anything (audit G6).
     function _totalMaxWithdrawal(IStrategyManager _strategyManager) internal view returns (uint256 total) {
         address[] memory strategies = _strategyManager.strategies();
         for (uint256 i = 0; i < strategies.length; i++) {
+            if (_strategyManager.withdrawalWeight(strategies[i]) == 0) continue;
             total += IStrategy(strategies[i]).maxWithdrawal();
         }
     }

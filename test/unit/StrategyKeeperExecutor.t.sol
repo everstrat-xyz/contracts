@@ -413,6 +413,19 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
     }
 
+    /// @dev Audit G6: liquidity in a weight-0 strategy is unreachable by `withdrawFromStrategies`,
+    ///      so it must not make the keeper recommend a WithdrawShortfall.
+    function test_WithdrawShortfall_IgnoresZeroWithdrawalWeightLiquidity() public {
+        _deployCapitalToStrategy();
+        strategyManager.setWithdrawalWeight(address(strategy), 0);
+        _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
+
+        assertGt(executor.pendingRedemptionNeedsETH(), address(controller).balance);
+        assertGt(strategy.maxWithdrawal(), 0);
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+    }
+
     function test_WithdrawShortfall_NoUpkeepWhenCovered() public {
         // Controller still holds the full bootstrap deposit — nothing to pull.
         _queueExit(user, EXIT_ETH);

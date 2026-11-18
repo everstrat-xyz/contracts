@@ -1004,44 +1004,33 @@ contract StrategyManager is
     {
         uint256 strategiesAmount = _endIndex - _startIndex;
 
-        uint256 cumulativeDepositWeight;
-        uint8[] memory depositWeights = new uint8[](strategiesAmount);
-
-        uint256[] memory maxDeposits = new uint256[](strategiesAmount);
+        uint256[] memory weights = new uint256[](strategiesAmount);
+        uint256[] memory caps = new uint256[](strategiesAmount);
 
         for (uint256 i; i < strategiesAmount; ++i) {
-            IStrategy strategy = IStrategy(_strategies.at(i + _startIndex));
-
-            uint256 maxDeposit = strategy.maxDeposit();
+            address strategy = _strategies.at(i + _startIndex);
 
             // Strategies still cooling down after a withdrawal are skipped like unhealthy ones,
             // consistent with the batch path's partial-success design. Zero depositWeight means
             // registered-but-unfunded — skipped for allocation without reverting.
-            if (!_isStrategyInDepositCooldown(address(strategy)) && strategy.isHealthy() && maxDeposit > 0) {
-                maxDeposits[i] = maxDeposit;
-
-                depositWeights[i] = depositWeight[address(strategy)];
-                cumulativeDepositWeight += depositWeights[i];
+            weights[i] = depositWeight[strategy];
+            if (weights[i] > 0 && !_isStrategyInDepositCooldown(strategy) && IStrategy(strategy).isHealthy()) {
+                caps[i] = IStrategy(strategy).maxDeposit();
             }
         }
 
-        if (cumulativeDepositWeight == 0) {
-            if (_amount > 0) payable(registry().controller()).sendValue(_amount);
-            return 0;
-        }
+        uint256[] memory amounts = _allocateByWeight(_amount, weights, caps);
 
         for (uint256 i; i < strategiesAmount; ++i) {
-            uint256 depositAmount = OZMath.min(_amount * depositWeights[i] / cumulativeDepositWeight, maxDeposits[i]);
+            uint256 depositAmount = amounts[i];
+            if (depositAmount == 0) continue;
+            address strategy = _strategies.at(i + _startIndex);
 
-            if (depositAmount > 0) {
-                address strategy = _strategies.at(i + _startIndex);
-
-                try IStrategy(strategy).deposit{value: depositAmount}() {
-                    totalDeposited += depositAmount;
-                    emit FundsDepositedToStrategy(strategy, depositAmount);
-                } catch (bytes memory reason) {
-                    emit StrategyDepositFailed(strategy, reason);
-                }
+            try IStrategy(strategy).deposit{value: depositAmount}() {
+                totalDeposited += depositAmount;
+                emit FundsDepositedToStrategy(strategy, depositAmount);
+            } catch (bytes memory reason) {
+                emit StrategyDepositFailed(strategy, reason);
             }
         }
 
@@ -1089,68 +1078,117 @@ contract StrategyManager is
      * @dev Range is [startIndex, endIndex), meaning strategies from startIndex up to but not including endIndex
      * @return totalWithdrawn The total ETH actually received by the controller (net of strategy fees)
      */
+    /// @dev Splits `_amount` across `[_startIndex, _endIndex)` by withdrawal weight, capped at each
+    ///      strategy's `maxWithdrawal()`. Whatever a cap cuts off is re-split across the strategies
+    ///      that still have room (`_allocateByWeight`), and what a reverting `withdraw()` fails to
+    ///      deliver gets one retry across the strategies that did pay out, at their live caps — so
+    ///      the batch only under-fills when the weighted strategies really lack liquidity (audit G6).
+    ///      Weight-0 strategies stay excluded; `withdrawFromStrategy` still reaches them.
     function _withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
         internal
         returns (uint256 totalWithdrawn)
     {
         uint256 strategiesAmount = _endIndex - _startIndex;
 
-        uint256 cumulativeWithdrawalWeight;
-        uint8[] memory withdrawalWeights = new uint8[](strategiesAmount);
-        uint256[] memory maxWithdrawals = new uint256[](strategiesAmount);
+        address[] memory strategies = new address[](strategiesAmount);
+        uint256[] memory weights = new uint256[](strategiesAmount);
+        uint256[] memory caps = new uint256[](strategiesAmount);
 
         for (uint256 i; i < strategiesAmount; ++i) {
-            IStrategy strategy = IStrategy(_strategies.at(i + _startIndex));
-
-            uint256 maxWithdrawal = strategy.maxWithdrawal();
-
-            if (maxWithdrawal > 0) {
-                maxWithdrawals[i] = maxWithdrawal;
-
-                withdrawalWeights[i] = withdrawalWeight[address(strategy)];
-                cumulativeWithdrawalWeight += withdrawalWeights[i];
-            }
+            address strategy = _strategies.at(i + _startIndex);
+            strategies[i] = strategy;
+            weights[i] = withdrawalWeight[strategy];
+            if (weights[i] > 0) caps[i] = IStrategy(strategy).maxWithdrawal();
         }
 
-        if (cumulativeWithdrawalWeight == 0) return 0;
+        uint256[] memory amountsToWithdraw = _allocateByWeight(_amount, weights, caps);
 
-        uint256[] memory amountsToWithdraw = new uint256[](strategiesAmount);
         address[] memory withdrawingStrategies = new address[](strategiesAmount);
         uint256 withdrawingCount;
-
         for (uint256 i; i < strategiesAmount; ++i) {
-            uint256 amountToWithdraw =
-                OZMath.min(_amount * withdrawalWeights[i] / cumulativeWithdrawalWeight, maxWithdrawals[i]);
-            amountsToWithdraw[i] = amountToWithdraw;
-            if (amountToWithdraw > 0) {
-                withdrawingStrategies[withdrawingCount] = _strategies.at(i + _startIndex);
-                unchecked {
-                    ++withdrawingCount;
-                }
-            }
+            if (amountsToWithdraw[i] > 0) withdrawingStrategies[withdrawingCount++] = strategies[i];
         }
+        if (withdrawingCount == 0) return 0;
 
         _harvestPerformanceFeesFor(withdrawingStrategies, withdrawingCount);
 
         address controller = registry().controller();
+        uint256 unfilled;
         for (uint256 i; i < strategiesAmount; ++i) {
-            uint256 amountToWithdraw = amountsToWithdraw[i];
-            if (amountToWithdraw == 0) continue;
-
-            address strategy = _strategies.at(i + _startIndex);
-
-            uint256 balanceBefore = controller.balance;
-            try IStrategy(strategy).withdraw(controller, amountToWithdraw) {
-                uint256 withdrawn = controller.balance - balanceBefore;
-                totalWithdrawn += withdrawn;
-
-                // Start the deposit cooldown window for this strategy (see strategyDepositCooldown)
-                lastStrategyWithdrawal[strategy] = block.timestamp;
-
-                emit FundsWithdrawnFromStrategy(strategy, withdrawn);
-            } catch (bytes memory reason) {
-                emit StrategyWithdrawFailed(strategy, reason);
+            if (amountsToWithdraw[i] == 0) continue;
+            (bool ok, uint256 withdrawn) = _tryWithdraw(strategies[i], controller, amountsToWithdraw[i]);
+            totalWithdrawn += withdrawn;
+            if (!ok) {
+                unfilled += amountsToWithdraw[i];
+                amountsToWithdraw[i] = 0;
             }
+        }
+        if (unfilled == 0) return totalWithdrawn;
+
+        // Retry only strategies that paid out (and were harvested above), at their live caps
+        for (uint256 i; i < strategiesAmount; ++i) {
+            caps[i] = amountsToWithdraw[i] == 0 ? 0 : IStrategy(strategies[i]).maxWithdrawal();
+        }
+        amountsToWithdraw = _allocateByWeight(unfilled, weights, caps);
+        for (uint256 i; i < strategiesAmount; ++i) {
+            if (amountsToWithdraw[i] == 0) continue;
+            (, uint256 withdrawn) = _tryWithdraw(strategies[i], controller, amountsToWithdraw[i]);
+            totalWithdrawn += withdrawn;
+        }
+    }
+
+    /// @dev Best-effort `withdraw()` for the batch path. Counts the Controller's ETH balance delta
+    ///      (net of strategy fees); on revert emits `StrategyWithdrawFailed` and returns `(false, 0)`.
+    function _tryWithdraw(address _strategy, address _controller, uint256 _amount)
+        internal
+        returns (bool ok, uint256 withdrawn)
+    {
+        uint256 balanceBefore = _controller.balance;
+        try IStrategy(_strategy).withdraw(_controller, _amount) {
+            withdrawn = _controller.balance - balanceBefore;
+
+            // Start the deposit cooldown window for this strategy (see strategyDepositCooldown)
+            lastStrategyWithdrawal[_strategy] = block.timestamp;
+
+            emit FundsWithdrawnFromStrategy(_strategy, withdrawn);
+            ok = true;
+        } catch (bytes memory reason) {
+            emit StrategyWithdrawFailed(_strategy, reason);
+        }
+    }
+
+    /// @dev Water-filling split of `_amount` in proportion to `_weights`, capped per entry at
+    ///      `_caps`. Each round gives every entry with room left `min(share, room)` and carries
+    ///      what the caps cut off into the next round, among the entries that still have room.
+    ///      A round either fills at least one entry to its cap (at most `n` such rounds) or places
+    ///      all but under `n` wei of rounding dust, after which every round places at least one
+    ///      wei or stops — so it ends within `2n + 1` rounds. Entries with a zero cap get nothing; floor rounding may
+    ///      leave up to `n` wei unallocated, as the plain proportional split did.
+    function _allocateByWeight(uint256 _amount, uint256[] memory _weights, uint256[] memory _caps)
+        internal
+        pure
+        returns (uint256[] memory amounts)
+    {
+        uint256 n = _weights.length;
+        amounts = new uint256[](n);
+        uint256 remaining = _amount;
+
+        while (remaining > 0) {
+            uint256 activeWeight;
+            for (uint256 i; i < n; ++i) {
+                if (amounts[i] < _caps[i]) activeWeight += _weights[i];
+            }
+            if (activeWeight == 0) break;
+
+            uint256 placed;
+            for (uint256 i; i < n; ++i) {
+                if (amounts[i] >= _caps[i]) continue;
+                uint256 share = OZMath.min(remaining * _weights[i] / activeWeight, _caps[i] - amounts[i]);
+                amounts[i] += share;
+                placed += share;
+            }
+            if (placed == 0) break;
+            remaining -= placed;
         }
     }
 
