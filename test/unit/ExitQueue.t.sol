@@ -891,6 +891,26 @@ contract ExitQueueTest is ProtocolTestBase {
         assertEq(users.length, 2);
     }
 
+    /// @dev Audit G10 (documented behaviour): unprocessed users are kept in an EnumerableSet, so
+    ///      removing one moves the LAST user into its slot. Payment order (keepers settle from
+    ///      index 0) is therefore not arrival order. Pins the documented semantics: switching to
+    ///      first come, first served must be a deliberate change that updates this test.
+    function test_UnprocessedUsers_OrderIsNotArrivalOrderAfterRemoval() public {
+        vm.startPrank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        exitQueue.pushRequest(user2, EVE_PRICE_1, TOKENS_TO_BURN_2, PRICE_TOLERANCE_1_PCT);
+        exitQueue.pushRequest(user3, EVE_PRICE_1, TOKENS_TO_BURN_3, PRICE_TOLERANCE_1_PCT);
+
+        // Unpriced batch: the first arrival cancels
+        exitQueue.closeRequest(batchId, user1);
+        vm.stopPrank();
+
+        address[] memory users = exitQueue.unprocessedUsers(batchId);
+        assertEq(users.length, 2);
+        assertEq(users[0], user3); // last arrival swapped to the front — paid before user2
+        assertEq(users[1], user2);
+    }
+
     function test_UnprocessedUsers_InvalidRange_Reverts() public {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);

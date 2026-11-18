@@ -37,6 +37,9 @@ interface IExitQueue {
         uint256 finalEvePrice;
         bool canBeProcessed;
         mapping(address user => RedemptionRequest request) requests;
+        // Iteration order is NOT arrival order: `EnumerableSet.remove` moves the last user into
+        // the freed slot, so every pull / close reorders the tail. Payment order is therefore
+        // not first come, first served (audit G10) — see {unprocessedUsers}.
         EnumerableSet.AddressSet unprocessedUsers;
     }
 
@@ -242,6 +245,12 @@ interface IExitQueue {
 
     /**
      * @notice Get the addresses of the unprocessed users in a batch in the given range
+     * @dev Indices are positions in an OpenZeppelin `EnumerableSet`, NOT arrival order. Each
+     *      `pullRequest` / `closeRequest` (payment, slippage close, cancellation) swaps the last
+     *      user into the removed slot, so the order depends on the history of removals. The
+     *      keepers settle a batch from index 0 upward, so when a batch can only be partly
+     *      funded, who is paid first is not first come, first served; users left unpaid when the
+     *      batch expires recover their EVE via `AMM.cancelRedemption` (audit G10).
      * @param _batchId The ID of the batch
      * @param _startIndex The start index (inclusive)
      * @param _endIndex The end index (exclusive)
@@ -254,6 +263,7 @@ interface IExitQueue {
 
     /**
      * @notice Get the addresses of all the unprocessed users in a batch
+     * @dev Same ordering caveat as the ranged overload: set order, not arrival order.
      * @param _batchId The ID of the batch
      * @return users The addresses of the unprocessed users
      */

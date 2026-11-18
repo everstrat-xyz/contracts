@@ -77,8 +77,10 @@ ExitQueue::unprocessedUsersCount(uint256 _batchId)
     └── It should return 0 once all requests are pulled or closed
 
 ExitQueue::unprocessedUsers(uint256 _batchId)
-└── Given batch exists with requests
-    └── It should return array of all unprocessed user addresses
+├── Given batch exists with requests
+│   └── It should return array of all unprocessed user addresses
+└── Given a request was removed (pull / close)
+    └── It should return set order, not arrival order: the last user fills the freed slot (audit G10)
 
 ExitQueue::unprocessedUsers(uint256 _batchId, uint256 _startIndex, uint256 _endIndex)
 ├── Given range is invalid (startIndex >= endIndex or endIndex > length)
