@@ -43,7 +43,10 @@ StrategyKeeperExecutor::pendingRedemptionNeedsETH()
 ├── It should anchor the scan at QueueKeeperExecutor.nextLiveBatchIdToProcess() (the two
 │   executors must agree on which batch is next, or reserved ETH drifts)
 ├── It should not count the unpriced current batch
-└── It should count priced batches inside MAX_BATCH_PROCESSING_TIME
+├── It should count priced batches inside MAX_BATCH_PROCESSING_TIME
+├── It should cost every remaining request in a batch (totalTokensToBurn × finalEvePrice), not a
+│   capped per-user scan, and equal liveRedemptionOffsets().liabilityETH (audit G5)
+└── It should drop processed requests from the estimate
 
 StrategyKeeperExecutor::setControllerReserveETH / setExitLiquidityTargetETH / setSyncInterval / setMinWithdrawETH
 └── It should enforce ADMIN_ROLE and accept 0 as a meaningful explicit choice

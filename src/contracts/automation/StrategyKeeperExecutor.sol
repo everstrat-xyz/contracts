@@ -53,7 +53,6 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
     ///      desync the keeper. A DoS bound, not cadence — `minBatchAge` vs
     ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping batches.
     uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
-    uint256 public constant MAX_USERS_COST_SCAN = 50;
 
     uint256 private constant _DEFAULT_MIN_DEPOSIT_ETH = 0.1 ether;
     uint256 private constant _DEFAULT_MIN_WITHDRAW_ETH = 0.01 ether;
@@ -335,24 +334,17 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         }
     }
 
-    function _batchSettlementCost(IExitQueue _queue, uint256 _batchId) internal view returns (uint256 cost) {
-        (bool canBeProcessed, uint256 finalEvePrice,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
+    /// @dev Costs the whole remaining batch: `totalTokensToBurn` already nets out every
+    ///      processed / closed request, so no per-user scan is needed and no request is missed
+    ///      however many users the batch holds (audit G5). Same figure `liveRedemptionOffsets`
+    ///      deducts from NAV. Requests that will close on slippage are still counted, so the
+    ///      estimate errs high (their tokens are returned, never paid out) — never short.
+    function _batchSettlementCost(IExitQueue _queue, uint256 _batchId) internal view returns (uint256) {
+        (bool canBeProcessed, uint256 finalEvePrice, uint256 totalTokensToBurn,, uint256 pricedAt) =
+            _queue.batchInfo(_batchId);
         if (!canBeProcessed) return 0;
         if (pricedAt > 0 && block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
 
-        uint256 count = _queue.unprocessedUsersCount(_batchId);
-        if (count == 0) return 0;
-
-        uint256 cap = count > MAX_USERS_COST_SCAN ? MAX_USERS_COST_SCAN : count;
-        address[] memory users = _queue.unprocessedUsers(_batchId, 0, cap);
-
-        for (uint256 i = 0; i < users.length; i++) {
-            (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
-                _queue.requestInfo(_batchId, users[i]);
-
-            if (!finalEvePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)) {
-                cost += tokensToBurn.convertAssets(finalEvePrice);
-            }
-        }
+        return totalTokensToBurn.convertAssets(finalEvePrice);
     }
 }
