@@ -996,4 +996,10 @@ cast send <PROXY_ADDRESS> "upgradeToAndCall(address,bytes)" <NEW_IMPLEMENTATION>
 
 ## License
 
-MIT
+MIT (see [`LICENSE`](LICENSE)), except for the following files adapted from Uniswap V3, which keep their upstream `GPL-2.0-or-later` license as required by its terms:
+
+- `src/libraries/integrations/uniswap/TickMath.sol` (from [v3-core `TickMath`](https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/TickMath.sol))
+- `src/libraries/integrations/uniswap/FixedPoint96.sol` (from [v3-core `FixedPoint96`](https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/FixedPoint96.sol))
+- `src/libraries/integrations/uniswap/LiquidityAmounts.sol` (from [v3-periphery `LiquidityAmounts`](https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/LiquidityAmounts.sol))
+
+`FullMath.sol` is adapted from v3-core's `FullMath`, which Uniswap publishes under MIT, so it stays MIT. Each file's `SPDX-License-Identifier` header is authoritative. Contracts that compile in the GPL files — `UniCLStrat`, `UniCLStratLib` and `UniswapV3ConverterAdapter` — are distributed in combination with GPL-2.0-or-later code, so that combined work is subject to the GPL's terms; the MIT-licensed files themselves remain MIT.
