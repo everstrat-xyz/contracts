@@ -390,7 +390,7 @@ graph TB
 - **Emergency Exit**: `ADMIN_ROLE` or `SECURITY_ROLE` (not StrategyManager). Requires pause. Unwraps WETH directly via `weth.withdraw()` and sends native ETH to StrategyManager; writes off pending LP fees (`_tryAccrueLpFees` + charged = earned); emits `EmergencyExited(ethAmount)`. Transfers `pairedToken` as ERC-20 to StrategyManager — whitelist via `addSupportedERC20()` so NAV counts recoverable value. On-chain swap recovery via the shared Converter is deferred to a follow-up PR.
 - **Swap Routing**: Owns its route config — stores `swapAdapter` (whitelisted Converter adapter address), `wethToPairedTokenPath`, and `pairedTokenToWethPath` as `bytes` (always FORWARD-encoded; adapters handle any DEX-specific reversal). All wraps, unwraps, and inventory-balancing swaps are delegated to the shared Converter via `converter.wrapETH()`, `converter.unwrapWETH()`, `converter.executeSwap(adapter, path, ...)`, and `converter.executeSwapExactAmountOut(adapter, path, ...)`. `setRouteConfig(adapter, path, path)` validates the paths against the Converter's `routeTokens()` view.
 - **Swap Protection**: Every swap derives its bound from an on-chain quote (TWAP + Chainlink via the adapter), cross-checks the quote against symmetric Chainlink floor/ceiling bounds (`MAX_QUOTE_DEVIATION_BPS = 200`, which must exceed the route's pool fee tier since adapter quotes are fee-net), applies the configured slippage tolerance, and sets a per-swap deadline. Quote and swap execute atomically in one transaction — the TWAP quote source (not the quote-then-swap pattern itself) is what defeats same-block manipulation.
-- **Exact-Output Top-Ups**: `_convertToWeth()` (used by `withdraw`) swaps for EXACTLY the missing WETH via `_swapViaRouteExactOutput` with a slippage-padded input cap; if the cap exceeds the paired-token balance, it falls back to a best-effort exact-input swap of the whole balance.
+- **Exact-Output Top-Ups**: `UniCLStratLib.convertToWeth()` (used by `withdraw`) swaps for EXACTLY the missing WETH via `swapExactOut` with a slippage-padded input cap; if the cap exceeds the paired-token balance, it falls back to a best-effort exact-input swap of the whole balance. The swap runs in a try/catch self-call (`selfConvertToWeth`); a revert emits `WethConversionSkipped` and `withdraw` pays out the WETH it has (audit G7).
 - **External Integrations**: Converter, WETH, Uniswap V3 pool, Oracle (`src/interfaces/integrations/`)
 - **Strategy libraries**: `src/libraries/strategies/uni-cl-strategy/` (`TickMath`, `LiquidityAmounts`, `FullMath`, `FixedPoint96`, `TickUtils`)
 - **Deployment**: Direct deployment via `script/DeployUniCLStrat.s.sol` (bytecode only; requires prior timelocked `setAllowedAdapter`); `StrategyManager.addStrategy` is always scheduled on the 48h admin timelock — same after modular finalize and after `DeployAll`
@@ -978,12 +978,12 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    subgraph exactOutput ["UniCLStrat::_convertToWeth(target)"]
+    subgraph exactOutput ["UniCLStratLib::convertToWeth(target) — try/catch via selfConvertToWeth"]
         Need{"WETH balance >= target?"}
         NoSwap["No swap needed"]
         Quote["quoteSwapExactOutput(missing WETH)"]
         Bounds{"Quote within Chainlink<br/>floor/ceiling (±2%)?"}
-        RevertQ["Revert QuoteBelowOracleFloor /<br/>QuoteExceedsOracleCeiling"]
+        RevertQ["Revert QuoteBelowOracleFloor /<br/>QuoteExceedsOracleCeiling<br/>→ caught: WethConversionSkipped,<br/>withdraw pays partial"]
         Cap{"Slippage-padded max input<br/><= paired balance?"}
         ExactOut["executeSwapExactAmountOut<br/>(receive exactly missing WETH,<br/>surplus input refunded)"]
         Fallback["Fallback: executeSwap of the<br/>WHOLE paired balance (best effort,<br/>same oracle-bounded quote path)"]

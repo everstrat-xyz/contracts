@@ -205,7 +205,7 @@ library UniCLStratLib {
      *         enforced in this helper. Minting callers (`deposit` /
      *         `investIdleETH` / `rebalance`, and the re-add branch of
      *         `withdraw`) require calm before inventory swaps. `withdraw` →
-     *         `_convertToWeth` reaches this helper while the pool may be
+     *         {convertToWeth} reaches this helper while the pool may be
      *         dislocated; layers 0, 2, and 3 carry that path. Rationale:
      *         `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *
@@ -373,8 +373,9 @@ library UniCLStratLib {
      *      input is checked against the Chainlink-implied input, and the
      *      slippage tolerance pads the input MAXIMUM instead of flooring the
      *      output minimum. The calm-period guard is a caller-path check, not
-     *      enforced here; the strategy's `_convertToWeth` (withdraw) is the intended non-calm
-     *      caller.
+     *      enforced here; {convertToWeth} (withdraw) is the intended non-calm caller and runs
+     *      this helper inside a try/catch, so a revert here skips the conversion rather than
+     *      blocking the payout.
      *
      *      Balance-cap fallback: if the slippage-padded maximum input exceeds the
      *      strategy's balance of the input token, the exact output is unaffordable.
@@ -423,6 +424,29 @@ library UniCLStratLib {
         return _converter.executeSwapExactAmountOut(
             _config.adapter, _path, _amountOut, _maxAmountIn, block.timestamp + SWAP_DEADLINE_OFFSET
         );
+    }
+
+    /**
+     * @notice Tops the strategy's WETH balance up to `_targetWethAmount` by buying exactly the
+     *         missing WETH with the paired token, best effort.
+     * @dev Runs {swapExactOut} through the strategy's self-only hook
+     *      `IUniCLStrat.selfConvertToWeth` inside a try/catch: if the route cannot be traded
+     *      (quote fails, or is outside the oracle band) or the swap reverts, the paired token
+     *      stays in the strategy (still in NAV) and `withdraw` pays out the WETH it already
+     *      has instead of reverting the whole payout (audit G7). Emits
+     *      `IUniCLStrat.WethConversionSkipped` from the strategy (delegatecall context). The
+     *      catch is parameterless so a hostile route cannot grief with a returndata bomb.
+     * @param _weth WETH address
+     * @param _targetWethAmount WETH balance to reach
+     */
+    function convertToWeth(address _weth, uint256 _targetWethAmount) public {
+        uint256 _wethBalance = IERC20Metadata(_weth).balanceOf(address(this));
+        if (_wethBalance >= _targetWethAmount) return;
+
+        try IUniCLStrat(address(this)).selfConvertToWeth(_targetWethAmount - _wethBalance) {}
+        catch {
+            emit IUniCLStrat.WethConversionSkipped();
+        }
     }
 
     /**
