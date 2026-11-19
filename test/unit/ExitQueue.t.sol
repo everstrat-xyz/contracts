@@ -902,6 +902,28 @@ contract ExitQueueTest is ProtocolTestBase {
         exitQueue.unprocessedUsers(batchId, 0, 10); // endIndex > length
     }
 
+    // ============ Upgrade Tests ============
+
+    bytes32 internal constant ERC1967_IMPLEMENTATION_SLOT =
+        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+    function test_Upgrade_AdminCanUpgrade() public {
+        ExitQueue newImplementation = new ExitQueue();
+        exitQueue.upgradeToAndCall(address(newImplementation), "");
+
+        address implementation = address(uint160(uint256(vm.load(address(exitQueue), ERC1967_IMPLEMENTATION_SLOT))));
+        assertEq(implementation, address(newImplementation));
+        assertEq(exitQueue.currentBatchId(), INITIAL_BATCH_ID);
+    }
+
+    function test_Upgrade_RevertsForNonAdmin() public {
+        ExitQueue newImplementation = new ExitQueue();
+
+        vm.prank(unauthorized);
+        vm.expectRevert(abi.encodeWithSelector(IRegistryClient.RegistryClientMissingRole.selector, Auth.ADMIN_ROLE));
+        exitQueue.upgradeToAndCall(address(newImplementation), "");
+    }
+
     // ============ Pause/Unpause Tests ============
 
     function test_Pause_OnlyAdmin() public {

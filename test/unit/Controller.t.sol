@@ -1252,6 +1252,70 @@ contract ControllerTest is ProtocolTestBase {
 
         return reentrantAMM;
     }
+
+    /*//////////////////////////////////////////////////////////////
+                PAGINATED PERFORMANCE FEE HARVEST TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_HarvestPerformanceFeeFromStrategies_Paginated_HarvestsOnlyTheRange() public {
+        amm.enter{value: 1 ether}(1);
+        _configurePerformanceFees();
+        strategyManager.addStrategy(address(mockStrategy1), 80, 70);
+        strategyManager.addStrategy(address(mockStrategy2), 60, 50);
+        _accrueMockLpFees(mockStrategy1, LP_FEE_BASE_1);
+        _accrueMockLpFees(mockStrategy2, LP_FEE_BASE_2);
+
+        uint256 pending1 = strategyManager.pendingPerformanceFeeInETH(address(mockStrategy1));
+        uint256 pending2 = strategyManager.pendingPerformanceFeeInETH(address(mockStrategy2));
+        assertGt(pending1, 0);
+        assertGt(pending2, 0);
+
+        uint256 treasuryBefore = token.balanceOf(DAO_TREASURY);
+        vm.expectEmit(false, false, false, false, address(controller));
+        emit IController.PerformanceFeeHarvestCompleted(1, 2, 0, 0);
+        (uint256 eveAmount, uint256 feeETHEquivalent) = controller.harvestPerformanceFeeFromStrategies(1, 2);
+
+        assertEq(feeETHEquivalent, pending2);
+        assertGt(eveAmount, 0);
+        assertEq(token.balanceOf(DAO_TREASURY) - treasuryBefore, eveAmount);
+        assertEq(strategyManager.pendingPerformanceFeeInETH(address(mockStrategy1)), pending1);
+        assertEq(strategyManager.pendingPerformanceFeeInETH(address(mockStrategy2)), 0);
+    }
+
+    function test_HarvestPerformanceFeeFromStrategies_Paginated_KeeperCanHarvest() public {
+        amm.enter{value: 1 ether}(1);
+        _configurePerformanceFees();
+        strategyManager.addStrategy(address(mockStrategy1), 80, 70);
+        _accrueMockLpFees(mockStrategy1, LP_FEE_BASE_1);
+
+        address keeper = makeAddr("paginatedHarvestKeeper");
+        registry.grantRole(Auth.KEEPER_ROLE, keeper);
+
+        vm.prank(keeper);
+        (, uint256 feeETHEquivalent) = controller.harvestPerformanceFeeFromStrategies(0, 1);
+        assertGt(feeETHEquivalent, 0);
+        assertEq(strategyManager.pendingPerformanceFeeInETH(address(mockStrategy1)), 0);
+    }
+
+    function test_HarvestPerformanceFeeFromStrategies_Paginated_AccessControl() public {
+        strategyManager.addStrategy(address(mockStrategy1), 80, 70);
+
+        vm.prank(user);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IRegistryClient.RegistryClientCallerHasNoneOfRoles.selector, Auth.ADMIN_ROLE, Auth.KEEPER_ROLE
+            )
+        );
+        controller.harvestPerformanceFeeFromStrategies(0, 1);
+    }
+
+    function test_HarvestPerformanceFeeFromStrategies_Paginated_WhenPaused() public {
+        strategyManager.addStrategy(address(mockStrategy1), 80, 70);
+        controller.pause();
+
+        vm.expectRevert(PausableUpgradeable.EnforcedPause.selector);
+        controller.harvestPerformanceFeeFromStrategies(0, 1);
+    }
 }
 
 /**

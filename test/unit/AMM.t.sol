@@ -1418,6 +1418,44 @@ contract AMMTest is ProtocolTestBase {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        NAV EDGE-CASE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev At a high enough EVE price, a 1-wei request is worth less than 1 wei of EVE.
+    function test_Exit_RevertsWhenRequestRoundsToZeroTokens() public {
+        vm.prank(user1);
+        bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
+
+        // NAV per EVE far above 1 ETH: tokensToBurn = 1 wei * 1e18 / price == 0.
+        vm.mockCall(
+            address(strategyManager),
+            abi.encodeWithSelector(strategyManager.totalNAVInETH.selector),
+            abi.encode(eve.totalSupply() * 1e18)
+        );
+
+        uint256 balance = eve.balanceOf(user1);
+        vm.startPrank(user1);
+        eve.approve(address(bondingCurve), type(uint256).max);
+        vm.expectRevert(IAMM.AMMTooLowETHRequested.selector);
+        bondingCurve.exit(1, balance, 0);
+        vm.stopPrank();
+    }
+
+    /// @dev NAV already includes the incoming deposit; a NAV below it means broken wiring.
+    function test_Enter_RevertsWhenNAVIsBelowIncomingDeposit() public {
+        vm.prank(user1);
+        bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
+
+        vm.mockCall(
+            address(strategyManager), abi.encodeWithSelector(strategyManager.totalNAVInETH.selector), abi.encode(0)
+        );
+
+        vm.prank(user2);
+        vm.expectRevert(IAMM.AMMNAVUnderflow.selector);
+        bondingCurve.enter{value: ENTER_ETH_DEPOSIT}(ENTER_MIN_TOKENS);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                         IMMUTABILITY TESTS
     //////////////////////////////////////////////////////////////*/
 
