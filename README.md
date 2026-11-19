@@ -996,10 +996,11 @@ cast send <PROXY_ADDRESS> "upgradeToAndCall(address,bytes)" <NEW_IMPLEMENTATION>
 
 ## License
 
-MIT (see [`LICENSE`](LICENSE)), except for the following files adapted from Uniswap V3, which keep their upstream `GPL-2.0-or-later` license as required by its terms:
+The project uses the [MIT license](LICENSE). The following files contain code adapted from Uniswap V3 and are licensed under [`GPL-2.0-or-later`](LICENSE-GPL-2.0).
 
 - `src/libraries/integrations/uniswap/TickMath.sol` (from [v3-core `TickMath`](https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/TickMath.sol))
 - `src/libraries/integrations/uniswap/FixedPoint96.sol` (from [v3-core `FixedPoint96`](https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/FixedPoint96.sol))
 - `src/libraries/integrations/uniswap/LiquidityAmounts.sol` (from [v3-periphery `LiquidityAmounts`](https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/LiquidityAmounts.sol))
+- `src/contracts/adapters/UniswapV3ConverterAdapter.sol` (`_quoteAtTick` is adapted from [v3-periphery `OracleLibrary.getQuoteAtTick`](https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/OracleLibrary.sol#L44-L63))
 
-`FullMath.sol` is adapted from v3-core's `FullMath`, which Uniswap publishes under MIT, so it stays MIT. Each file's `SPDX-License-Identifier` header is authoritative. Contracts that compile in the GPL files — `UniCLStrat`, `UniCLStratLib` and `UniswapV3ConverterAdapter` — are distributed in combination with GPL-2.0-or-later code, so that combined work is subject to the GPL's terms; the MIT-licensed files themselves remain MIT.
+`FullMath.sol` retains the upstream MIT license. The `UniCLStrat` and `UniCLStratLib` source files are MIT-licensed. Their compiled builds incorporate GPL-licensed Uniswap V3 math and must be distributed under `GPL-2.0-or-later`. When distributing bytecode that incorporates GPL-licensed code, include the GPL license text and make the complete corresponding source available under the GPL's terms.
