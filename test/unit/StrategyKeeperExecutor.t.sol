@@ -40,6 +40,11 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     uint256 public constant EXIT_LIQUIDITY_TARGET = 2 ether;
     uint256 public constant SHORTFALL_BELOW_FLOOR_MARGIN = 0.5 ether; // floor set this far above the shortfall
 
+    // Audit G5: more requesters than the old 50-user cost-scan cap
+    uint256 public constant MANY_EXIT_USERS = 60;
+    uint256 public constant SMALL_EXIT_ETH = 0.01 ether;
+    uint256 public constant PROCESSED_PREFIX = 20;
+
     uint8 public constant DEPOSIT_WEIGHT = 100;
     uint8 public constant WITHDRAWAL_WEIGHT = 100;
     uint8 public constant ZERO_DEPOSIT_WEIGHT = 0;
@@ -144,6 +149,17 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         token.approve(address(amm), type(uint256).max);
         batchId = amm.exit(_requestedETH, token.balanceOf(_user), PRICE_TOLERANCE);
         vm.stopPrank();
+    }
+
+    /// @dev Queues `_count` distinct small exits into the current batch (one request per user).
+    function _queueManySmallExits(uint256 _count) internal returns (uint256 batchId) {
+        uint256 share = token.balanceOf(user) / (_count + 1);
+        for (uint256 i = 0; i < _count; i++) {
+            address exiter = makeAddr(string.concat("exiter", vm.toString(i)));
+            vm.prank(user);
+            token.transfer(exiter, share);
+            batchId = _queueExit(exiter, SMALL_EXIT_ETH);
+        }
     }
 
     /// @dev `priceBatch` is Controller/KEEPER-gated; the strategy executor already holds the role.
@@ -624,6 +640,35 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         _queueExit(user, EXIT_ETH);
         _priceQueuedBatch();
         assertApproxEqAbs(executor.pendingRedemptionNeedsETH(), EXIT_ETH, 1);
+    }
+
+    /// @dev Audit G5: the estimate used to price only the first 50 unprocessed users of a batch,
+    ///      under-withdrawing for larger batches. It must now cover every request and equal the
+    ///      liability NAV already deducts.
+    function test_PendingRedemptionNeedsETH_CountsEveryUserInLargeBatch() public {
+        uint256 batchId = _queueManySmallExits(MANY_EXIT_USERS);
+        _priceQueuedBatch();
+        assertEq(exitQueue.unprocessedUsersCount(batchId), MANY_EXIT_USERS);
+
+        (uint256 liabilityETH,) = exitQueue.liveRedemptionOffsets();
+        assertEq(executor.pendingRedemptionNeedsETH(), liabilityETH);
+        assertApproxEqAbs(executor.pendingRedemptionNeedsETH(), MANY_EXIT_USERS * SMALL_EXIT_ETH, MANY_EXIT_USERS);
+    }
+
+    /// @dev Settled requests drop out of `totalTokensToBurn`, so a partly processed batch only
+    ///      reserves ETH for the requests still waiting.
+    function test_PendingRedemptionNeedsETH_DropsProcessedRequests() public {
+        uint256 batchId = _queueManySmallExits(MANY_EXIT_USERS);
+        _priceQueuedBatch();
+        uint256 needsBefore = executor.pendingRedemptionNeedsETH();
+
+        controller.processRequests(batchId, 0, PROCESSED_PREFIX);
+
+        assertEq(exitQueue.unprocessedUsersCount(batchId), MANY_EXIT_USERS - PROCESSED_PREFIX);
+        uint256 needsAfter = executor.pendingRedemptionNeedsETH();
+        assertApproxEqAbs(needsBefore - needsAfter, PROCESSED_PREFIX * SMALL_EXIT_ETH, MANY_EXIT_USERS);
+        (uint256 liabilityETH,) = exitQueue.liveRedemptionOffsets();
+        assertEq(needsAfter, liabilityETH);
     }
 
     /// @dev The strategy executor reads the cursor from the registered queue executor — the
