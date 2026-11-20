@@ -176,6 +176,9 @@ UniCLStrat::withdraw(address _receiver, uint256 _amount)
     ├── It should rebalance remaining inventory only if pool is calm
     ├── It should re-add liquidity only if pool is calm
     ├── It should still complete the unwind and payout when the pool is not calm (re-add skipped)
+    ├── When the paired -> WETH swap reverts (quote fails, outside the oracle band, or swap failure)
+    │   ├── It should emit WethConversionSkipped and keep the paired token in NAV
+    │   └── It should pay out the ETH/WETH already held (partial withdrawal) instead of reverting
     ├── It should emit FundsWithdrawn
     └── It should return the ETH amount actually sent to the receiver
 
@@ -228,6 +231,12 @@ UniCLStrat::pause()
 │   └── It should revert
 └── Given the pause-time liquidity unwind was skipped and the pool has recovered
     └── It should remove and collect the remaining pool liquidity on unpause() followed by pause()
+
+UniCLStrat::selfConvertToWeth(uint256 _amountOut)
+├── Given caller is not the strategy itself
+│   └── It should revert with UniCLStratCallerNotSelf
+└── Given caller is the strategy (withdraw's try/catch)
+    └── It should buy exactly _amountOut WETH via the oracle-bounded exact-output swap
 
 UniCLStrat::selfRemoveLiquidityAndCollect()
 ├── Given caller is not the strategy itself

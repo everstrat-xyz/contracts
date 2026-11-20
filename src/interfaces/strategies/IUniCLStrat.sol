@@ -61,6 +61,9 @@ interface IUniCLStrat is IStrategy {
     event ConverterAllowanceRevocationSkipped(address indexed token);
     /// @notice Emitted when paired-token recovery on `emergencyExit` was skipped (`balanceOf` or transfer failed)
     event PairedTokenTransferSkipped();
+    /// @notice Emitted when the paired -> WETH swap on `withdraw` reverted and was skipped; the
+    ///         payout falls back to the WETH already held (partial withdrawal)
+    event WethConversionSkipped();
 
     // ============ Errors ============
 
@@ -109,4 +112,12 @@ interface IUniCLStrat is IStrategy {
     function pause() external;
 
     function unpause() external;
+
+    /**
+     * @notice Self-only hook: buys exactly `_amountOut` WETH with the paired token
+     *         (oracle-bounded exact-output swap with balance-cap fallback).
+     * @dev Reverts `UniCLStratCallerNotSelf` for any caller but the strategy. Exists so the
+     *      withdraw path can run the swap inside a try/catch (audit G7).
+     */
+    function selfConvertToWeth(uint256 _amountOut) external;
 }
