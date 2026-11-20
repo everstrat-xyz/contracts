@@ -17,6 +17,7 @@ import {IStrategy} from "interfaces/IStrategy.sol";
 import {IAMM} from "interfaces/IAMM.sol";
 import {IConverter} from "interfaces/IConverter.sol";
 import {IRegistry} from "interfaces/IRegistry.sol";
+import {IOracle} from "interfaces/IOracle.sol";
 import {IEVE} from "interfaces/IEVE.sol";
 import {IExitQueue} from "interfaces/IExitQueue.sol";
 
@@ -25,6 +26,7 @@ import {RegistryClientUpgradeable} from "registry/client/RegistryClientUpgradeab
 
 import {Auth} from "libraries/Auth.sol";
 import {Math} from "libraries/Math.sol";
+import {StrandedERC20Lib} from "libraries/StrandedERC20Lib.sol";
 
 /**
  * @title StrategyManager
@@ -64,6 +66,9 @@ contract StrategyManager is
 
     /// @notice Maximum allowed per-strategy deposit cooldown
     uint256 public constant MAX_STRATEGY_DEPOSIT_COOLDOWN = 1 days;
+
+    /// @notice Maximum discount to the Oracle price accepted when selling a stranded supported ERC-20
+    uint256 public constant MAX_ERC20_RECOVERY_SLIPPAGE_BPS = 300;
 
     // ============ State Variables ============
 
@@ -287,9 +292,8 @@ contract StrategyManager is
         delete withdrawalWeight[_strategy];
 
         try IConverter(registry().converter()).revokeCallerRole(_strategy) {
-        // revocation succeeded
-        }
-        catch {
+            // revocation succeeded
+        } catch {
             emit CallerRoleRevokeFailed(_strategy);
         }
     }
@@ -465,9 +469,9 @@ contract StrategyManager is
     }
 
     // ============ Supported ERC-20 Management ============
-    // ERC-20 accounting only in this release: whitelist + Oracle-priced NAV via
-    // `_supportedERC20sNAVInETH()`. On-chain swap recovery of stranded supported ERC-20s back to native
-    // ETH via the shared Converter is deferred to a follow-up PR.
+    // Whitelist + Oracle-priced NAV via `_supportedERC20sNAVInETH()`, and recovery of stranded
+    // supported ERC-20s back to native ETH through the shared Converter via
+    // `convertSupportedERC20ToETH()`.
 
     /**
      * @inheritdoc IStrategyManager
@@ -501,6 +505,42 @@ contract StrategyManager is
         if (!_supportedERC20s.remove(_token)) revert StrategyManagerERC20NotSupported(_token);
 
         emit SupportedERC20Removed(_token);
+    }
+
+    /**
+     * @inheritdoc IStrategyManager
+     *
+     * @dev NOTE: intentionally not `whenNotPaused` — like {addSupportedERC20}, this exists for the
+     *      post-`emergencyExit()` state, when the protocol is typically paused. The output floor is
+     *      the larger of `_minETHOut` and the Oracle value of `_amountIn` less
+     *      `MAX_ERC20_RECOVERY_SLIPPAGE_BPS`, so a caller cannot sell the token materially below
+     *      the price NAV already counts it at. StrategyManager takes `CONVERTER_CALLER_ROLE` for
+     *      itself on first use (it administers that role through the Converter).
+     */
+    function convertSupportedERC20ToETH(
+        address _token,
+        address _adapter,
+        bytes calldata _path,
+        uint256 _amountIn,
+        uint256 _minETHOut
+    ) external onlyEitherAuthRole(Auth.ADMIN_ROLE, Auth.SECURITY_ROLE) nonReentrant returns (uint256 ethOut) {
+        if (!_supportedERC20s.contains(_token)) revert StrategyManagerERC20NotSupported(_token);
+        if (_amountIn == 0) revert StrategyManagerNoBalanceToRecover();
+
+        IRegistry registry_ = registry();
+        ethOut = StrandedERC20Lib.convertToETH(
+            IConverter(registry_.converter()),
+            IOracle(registry_.oracle()),
+            registry_.controller(),
+            _token,
+            _adapter,
+            _path,
+            _amountIn,
+            _minETHOut,
+            MAX_ERC20_RECOVERY_SLIPPAGE_BPS
+        );
+
+        emit SupportedERC20Converted(_token, _amountIn, ethOut);
     }
 
     /**
@@ -547,8 +587,9 @@ contract StrategyManager is
     function strategyNAVInUSD(address _strategy) external view returns (uint256) {
         _validateStrategyIsRegistered(_strategy);
 
-        return Oracle(registry().oracle())
-            .convertTokenToUSD(address(0), IStrategy(_strategy).navInETH(), Math.DECIMALS_NORMALIZED);
+        return Oracle(registry().oracle()).convertTokenToUSD(
+            address(0), IStrategy(_strategy).navInETH(), Math.DECIMALS_NORMALIZED
+        );
     }
 
     /**
@@ -976,9 +1017,8 @@ contract StrategyManager is
             address token = _supportedERC20s.at(i);
             uint256 balance = IERC20(token).balanceOf(address(this));
             if (balance == 0) continue;
-            _supportedERC20sNAV += _oracle.convert(
-                token, address(0), balance, IERC20Metadata(token).decimals(), Math.DECIMALS_NORMALIZED
-            );
+            _supportedERC20sNAV +=
+                _oracle.convert(token, address(0), balance, IERC20Metadata(token).decimals(), Math.DECIMALS_NORMALIZED);
         }
     }
 

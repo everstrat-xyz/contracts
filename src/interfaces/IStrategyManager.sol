@@ -86,6 +86,9 @@ interface IStrategyManager {
     /// @notice Thrown when a strategy deposit cooldown exceeds MAX_STRATEGY_DEPOSIT_COOLDOWN
     error StrategyManagerInvalidStrategyDepositCooldown();
 
+    /// @notice Thrown when a stranded-ERC-20 recovery route does not swap that token into WETH
+    error StrategyManagerInvalidRecoveryRoute();
+
     // ============ Events ============
     /**
      * @notice Emitted when a new strategy is added
@@ -211,6 +214,14 @@ interface IStrategyManager {
      * @param token The ERC-20 token that is no longer priced into NAV
      */
     event SupportedERC20Removed(address indexed token);
+
+    /**
+     * @notice Emitted when a stranded supported ERC-20 is swapped to ETH and sent to the Controller.
+     * @param token The ERC-20 token sold
+     * @param amountIn Amount of `token` sold
+     * @param ethOut ETH delivered to the Controller
+     */
+    event SupportedERC20Converted(address indexed token, uint256 amountIn, uint256 ethOut);
 
     /**
      * @notice Emitted when performance fees are harvested and EVE is minted to the treasury.
@@ -499,9 +510,9 @@ interface IStrategyManager {
      * @dev Whitelisted balances are priced into `totalNAVInETH()` via the protocol Oracle, so
      *      paired tokens delivered by `IStrategy.emergencyExit()` (e.g. `UniCLStrat` transfers
      *      its paired token here during an emergency unwind) do not silently vanish from NAV —
-     *      users must not enter or exit at prices that ignore recoverable value. On-chain swap
-     *      recovery of stranded supported ERC-20s back to native ETH via the shared Converter is
-     *      deferred to a follow-up PR; this release ships ERC-20 accounting only. Callable only
+     *      users must not enter or exit at prices that ignore recoverable value. Whitelisted
+     *      balances can be sold for ETH to the Controller with `convertSupportedERC20ToETH()`.
+     *      Callable only
      *      by `ADMIN_ROLE` (48h timelock in production); whitelist a strategy's paired token
      *      when the strategy is added, not during the emergency. Callable while paused so a
      *      missed whitelisting can still be fixed mid-emergency. Reverts with
@@ -529,6 +540,32 @@ interface IStrategyManager {
      * @param _token The ERC-20 token to remove from the whitelist
      */
     function removeSupportedERC20(address _token) external;
+
+    /**
+     * @notice Sell a supported ERC-20 held by the StrategyManager (e.g. a paired token swept in
+     *         by `IStrategy.emergencyExit()`) for ETH, delivered to the Controller so it can pay
+     *         redemptions.
+     * @dev Callable by `ADMIN_ROLE` or `SECURITY_ROLE`, including while paused. Swaps through the
+     *      Converter (`_adapter` must be allowed there) and requires `_path` to route `_token`
+     *      into WETH. Reverts with `ConverterInsufficientOutput` when the swap returns less than
+     *      the larger of `_minETHOut` and the Oracle value of `_amountIn` less
+     *      `MAX_ERC20_RECOVERY_SLIPPAGE_BPS`. Reverts with `StrategyManagerERC20NotSupported`,
+     *      `StrategyManagerNoBalanceToRecover` (zero amount) or
+     *      `StrategyManagerInvalidRecoveryRoute`. Emits `SupportedERC20Converted`.
+     * @param _token Supported ERC-20 to sell
+     * @param _adapter Converter adapter to swap through
+     * @param _path Adapter route from `_token` to WETH
+     * @param _amountIn Amount of `_token` to sell
+     * @param _minETHOut Caller's minimum ETH out (the Oracle floor applies regardless)
+     * @return ethOut ETH sent to the Controller
+     */
+    function convertSupportedERC20ToETH(
+        address _token,
+        address _adapter,
+        bytes calldata _path,
+        uint256 _amountIn,
+        uint256 _minETHOut
+    ) external returns (uint256 ethOut);
 
     /**
      * @notice Get all whitelisted supported ERC-20s.

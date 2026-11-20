@@ -16,6 +16,7 @@ import {StrategyKeeperExecutor} from "../../src/contracts/automation/StrategyKee
 import {Auth} from "../../src/libraries/Auth.sol";
 import {IKeeperExecutorBase} from "../../src/interfaces/automation/IKeeperExecutorBase.sol";
 import {IStrategyKeeperExecutor} from "../../src/interfaces/automation/IStrategyKeeperExecutor.sol";
+import {IQueueKeeperExecutor} from "../../src/interfaces/automation/IQueueKeeperExecutor.sol";
 import {IRegistryClient} from "interfaces/IRegistryClient.sol";
 
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
@@ -37,6 +38,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     uint256 public constant DEPOSIT_TO_STRATEGY = 9.5 ether;
     uint256 public constant EXIT_ETH = 1 ether;
     uint256 public constant EXIT_LIQUIDITY_TARGET = 2 ether;
+    uint256 public constant SHORTFALL_BELOW_FLOOR_MARGIN = 0.5 ether; // floor set this far above the shortfall
 
     uint8 public constant DEPOSIT_WEIGHT = 100;
     uint8 public constant WITHDRAWAL_WEIGHT = 100;
@@ -423,7 +425,53 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
 
         assertGt(executor.pendingRedemptionNeedsETH(), address(controller).balance);
         assertGt(strategy.maxWithdrawal(), 0);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertNotEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall));
         _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+    }
+
+    /// @dev Audit G9: a shortfall smaller than `minWithdrawETH` used to leave both keepers idle
+    ///      and the priced batch unfunded (and uncancellable) until expiry. It is now rounded up
+    ///      to the floor, after which the queue keeper can settle the whole batch.
+    function test_WithdrawShortfall_RoundsSmallShortfallUpToFloor() public {
+        _deployCapitalToStrategy();
+        uint256 batchId = _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
+
+        uint256 needsETH = executor.pendingRedemptionNeedsETH();
+        uint256 controllerBalance = address(controller).balance;
+        uint256 shortfall = needsETH - controllerBalance;
+        uint256 floor = shortfall + SHORTFALL_BELOW_FLOOR_MARGIN;
+        executor.setMinWithdrawETH(floor);
+
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall));
+        assertEq(amount, floor);
+
+        vm.expectEmit(true, false, false, true, address(executor));
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(
+            IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall, floor
+        );
+        _perform(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+
+        assertEq(address(controller).balance, controllerBalance + floor);
+        assertGe(address(controller).balance, needsETH);
+
+        (IQueueKeeperExecutor.QueueAction queueAction, uint256 queueBatchId,) = queueExecutor.queueUpkeepStatus();
+        assertEq(uint8(queueAction), uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests));
+        assertEq(queueBatchId, batchId);
+    }
+
+    function test_WithdrawShortfall_ExactShortfallWhenAboveFloor() public {
+        _deployCapitalToStrategy();
+        _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
+
+        uint256 shortfall = executor.pendingRedemptionNeedsETH() - address(controller).balance;
+        assertGt(shortfall, executor.minWithdrawETH());
+
+        (, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(amount, shortfall);
     }
 
     function test_WithdrawShortfall_NoUpkeepWhenCovered() public {
@@ -702,5 +750,67 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
 
         executor.unpause();
         assertFalse(executor.paused());
+    }
+
+    // ============ Coverage gaps ============
+
+    /// @dev Ordinal of the QueueKeeperExecutor action that closes the current batch for
+    ///      processing; addressed by ordinal so this does not depend on the member's name.
+    uint8 internal constant QUEUE_CLOSE_BATCH_ACTION = 1;
+
+    /// @dev Matures and closes the current batch through the registered queue executor.
+    function _closeCurrentBatchViaQueueExecutor() internal returns (uint256 batchId) {
+        batchId = exitQueue.currentBatchId();
+        if (!queueExecutor.isExecutorCaller(automationAccount)) queueExecutor.allowExecutorCaller(automationAccount);
+        vm.warp(block.timestamp + queueExecutor.minBatchAge());
+        vm.prank(automationAccount);
+        queueExecutor.perform(QUEUE_CLOSE_BATCH_ACTION, abi.encode(batchId));
+    }
+
+    function test_StrategyUpkeepStatus_HarvestWhenFeesPendingAndNothingOutranksIt() public {
+        _enablePerformanceFees();
+        // Remove deposit capacity so idle Controller ETH does not outrank the harvest.
+        strategy.setMaxDeposit(0);
+
+        uint256 feeETH = strategyManager.pendingPerformanceFeeInETH(address(strategy));
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees));
+        assertEq(amount, feeETH);
+
+        (bool canExec, bytes memory execPayload) = executor.checker();
+        assertTrue(canExec);
+        assertEq(
+            execPayload,
+            abi.encodeCall(
+                StrategyKeeperExecutor.perform, (uint8(IStrategyKeeperExecutor.StrategyAction.HarvestPerformanceFees))
+            )
+        );
+    }
+
+    /// @dev A later batch settled out of order (direct keeper call) costs nothing, while the
+    ///      earlier, still-open batch keeps the scan anchored and is still counted.
+    function test_PendingRedemptionNeedsETH_IgnoresLaterBatchSettledOutOfOrder() public {
+        address user2 = makeAddr("user2");
+        vm.deal(user2, BOOTSTRAP_DEPOSIT);
+        vm.prank(user2);
+        amm.enter{value: BOOTSTRAP_DEPOSIT}(MIN_TOKENS_TO_MINT);
+
+        _queueExit(user, EXIT_ETH);
+        uint256 firstBatchId = _closeCurrentBatchViaQueueExecutor();
+        uint256 needsFirstOnly = executor.pendingRedemptionNeedsETH();
+        assertGt(needsFirstOnly, 0);
+
+        _queueExit(user2, EXIT_ETH);
+        uint256 secondBatchId = _closeCurrentBatchViaQueueExecutor();
+        assertGt(secondBatchId, firstBatchId);
+        assertGt(executor.pendingRedemptionNeedsETH(), needsFirstOnly);
+
+        vm.prank(address(executor));
+        controller.processRequests(secondBatchId, 0, 1);
+        assertEq(exitQueue.unprocessedUsersCount(secondBatchId), 0);
+        assertGt(exitQueue.unprocessedUsersCount(firstBatchId), 0);
+
+        assertEq(queueExecutor.nextLiveBatchIdToProcess(), firstBatchId);
+        assertApproxEqRel(executor.pendingRedemptionNeedsETH(), needsFirstOnly, 1e12);
     }
 }

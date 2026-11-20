@@ -462,6 +462,25 @@ StrategyManager::addSupportedERC20(address _token)
     ├── It should include the token's balance value in totalNAVInETH()
     └── It should emit SupportedERC20Added
 
+StrategyManager::convertSupportedERC20ToETH(address _token, address _adapter, bytes _path, uint256 _amountIn, uint256 _minETHOut)
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given token is not whitelisted
+│   └── It should revert with StrategyManagerERC20NotSupported
+├── Given _amountIn is zero
+│   └── It should revert with StrategyManagerNoBalanceToRecover
+├── Given _path does not sell _token for WETH
+│   └── It should revert with StrategyManagerInvalidRecoveryRoute
+├── Given the swap returns less than max(_minETHOut, Oracle value less MAX_ERC20_RECOVERY_SLIPPAGE_BPS)
+│   └── It should revert with ConverterInsufficientOutput
+├── Given contract is paused
+│   └── It should convert (recovery works while paused)
+└── Given valid parameters
+    ├── It should grant itself CONVERTER_CALLER_ROLE via the Converter on first use
+    ├── It should send the ETH out to the Controller and leave no WETH or allowance behind
+    ├── It should change totalNAVInETH() only by the realised discount to the Oracle price
+    └── It should emit SupportedERC20Converted
+
 StrategyManager::removeSupportedERC20(address _token)
 ├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
 │   └── It should revert with RegistryClientCallerHasNoneOfRoles

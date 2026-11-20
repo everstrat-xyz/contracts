@@ -681,38 +681,66 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT + IDLE_ETH_DONATION - withdrawAmount, NAV_TOLERANCE);
     }
 
-    function test_Withdraw_RevertsWhenExactOutputQuoteFails() public {
+    /// @dev Audit G7: when the paired -> WETH swap cannot run, `withdraw` pays out the WETH it
+    ///      already has instead of reverting; the unconverted paired token stays in NAV.
+    function _assertPartialPayoutWhenConversionSkipped(uint256 _request) internal {
+        uint256 navBefore = strategy.navInETH();
+
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit IUniCLStrat.WethConversionSkipped();
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, _request);
+
+        assertGt(withdrawn, 0);
+        assertLt(withdrawn, _request);
+        assertEq(receiver.balance, withdrawn);
+        assertGt(pairedToken.balanceOf(address(strategy)), 0);
+        assertApproxEqRel(strategy.navInETH(), navBefore - withdrawn, PERFORMANCE_FEE_NAV_REL_TOLERANCE);
+    }
+
+    function test_Withdraw_PaysPartialWhenExactOutputQuoteFails() public {
         _deposit(DEPOSIT_AMOUNT);
         converter.setQuoteShouldRevert(true);
 
         // 6 ETH requires a paired -> WETH top-up, whose exact-output quote now reverts
-        vm.prank(strategyManager);
-        vm.expectRevert(IUniCLStrat.UniCLStratQuoteFailed.selector);
-        strategy.withdraw(receiver, 6 ether);
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
     }
 
-    function test_Withdraw_RevertsWhenExactOutputQuoteExceedsOracleCeiling() public {
+    function test_Withdraw_PaysPartialWhenExactOutputQuoteExceedsOracleCeiling() public {
         _deposit(DEPOSIT_AMOUNT);
 
         // 80% multiplier inflates the exact-output quote (requires 1.25x input),
         // breaching the +2% oracle ceiling on the required input.
         converter.setQuoteMultiplierBps(8_000);
 
-        vm.prank(strategyManager);
-        vm.expectPartialRevert(IUniCLStrat.UniCLStratQuoteExceedsOracleCeiling.selector);
-        strategy.withdraw(receiver, 6 ether);
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
     }
 
-    function test_Withdraw_RevertsWhenExactOutputQuoteBelowOracleFloor() public {
+    function test_Withdraw_PaysPartialWhenExactOutputQuoteBelowOracleFloor() public {
         _deposit(DEPOSIT_AMOUNT);
 
         // 120% multiplier deflates the exact-output quote (requires ~0.83x input),
         // breaching the -2% oracle floor on the required input.
         converter.setQuoteMultiplierBps(12_000);
 
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
+    }
+
+    /// @dev Quote and oracle bounds pass, but the swap itself reverts (e.g. the router rejects
+    ///      the padded input cap under a moved spot price) — still a partial payout.
+    function test_Withdraw_PaysPartialWhenConversionSwapReverts() public {
+        _deposit(DEPOSIT_AMOUNT);
+        converter.setSwapShouldRevert(true);
+
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
+    }
+
+    function test_SelfConvertToWeth_RevertsWhenCallerIsNotSelf() public {
+        _deposit(DEPOSIT_AMOUNT);
+
         vm.prank(strategyManager);
-        vm.expectPartialRevert(IUniCLStrat.UniCLStratQuoteBelowOracleFloor.selector);
-        strategy.withdraw(receiver, 6 ether);
+        vm.expectRevert(IUniCLStrat.UniCLStratCallerNotSelf.selector);
+        strategy.selfConvertToWeth(1 ether);
     }
 
     function test_Withdraw_RevertsWithZeroReceiver() public {
@@ -1911,6 +1939,132 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
         strategy.setRouteConfig(address(swapAdapter), _wrongPath, _pairedPath);
+    }
+
+    function test_SetRouteConfig_RevertsWithCodelessAdapter() public {
+        bytes memory _wethPath = abi.encodePacked(address(weth), uint24(3000), address(pairedToken));
+        bytes memory _pairedPath = abi.encodePacked(address(pairedToken), uint24(3000), address(weth));
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
+        strategy.setRouteConfig(makeAddr("codelessAdapter"), _wethPath, _pairedPath);
+    }
+
+    function test_SetRouteConfig_RevertsWhenConverterRejectsEitherRoute() public {
+        bytes memory _wethPath = abi.encodePacked(address(weth), uint24(3000), address(pairedToken));
+        bytes memory _pairedPath = abi.encodePacked(address(pairedToken), uint24(3000), address(weth));
+
+        vm.mockCall(
+            address(converter),
+            abi.encodeWithSelector(IConverter.validateRoute.selector, address(swapAdapter), _wethPath),
+            abi.encode(false)
+        );
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
+        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath);
+        vm.clearMockedCalls();
+
+        vm.mockCall(
+            address(converter),
+            abi.encodeWithSelector(IConverter.validateRoute.selector, address(swapAdapter), _pairedPath),
+            abi.encode(false)
+        );
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
+        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath);
+    }
+
+    function test_SetRouteConfig_RevertsWhenReturnPathHasWrongDirection() public {
+        bytes memory _wethPath = abi.encodePacked(address(weth), uint24(3000), address(pairedToken));
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
+        strategy.setRouteConfig(address(swapAdapter), _wethPath, _wethPath);
+    }
+
+    // ============ Coverage gap tests ============
+
+    function test_SetMaxTickDeviation_RevertsWhenNotPositive() public {
+        vm.startPrank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setMaxTickDeviation(0);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setMaxTickDeviation(-1);
+        vm.stopPrank();
+
+        assertEq(strategy.maxTickDeviation(), MAX_TICK_DEVIATION);
+    }
+
+    /// @dev Production pools such as USDC/WETH list WETH as token1; the unit fixture lists it as token0.
+    function test_Constructor_AcceptsWethAsToken1_AndRoundTrips() public {
+        MockUniCLPool reversedPool = new MockUniCLPool(address(pairedToken), address(weth), TICK_SPACING, INITIAL_TICK);
+        factory.setPool(address(pairedToken), address(weth), reversedPool.fee(), address(reversedPool));
+
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
+        config.addresses.pool = address(reversedPool);
+        UniCLStrat reversed = new UniCLStrat(config);
+
+        assertEq(address(reversed.token0()), address(pairedToken));
+        assertEq(address(reversed.token1()), address(weth));
+        assertEq(address(reversed.pairedToken()), address(pairedToken));
+
+        vm.deal(strategyManager, DEPOSIT_AMOUNT);
+        vm.prank(strategyManager);
+        reversed.deposit{value: DEPOSIT_AMOUNT}();
+
+        (int24 tickLower, int24 tickUpper) = reversed.positionMain();
+        (uint128 liquidity,,,,) =
+            reversedPool.positions(keccak256(abi.encodePacked(address(reversed), tickLower, tickUpper)));
+        assertGt(liquidity, 0);
+        assertApproxEqRel(reversed.navInETH(), DEPOSIT_AMOUNT, 0.02e18);
+
+        uint256 receiverBefore = receiver.balance;
+        vm.prank(strategyManager);
+        reversed.withdraw(receiver, WITHDRAW_AMOUNT);
+        assertEq(receiver.balance - receiverBefore, WITHDRAW_AMOUNT);
+    }
+
+    function test_InvestIdleETH_ReturnsZeroWhenAtNAVCap() public {
+        _deposit(DEPOSIT_AMOUNT);
+        vm.prank(admin);
+        strategy.setMaxTotalNAV(1);
+        assertEq(strategy.maxDeposit(), 0);
+
+        _donate(1 ether);
+        vm.prank(admin);
+        uint256 invested = strategy.investIdleETH();
+
+        assertEq(invested, 0);
+        assertEq(address(strategy).balance, 1 ether);
+    }
+
+    /// @dev The long TWAP and spot agree, but the short TWAP sits far outside the band.
+    function test_InvestIdleETH_RevertsWhenShortTwapIsOutsideCalmBand() public {
+        _deposit(DEPOSIT_AMOUNT);
+        _donate(1 ether);
+
+        uint32[] memory window = new uint32[](2);
+        window[0] = SHORT_TWAP_INTERVAL;
+        int56[] memory tickCumulatives = new int56[](2);
+        // Mean tick over the short window = (0 - cumulative[0]) / interval = MAX_TICK_DEVIATION * 100.
+        tickCumulatives[0] = -int56(MAX_TICK_DEVIATION) * 100 * int56(uint56(SHORT_TWAP_INTERVAL));
+        vm.mockCall(
+            address(pool),
+            abi.encodeWithSelector(MockUniCLPool.observe.selector, window),
+            abi.encode(tickCumulatives, new uint160[](2))
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratNotCalm.selector);
+        strategy.investIdleETH();
+    }
+
+    /// @dev A failed `pool.mint` must surface the pool's own revert data, not a generic error.
+    function test_Deposit_BubblesPoolMintRevertReason() public {
+        vm.mockCallRevert(address(pool), abi.encodeWithSelector(MockUniCLPool.mint.selector), bytes("MINT_BROKEN"));
+        vm.deal(strategyManager, DEPOSIT_AMOUNT);
+
+        vm.prank(strategyManager);
+        vm.expectRevert(bytes("MINT_BROKEN"));
+        strategy.deposit{value: DEPOSIT_AMOUNT}();
     }
 
     // ============ Wrap/Unwrap/Converter-Failure Tests ============
