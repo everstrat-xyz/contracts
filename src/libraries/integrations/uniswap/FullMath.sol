@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Adapted from Uniswap V3 Core's FullMath library.
+// Adapted from Uniswap V3 Core's FullMath library (MIT upstream, so MIT here):
+// https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/FullMath.sol
 pragma solidity ^0.8.30;
 // solhint-disable compiler-version, use-natspec, reason-string, gas-custom-errors
 

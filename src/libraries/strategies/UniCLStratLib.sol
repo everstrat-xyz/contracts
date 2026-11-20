@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Solidity compiles GPL-licensed Uniswap V3 math into this library's bytecode.
+// Distribution of the combined build is subject to GPL-2.0-or-later.
 pragma solidity ^0.8.30;
 // solhint-disable compiler-version, gas-strict-inequalities
 

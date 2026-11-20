@@ -254,6 +254,10 @@ contract QueueKeeperExecutor is IQueueKeeperExecutor, KeeperExecutorBase {
         }
     }
 
+    /// @dev Longest prefix of the batch's unprocessed users, from index 0, that the Controller's
+    ///      balance covers. Index order is `EnumerableSet` order — reshuffled by every pull/close —
+    ///      not arrival order, so a partly funded batch is not paid first come, first served
+    ///      (audit G10; see `IExitQueue.unprocessedUsers`).
     function _affordableRequests(IExitQueue _queue, address _controller, uint256 _batchId)
         internal
         view

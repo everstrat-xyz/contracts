@@ -3969,4 +3969,108 @@ contract StrategyManagerTest is ProtocolTestBase {
         controllerContract.depositToStrategy(strategy1, 1 ether);
         assertEq(strategy1.balance, 5 ether); // 4 ether left after withdraw + 1 ether redeposited
     }
+
+    /*//////////////////////////////////////////////////////////////
+                        COVERAGE GAP TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Version() public view {
+        assertEq(strategyManager.version(), "1.1.0");
+    }
+
+    function test_StrategyAt_ReturnsStrategiesInInsertionOrder() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        assertEq(strategyManager.strategyAt(0), strategy1);
+        assertEq(strategyManager.strategyAt(1), strategy2);
+    }
+
+    function test_StrategyAt_RevertsOutOfBounds() public {
+        vm.expectRevert();
+        strategyManager.strategyAt(0);
+    }
+
+    function test_RemoveStrategy_StillRemovesWhenCallerRoleRevokeFails() public {
+        vm.prank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        mockStrategy1.setNavInETH(0);
+
+        address converter_ = registry.getContractByKey(Auth.CONVERTER);
+        vm.mockCallRevert(
+            converter_, abi.encodeWithSignature("revokeCallerRole(address)", strategy1), abi.encode("revoke failed")
+        );
+
+        vm.expectEmit(true, false, false, false, address(strategyManager));
+        emit IStrategyManager.CallerRoleRevokeFailed(strategy1);
+        vm.prank(admin);
+        strategyManager.removeStrategy(strategy1);
+
+        assertFalse(strategyManager.isStrategyRegistered(strategy1));
+        // The revoke failed, so the role is still held and must be cleaned up by hand.
+        assertTrue(registry.hasRole(CONVERTER_CALLER_ROLE, strategy1));
+    }
+
+    function test_WithdrawFromStrategies_WithPagination_EmptyRegistry() public {
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerNoStrategiesRegistered.selector);
+        strategyManager.withdrawFromStrategies(0, 1, 1 ether);
+    }
+
+    function test_HarvestPerformanceFeeFromStrategies_EmptyRegistry() public {
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerNoStrategiesRegistered.selector);
+        strategyManager.harvestPerformanceFeeFromStrategies();
+
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerNoStrategiesRegistered.selector);
+        strategyManager.harvestPerformanceFeeFromStrategies(0, 1);
+    }
+
+    function test_HarvestPerformanceFeeFromStrategies_NoMintWhenNoStrategyOwesAFee() public {
+        _configurePerformanceFees();
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        uint256 supplyBefore = token.totalSupply();
+        vm.prank(controller);
+        (uint256 eveAmount, uint256 feeETH) = strategyManager.harvestPerformanceFeeFromStrategies();
+
+        assertEq(eveAmount, 0);
+        assertEq(feeETH, 0);
+        assertEq(token.totalSupply(), supplyBefore);
+    }
+
+    function test_HarvestPerformanceFee_RevertsWhenFeeIsNotBelowNAV() public {
+        _configurePerformanceFees();
+        vm.prank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+
+        // A fee at least as large as the whole NAV cannot be priced by dS = fee * S / (NAV - fee).
+        uint256 totalNAV = strategyManager.totalNAVInETH();
+        _accrueMockLpFees(mockStrategy1, totalNAV * 10_000 / PERFORMANCE_FEE_BPS);
+
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerFeeMintOverflow.selector);
+        strategyManager.harvestPerformanceFeeFromStrategy(strategy1);
+    }
+
+    function test_WithdrawFromStrategy_ReturnsZeroWhenStrategyHasNothingWithdrawable() public {
+        vm.prank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        vm.deal(strategy1, INITIAL_NAV_1);
+        mockStrategy1.setMaxWithdrawal(0);
+
+        uint256 controllerBalanceBefore = controller.balance;
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategy(strategy1, 1 ether);
+
+        assertEq(withdrawn, 0);
+        assertEq(controller.balance, controllerBalanceBefore);
+        assertEq(strategy1.balance, INITIAL_NAV_1);
+    }
 }

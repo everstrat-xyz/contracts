@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Solidity compiles GPL-licensed Uniswap V3 math into this contract's bytecode.
+// Distribution of the combined build is subject to GPL-2.0-or-later.
 // solhint-disable compiler-version, import-path-check, use-natspec, ordering
 // solhint-disable gas-strict-inequalities, max-states-count
 // solhint-disable immutable-vars-naming, gas-indexed-events, gas-increment-by-one
