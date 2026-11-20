@@ -287,8 +287,9 @@ contract StrategyManager is
         delete withdrawalWeight[_strategy];
 
         try IConverter(registry().converter()).revokeCallerRole(_strategy) {
-            // revocation succeeded
-        } catch {
+        // revocation succeeded
+        }
+        catch {
             emit CallerRoleRevokeFailed(_strategy);
         }
     }
@@ -546,9 +547,8 @@ contract StrategyManager is
     function strategyNAVInUSD(address _strategy) external view returns (uint256) {
         _validateStrategyIsRegistered(_strategy);
 
-        return Oracle(registry().oracle()).convertTokenToUSD(
-            address(0), IStrategy(_strategy).navInETH(), Math.DECIMALS_NORMALIZED
-        );
+        return Oracle(registry().oracle())
+            .convertTokenToUSD(address(0), IStrategy(_strategy).navInETH(), Math.DECIMALS_NORMALIZED);
     }
 
     /**
@@ -976,8 +976,9 @@ contract StrategyManager is
             address token = _supportedERC20s.at(i);
             uint256 balance = IERC20(token).balanceOf(address(this));
             if (balance == 0) continue;
-            _supportedERC20sNAV +=
-                _oracle.convert(token, address(0), balance, IERC20Metadata(token).decimals(), Math.DECIMALS_NORMALIZED);
+            _supportedERC20sNAV += _oracle.convert(
+                token, address(0), balance, IERC20Metadata(token).decimals(), Math.DECIMALS_NORMALIZED
+            );
         }
     }
 
@@ -1076,14 +1077,14 @@ contract StrategyManager is
      * @param _endIndex The end index (exclusive) of the strategies to withdraw from
      * @param _amount The amount of funds to withdraw from the strategies
      * @dev Range is [startIndex, endIndex), meaning strategies from startIndex up to but not including endIndex
+     * @dev Splits `_amount` across `[_startIndex, _endIndex)` by withdrawal weight, capped at each
+     *      strategy's `maxWithdrawal()`. Whatever a cap cuts off is re-split across the strategies
+     *      that still have room (`_allocateByWeight`), and what a reverting `withdraw()` fails to
+     *      deliver gets one retry across the strategies that did pay out, at their live caps — so
+     *      the batch only under-fills when the weighted strategies really lack liquidity (audit G6).
+     *      Weight-0 strategies stay excluded; `withdrawFromStrategy` still reaches them.
      * @return totalWithdrawn The total ETH actually received by the controller (net of strategy fees)
      */
-    /// @dev Splits `_amount` across `[_startIndex, _endIndex)` by withdrawal weight, capped at each
-    ///      strategy's `maxWithdrawal()`. Whatever a cap cuts off is re-split across the strategies
-    ///      that still have room (`_allocateByWeight`), and what a reverting `withdraw()` fails to
-    ///      deliver gets one retry across the strategies that did pay out, at their live caps — so
-    ///      the batch only under-fills when the weighted strategies really lack liquidity (audit G6).
-    ///      Weight-0 strategies stay excluded; `withdrawFromStrategy` still reaches them.
     function _withdrawFromStrategies(uint256 _startIndex, uint256 _endIndex, uint256 _amount)
         internal
         returns (uint256 totalWithdrawn)
@@ -1157,13 +1158,18 @@ contract StrategyManager is
         }
     }
 
-    /// @dev Water-filling split of `_amount` in proportion to `_weights`, capped per entry at
-    ///      `_caps`. Each round gives every entry with room left `min(share, room)` and carries
-    ///      what the caps cut off into the next round, among the entries that still have room.
-    ///      A round either fills at least one entry to its cap (at most `n` such rounds) or places
-    ///      all but under `n` wei of rounding dust, after which every round places at least one
-    ///      wei or stops — so it ends within `2n + 1` rounds. Entries with a zero cap get nothing; floor rounding may
-    ///      leave up to `n` wei unallocated, as the plain proportional split did.
+    /// @dev Splits `_amount` in proportion to `_weights`, subject to the per-entry `_caps`.
+    ///      Each round divides the remaining amount among entries with room, rounds their shares
+    ///      down to whole wei, and limits each share to the room left under its cap.
+    ///      The loop stops when the full amount is placed, when every positive-weight entry is
+    ///      at its cap (`activeWeight == 0`), or when every remaining share rounds down to zero
+    ///      (`placed == 0`). For example, one remaining wei split across two equal weights gives
+    ///      each entry zero wei even if both still have room.
+    ///      At most `n` rounds can fill a new cap, where `n` is the number of entries. The first
+    ///      round that places funds without filling a cap leaves less than `n` wei, because each
+    ///      share loses less than one wei to rounding. From then on, each round either places at
+    ///      least one wei or stops. Including a possible final check, the loop takes at most
+    ///      `2n + 1` iterations.
     function _allocateByWeight(uint256 _amount, uint256[] memory _weights, uint256[] memory _caps)
         internal
         pure
