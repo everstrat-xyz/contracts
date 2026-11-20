@@ -37,9 +37,10 @@ contract UniCLStratFuzzTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         uint256 withdrawn = strategy.withdraw(receiver, _withdrawAmount);
 
-        // A full-NAV request drains the strategy and may pay out more than requested (the
-        // unspent exit-cost mark-down); any other request pays out exactly what was asked.
-        if (_withdrawAmount == navBeforeWithdrawal) {
+        // A near-full request (padded by slippage it covers NAV) drains the strategy and may pay
+        // out more than requested; any other request pays out exactly what was asked.
+        bool nearFull = _withdrawAmount * (10_000 + strategy.swapSlippageBps()) >= navBeforeWithdrawal * 10_000;
+        if (nearFull) {
             assertGe(withdrawn, _withdrawAmount);
         } else {
             assertEq(withdrawn, _withdrawAmount);
@@ -47,6 +48,22 @@ contract UniCLStratFuzzTest is UniCLStratTestBase {
         assertEq(receiver.balance, withdrawn);
         assertEq(strategy.totalWithdrawn(), withdrawn);
         assertApproxEqAbs(_grossNavInETH(), grossNavBeforeWithdrawal - withdrawn, NAV_TOLERANCE);
+    }
+
+    function testFuzz_NetNavNeverExceedsGross(uint256 _weth, uint256 _paired, uint256 _slippageBps) public {
+        _weth = bound(_weth, 0, MAX_PAYABLE_DEPOSIT);
+        _paired = bound(_paired, 0, MAX_PAYABLE_DEPOSIT);
+        _slippageBps = bound(_slippageBps, 1, strategy.MAX_SWAP_SLIPPAGE_BPS());
+        vm.prank(admin);
+        strategy.setSwapSlippageBps(_slippageBps);
+        weth.mint(address(strategy), _weth);
+        pairedToken.mint(address(strategy), _paired);
+
+        // Mock oracle prices are 1:1, so the gross value is the plain balance sum.
+        uint256 gross = _weth + _paired;
+        assertLe(strategy.navInETH(), gross);
+        assertEq(gross - strategy.navInETH(), _exitCost(_paired));
+        assertLe(_exitCost(_paired), _paired);
     }
 
     function testFuzz_MaxDepositReflectsCapacity(uint256 _amount) public {

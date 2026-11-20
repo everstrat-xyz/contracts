@@ -20,6 +20,7 @@ import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
 import {MockUniCLPool} from "../mocks/UniCLStratMocks.sol";
 import {LiquidityAmounts} from "../../src/libraries/integrations/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "../../src/libraries/integrations/uniswap/TickMath.sol";
+import {UniCLStratLib} from "../../src/libraries/strategies/UniCLStratLib.sol";
 
 contract RejectingTreasury {
     receive() external payable {
@@ -37,6 +38,8 @@ contract UniCLStratTest is UniCLStratTestBase {
     uint256 public constant EXCESS_PERFORMANCE_FEE_BPS = 2_001;
     uint256 public constant EXCESS_SWAP_SLIPPAGE_BPS = 501;
     uint256 public constant NAV_TOLERANCE = 10 wei;
+    /// @dev `StrategyManager.MAX_NAV_RESIDUE`: the most NAV `removeStrategy` accepts.
+    uint256 public constant REMOVAL_NAV_RESIDUE = 10 wei;
     uint256 public constant UPDATED_MAX_TOTAL_NAV = 200 ether;
     uint256 public constant UPDATED_SWAP_SLIPPAGE_BPS = 150;
     int56 public constant UPDATED_MAX_TICK_DEVIATION = 20;
@@ -276,6 +279,26 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertGt(paired, 0);
         assertLt(paired, DEPOSIT_AMOUNT);
         assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT - _exitCost(paired), NAV_TOLERANCE);
+    }
+
+    function test_NavInETH_MarksDownThePairedSideInEitherTokenOrder() public {
+        // Unequal WETH and paired balances: picking the wrong side as "paired" would deduct the
+        // exit cost of the WETH balance instead. Called on the library directly (balances of
+        // `address(this)`) so both pool orderings are covered with one mock pool.
+        weth.mint(address(this), 2 * NAV_BALANCE_AMOUNT);
+        pairedToken.mint(address(this), NAV_BALANCE_AMOUNT);
+        IUniCLStrat.Position memory none;
+        uint256 expected = 3 * NAV_BALANCE_AMOUNT - _exitCost(NAV_BALANCE_AMOUNT);
+
+        uint256 wethIsToken0 = UniCLStratLib.inventoryValueInETH(
+            pool, oracle, address(weth), address(weth), address(pairedToken), none, none, 0, pool.fee(), 100
+        );
+        uint256 wethIsToken1 = UniCLStratLib.inventoryValueInETH(
+            pool, oracle, address(weth), address(pairedToken), address(weth), none, none, 0, pool.fee(), 100
+        );
+
+        assertEq(wethIsToken0, expected);
+        assertEq(wethIsToken1, expected);
     }
 
     function test_NavInETH_ExitCostRoundsUp() public {
@@ -2349,7 +2372,55 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(_positionLiquidity(_mainPosition()), 0);
         (int24 altLower, int24 altUpper) = strategy.positionAlt();
         assertEq(_positionLiquidity(IUniCLStrat.Position(altLower, altUpper)), 0);
-        assertLe(strategy.navInETH(), NAV_TOLERANCE);
+        assertLe(strategy.navInETH(), REMOVAL_NAV_RESIDUE);
+    }
+
+    function test_Withdraw_NearFullNAVAlsoDrains() public {
+        // One wei short of NAV must not strand the mark-down: removeStrategy would then need
+        // several passes to get under its residue guard.
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 nav = strategy.navInETH();
+        uint256 grossNav = _grossNavInETH();
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, nav - 1);
+
+        assertApproxEqAbs(withdrawn, grossNav, NAV_TOLERANCE);
+        assertEq(pairedToken.balanceOf(address(strategy)), 0);
+        assertEq(weth.balanceOf(address(strategy)), 0);
+        assertLe(strategy.navInETH(), REMOVAL_NAV_RESIDUE);
+    }
+
+    function test_Withdraw_FullNAVPaysOutWhenDrainQuoteReverts() public {
+        // The exact-out conversion still works, but the exact-in drain quote reverts: the drain
+        // is skipped and the request is paid from the WETH already sourced.
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 nav = strategy.navInETH();
+        vm.mockCallRevert(
+            address(converter), abi.encodeWithSelector(IConverter.quoteSwapExactAmountIn.selector), "QUOTE_FAILED"
+        );
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, nav);
+
+        assertEq(withdrawn, nav);
+        assertEq(receiver.balance, nav);
+        assertEq(weth.balanceOf(address(strategy)), 0);
+        assertGt(pairedToken.balanceOf(address(strategy)), 0);
+    }
+
+    function test_Withdraw_FullNAVPaysOutWhenDrainQuoteIsOutOfOracleBand() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 nav = strategy.navInETH();
+        vm.mockCall(
+            address(converter), abi.encodeWithSelector(IConverter.quoteSwapExactAmountIn.selector), abi.encode(1)
+        );
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, nav);
+
+        assertEq(withdrawn, nav);
+        assertGt(pairedToken.balanceOf(address(strategy)), 0);
     }
 
     function test_Withdraw_NearFullNAVUnwindsWithoutRouteProbe() public {
@@ -2377,7 +2448,9 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         uint256 withdrawn = strategy.withdraw(receiver, amount);
 
-        assertEq(withdrawn, amount);
+        // Near-full requests drain: the payout covers the whole gross inventory.
+        assertGe(withdrawn, amount);
+        assertLe(strategy.navInETH(), REMOVAL_NAV_RESIDUE);
     }
 
     function test_Withdraw_BelowNearFullNAVProbesRoute() public {

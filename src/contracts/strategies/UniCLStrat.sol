@@ -108,6 +108,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     IUniswapV3Factory public immutable factory;
 
     int24 public immutable tickSpacing;
+    /// @dev Pool fee tier (hundredths of a bip), cached for the NAV exit-cost mark-down.
+    uint24 private immutable _poolFee;
     uint256 private immutable _genesisTimestamp;
 
     // ============ Strategy State ============
@@ -174,6 +176,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (factory.getPool(_token0Address, _token1Address, _fee) != _params.addresses.pool) {
             revert UniCLStratInvalidPool();
         }
+        _poolFee = _fee;
 
         tickSpacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
         positionWidth = _params.strategy.positionWidth;
@@ -236,6 +239,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
                 positionMain,
                 positionAlt,
                 _twapSqrtPrice(),
+                _poolFee,
                 swapSlippageBps
             );
     }
@@ -352,9 +356,12 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        is independently bounded, and a calm revert would stall exit liquidity when
      *        redemptions spike. See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *      In both paths the receiver gets a single native ETH transfer and the return value
-     *      is the ETH actually delivered. A request for the whole `navInETH()` drains the
-     *      strategy: NAV is marked net of the estimated exit cost, so the payout can exceed
-     *      `_amount` by the part of that estimate the conversion did not spend.
+     *      is the ETH actually delivered. A near-full request (the same threshold that skips
+     *      the route probe) drains the strategy: after the full unwind, the leftover paired
+     *      token is swapped to WETH and all WETH is paid out, so the payout can exceed
+     *      `_amount` — by the unspent part of the NAV exit-cost mark-down, plus whatever the
+     *      request fell short of NAV. The drain swap is skipped when the route is untradable or
+     *      the leftover is dust; the payout is then the WETH on hand.
      */
     function withdraw(address _receiver, uint256 _amount)
         external
@@ -387,15 +394,14 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             bool _nearFullWithdrawal = _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
             _sourceWeth(_remainder, _nearFullWithdrawal);
 
-            // NAV is net of the estimated exit cost, so a full-NAV request that converts for
-            // less than the estimate would strand the difference. Drain it: convert whatever
-            // paired token is left and pay out all WETH (may exceed `_amount` by the unspent
-            // part of the estimate).
-            bool _fullWithdrawal = _amount == _navBeforeWithdrawal;
-            if (_fullWithdrawal) _swapPairedTokenToWeth(type(uint256).max);
+            // NAV is net of the estimated exit cost, so a near-full request that converts for
+            // less than the estimate would strand the difference (and leave more than the
+            // removal residue behind). Drain it: best-effort convert the leftover paired token
+            // and pay out all WETH.
+            if (_nearFullWithdrawal) UniCLStratLib.trySwapAllPairedToWeth(_swapConfig(), pairedTokenToWethPath);
 
             uint256 _wethBalance = weth.balanceOf(address(this));
-            uint256 _wethToUnwrap = _fullWithdrawal || _wethBalance < _remainder ? _wethBalance : _remainder;
+            uint256 _wethToUnwrap = _nearFullWithdrawal || _wethBalance < _remainder ? _wethBalance : _remainder;
             _withdrawn = _idleETH + _wethToUnwrap;
             if (_withdrawn == 0) revert UniCLStratInsufficientWETH();
 
@@ -507,6 +513,9 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         _setMaxTotalNAV(_newMaxTotalNAV);
     }
 
+    /// @dev The NAV exit-cost mark-down uses the strategy pool's fee tier. If the paired -> WETH
+    ///      route trades through a pricier pool, raise `swapSlippageBps` by the fee difference so
+    ///      the mark-down still covers the conversion; see {UniCLStratLib-exitCostInETH}.
     function setRouteConfig(
         address _swapAdapter,
         bytes calldata _wethToPairedTokenPath,
@@ -518,7 +527,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     /**
      * @notice Sets the slippage tolerance for inventory-balancing swaps
      * @dev Also moves `navInETH()`: the paired-token inventory is marked down by this tolerance
-     *      plus the pool fee tier, so a change re-marks NAV in the block it executes.
+     *      plus the pool fee tier, so a change re-marks NAV (and the EVE price) in the block it
+     *      executes. Schedule it away from heavy queue activity; see `docs/FREEZE_RUNBOOK.md`.
      * @param _newSwapSlippageBps Slippage in basis points (must not exceed MAX_SWAP_SLIPPAGE_BPS)
      */
     function setSwapSlippageBps(uint256 _newSwapSlippageBps) external onlyAuthRole(Auth.ADMIN_ROLE) {

@@ -430,6 +430,20 @@ library UniCLStratLib {
     }
 
     /**
+     * @notice Best-effort swap of the strategy's whole paired-token balance to WETH along `_path`.
+     * @dev Used to drain a (near-)full withdrawal (audit G2). Skips without reverting when
+     *      {routeCostBps} reports the route untradable — the quote reverts, the oracle value is
+     *      zero (dust), or the quote is outside the oracle band — which is exactly when
+     *      {swapExactIn} would revert. The withdrawal then pays out the WETH it already has
+     *      instead of failing.
+     */
+    function trySwapAllPairedToWeth(SwapConfig memory _config, bytes memory _path) public {
+        uint256 _balance = IERC20Metadata(_config.pairedToken).balanceOf(address(this));
+        (bool _tradable,) = routeCostBps(_config, _path, _balance, false);
+        if (_tradable) swapExactIn(_config, _path, _balance);
+    }
+
+    /**
      * @notice Computes the fair required swap input for an exact output using the protocol
      *         oracle (Chainlink) as an independent price source.
      * @dev Input-side mirror of {_calculateOracleAmountOut}: decodes the input token from the
@@ -851,6 +865,7 @@ library UniCLStratLib {
      *      marked down by `pool fee tier + _slippageBps` — the fee the conversion pays plus the
      *      slippage the strategy tolerates on it. The WETH side is not marked down: it unwraps 1:1.
      *      Rounded up, so the mark-down never under-reserves.
+     * @param _poolFee The strategy pool's fee tier (hundredths of a bip)
      * @param _slippageBps The strategy's swap slippage tolerance (bps)
      */
     function inventoryValueInETH(
@@ -862,6 +877,7 @@ library UniCLStratLib {
         IUniCLStrat.Position memory _main,
         IUniCLStrat.Position memory _alt,
         uint160 _twapSqrtPriceX96,
+        uint256 _poolFee,
         uint256 _slippageBps
     ) public view returns (uint256) {
         (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _main, _twapSqrtPriceX96);
@@ -872,24 +888,22 @@ library UniCLStratLib {
             _valueInETH(_oracle, _weth, _token1, IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1);
 
         uint256 _pairedValue = _token0 == _weth ? _value1 : _value0;
-        return _value0 + _value1 - exitCostInETH(_pool, _pairedValue, _slippageBps);
+        return _value0 + _value1 - exitCostInETH(_pairedValue, _poolFee, _slippageBps);
     }
 
     /**
      * @notice Estimated ETH cost of converting `_pairedValue` (ETH terms) of paired token to WETH:
-     *         the pool's fee tier plus `_slippageBps`, rounded up.
-     * @dev The fee tier is read from the strategy pool. The configured route need not trade
-     *      through that pool, but it converts the same pair, and the production route is a single
-     *      hop through it; `_slippageBps` absorbs the difference for other routes. Uniswap V3 fees
-     *      are in hundredths of a bip (1e-6), hence the {FEE_DENOMINATOR} scale.
+     *         `_poolFee` plus `_slippageBps`, rounded up.
+     * @dev The fee tier is the strategy pool's, not the route's: routes are adapter-specific
+     *      bytes (see {_calculateOracleAmountOut}), so a fee cannot be read off them generically.
+     *      The production route is a single hop through the strategy pool, so the two match. A
+     *      route through a pricier pool under-reserves by the fee difference unless
+     *      `swapSlippageBps` is raised to cover it; see `UniCLStrat.setRouteConfig`. Uniswap V3
+     *      fees are in hundredths of a bip (1e-6), hence the {FEE_DENOMINATOR} scale.
      */
-    function exitCostInETH(IUniswapV3Pool _pool, uint256 _pairedValue, uint256 _slippageBps)
-        public
-        view
-        returns (uint256)
-    {
+    function exitCostInETH(uint256 _pairedValue, uint256 _poolFee, uint256 _slippageBps) public pure returns (uint256) {
         if (_pairedValue == 0) return 0;
-        uint256 _costPips = uint256(_pool.fee()) + _slippageBps * (FEE_DENOMINATOR / BASIS_POINTS);
+        uint256 _costPips = _poolFee + _slippageBps * (FEE_DENOMINATOR / BASIS_POINTS);
         return (_pairedValue * _costPips + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR;
     }
 

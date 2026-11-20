@@ -816,6 +816,22 @@ Do not page on moves with an obvious on-chain explanation:
   `PerformanceFeePaid`);
 - **Documented incident aftermath** — a realized loss from an emergency exit
   (§3.6), a strategy removal, or a feed correction after an oracle outage (§2).
+- **UniCLStrat exit-cost re-mark** — `UniCLStrat.navInETH()` marks the
+  paired-token inventory down by `pool fee tier + swapSlippageBps` (audit G2).
+  NAV steps by `paired value × Δbps` in three places: the block a new
+  `setSwapSlippageBps` executes (correlate with `SwapSlippageUpdated`), the
+  upgrade that first deploys the mark-down (a one-off drop of about 0.5% of the
+  paired share at the production 5 bps fee + 100 bps slippage), and
+  `emergencyExit()`, which hands the paired token to the StrategyManager at the
+  plain oracle price (a step up).
+
+**Scheduling NAV-moving parameter changes.** A slippage change or the
+mark-down deployment moves `eveBasePriceInETH()`, the premium price, and the
+live NAV that queued batches settle against. Priced batches keep their
+`finalEvePrice`, so nobody is re-priced retroactively. But anyone who enters or
+exits in the blocks right before a re-mark gets the old price. Execute these
+proposals when the ExitQueue has no open or priced batches of size. Don't
+execute them during a redemption wave, and announce the execution block.
 
 ### 6.3 Response flow (alert → investigate → pause if warranted → fix → unpause)
 
