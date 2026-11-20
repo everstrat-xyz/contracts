@@ -172,6 +172,18 @@ contract StrategyManagerERC20RecoveryTest is ProtocolTestBase {
         _convert(STRANDED_USDC, STRANDED_USDC_VALUE_ETH + 1);
     }
 
+    function test_Convert_RevertsWhenReportedOutputIsNotReceived() public {
+        weth.mint(address(strategyManager), STRANDED_USDC_VALUE_ETH);
+        vm.mockCall(
+            address(converter),
+            abi.encodeWithSelector(IConverter.executeSwapExactAmountIn.selector),
+            abi.encode(STRANDED_USDC_VALUE_ETH)
+        );
+
+        vm.expectRevert(IConverter.ConverterInsufficientOutput.selector);
+        _convert(STRANDED_USDC, STRANDED_USDC_VALUE_ETH);
+    }
+
     function test_Convert_RevertsWhenOracleFeedIsStale() public {
         vm.warp(block.timestamp + STALENESS_INTERVAL + 1);
         vm.expectRevert();

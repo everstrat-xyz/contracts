@@ -28,9 +28,9 @@ library StrandedERC20Lib {
 
     /**
      * @notice Swaps `_amountIn` of `_token` into WETH along `_path` and unwraps it to `_controller`.
-     * @dev The swap must return at least the larger of `_minETHOut` and the Oracle value of
-     *      `_amountIn` discounted by `_maxSlippageBps` (Converter reverts
-     *      `ConverterInsufficientOutput` otherwise). Grants the calling contract
+     * @dev The WETH received must meet the larger of `_minETHOut` and the Oracle value of
+     *      `_amountIn` discounted by `_maxSlippageBps` or the swap reverts with
+     *      `ConverterInsufficientOutput`. Grants the calling contract
      *      `CONVERTER_CALLER_ROLE` via the Converter on first use, which only the registered
      *      StrategyManager may do.
      * @return ethOut ETH delivered to `_controller`
@@ -57,9 +57,12 @@ library StrandedERC20Lib {
         if (!_converter.isCaller(address(this))) _converter.grantCallerRole(address(this));
 
         IERC20(_token).forceApprove(address(_converter), _amountIn);
-        ethOut = _converter.executeSwapExactAmountIn(_adapter, _path, _amountIn, minOut, block.timestamp);
+        uint256 wethBefore = IERC20(weth).balanceOf(address(this));
+        _converter.executeSwapExactAmountIn(_adapter, _path, _amountIn, minOut, block.timestamp);
+        ethOut = IERC20(weth).balanceOf(address(this)) - wethBefore;
         IERC20(_token).forceApprove(address(_converter), 0);
 
+        if (ethOut < minOut) revert IConverter.ConverterInsufficientOutput();
         IERC20(weth).forceApprove(address(_converter), ethOut);
         _converter.unwrapWETH(ethOut, _controller);
     }
