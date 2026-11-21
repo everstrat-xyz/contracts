@@ -415,6 +415,21 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
     }
 
+    /// @dev Audit G6: liquidity in a weight-0 strategy is unreachable by `withdrawFromStrategies`,
+    ///      so it must not make the keeper recommend a WithdrawShortfall.
+    function test_WithdrawShortfall_IgnoresZeroWithdrawalWeightLiquidity() public {
+        _deployCapitalToStrategy();
+        strategyManager.setWithdrawalWeight(address(strategy), 0);
+        _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
+
+        assertGt(executor.pendingRedemptionNeedsETH(), address(controller).balance);
+        assertGt(strategy.maxWithdrawal(), 0);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertNotEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall));
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+    }
+
     /// @dev Audit G9: a shortfall smaller than `minWithdrawETH` used to leave both keepers idle
     ///      and the priced batch unfunded (and uncancellable) until expiry. It is now rounded up
     ///      to the floor, after which the queue keeper can settle the whole batch.

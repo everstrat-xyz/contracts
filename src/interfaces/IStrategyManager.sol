@@ -338,8 +338,9 @@ interface IStrategyManager {
     /**
      * @notice Deposit funds to a range of strategies
      *
-     * IMPORTANT: The actual distribution amount may be less if some of the strategies
-     * hit their max deposit limits at the time of distribution.
+     * Split by `depositWeight`, capped at each strategy's `maxDeposit()`; the part above a cap is
+     * re-split across the qualifying strategies that still have room. The amount deposited is
+     * less only when their combined capacity is short or a `deposit()` reverts.
      * Reverts with StrategyManagerNoStrategiesRegistered when the registry is empty.
      * Returns 0 when strategies exist but none qualify (`isHealthy() && maxDeposit() > 0`);
      * unused ETH is returned to the controller. Strategies still cooling down after a
@@ -360,8 +361,9 @@ interface IStrategyManager {
     /**
      * @notice Deposit funds to all strategies
      *
-     * IMPORTANT: The actual distribution amount may be less if some of the strategies
-     * hit their max deposit limits at the time of distribution.
+     * Split by `depositWeight`, capped at each strategy's `maxDeposit()`; the part above a cap is
+     * re-split across the qualifying strategies that still have room. The amount deposited is
+     * less only when their combined capacity is short or a `deposit()` reverts.
      * Reverts with StrategyManagerNoStrategiesRegistered when the registry is empty.
      * Returns 0 when strategies exist but none qualify (`isHealthy() && maxDeposit() > 0`);
      * unused ETH is returned to the controller. Strategies still cooling down after a
@@ -391,12 +393,15 @@ interface IStrategyManager {
     /**
      * @notice Withdraw funds from a range of strategies to the controller
      *
-     * IMPORTANT: The actual withdrawal amount may be less if some of the strategies
-     * hit their max withdraw limits at the time of withdrawal.
+     * Split by `withdrawalWeight`, capped at each strategy's `maxWithdrawal()`; the part above a cap
+     * is re-split across the weighted strategies that still have room. Weight-0 strategies are
+     * never used. The amount withdrawn is less only when the weighted strategies' combined
+     * `maxWithdrawal()` is short, a retried withdrawal also fails, or strategies retain fees.
      * Reverts with StrategyManagerNoStrategiesRegistered when the registry is empty.
      * Returns 0 when strategies exist but none have maxWithdrawal() > 0.
      * Batch calls are best-effort: a reverting `withdraw()` on one strategy emits
-     * `StrategyWithdrawFailed(strategy, reason)` (`reason` is the revert data) and the loop continues.
+     * `StrategyWithdrawFailed(strategy, reason)` (`reason` is the revert data) and its share is
+     * retried once across the strategies that did pay out, at their live `maxWithdrawal()`.
      * @param _startIndex The start index (inclusive) of the strategies to withdraw from
      * @param _endIndex The end index (exclusive) of the strategies to withdraw from
      * @param _amount The amount of ETH to withdraw from the strategies
@@ -410,12 +415,15 @@ interface IStrategyManager {
     /**
      * @notice Withdraw funds from all strategies to the controller
      *
-     * IMPORTANT: The actual withdrawal amount may be less if some of the strategies
-     * hit their max withdraw limits at the time of withdrawal.
+     * Split by `withdrawalWeight`, capped at each strategy's `maxWithdrawal()`; the part above a cap
+     * is re-split across the weighted strategies that still have room. Weight-0 strategies are
+     * never used. The amount withdrawn is less only when the weighted strategies' combined
+     * `maxWithdrawal()` is short, a retried withdrawal also fails, or strategies retain fees.
      * Reverts with StrategyManagerNoStrategiesRegistered when the registry is empty.
      * Returns 0 when strategies exist but none have maxWithdrawal() > 0.
      * Batch calls are best-effort: a reverting `withdraw()` on one strategy emits
-     * `StrategyWithdrawFailed(strategy, reason)` (`reason` is the revert data) and the loop continues.
+     * `StrategyWithdrawFailed(strategy, reason)` (`reason` is the revert data) and its share is
+     * retried once across the strategies that did pay out, at their live `maxWithdrawal()`.
      * @param _amount The amount of ETH to withdraw from the strategies
      * @return totalWithdrawn Total ETH actually received by the controller (net of strategy fees)
      */

@@ -3018,6 +3018,94 @@ contract StrategyManagerTest is ProtocolTestBase {
         assertLe(withdrawn, 12 ether);
     }
 
+    /// @dev Audit G6: the part of a weighted share above a strategy's maxWithdrawal is
+    ///      re-split to strategies with room instead of being dropped.
+    function test_WithdrawFromStrategies_ReallocatesAboveMaxWithdrawal() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70); // weighted share 7 ether, cap 2 ether
+        strategyManager.addStrategy(strategy2, 60, 50); // weighted share 5 ether, cap 10 ether
+        vm.stopPrank();
+
+        vm.deal(address(mockStrategy1), 10 ether);
+        vm.deal(address(mockStrategy2), 10 ether);
+        mockStrategy1.setMaxWithdrawal(2 ether);
+        mockStrategy2.setMaxWithdrawal(10 ether);
+
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategies(12 ether);
+
+        assertEq(withdrawn, 12 ether);
+        assertEq(address(mockStrategy1).balance, 8 ether); // capped at 2 ether
+        assertEq(address(mockStrategy2).balance, 0); // its 5 ether + strategy1's 5 ether overflow
+    }
+
+    /// @dev Audit G6: a reverting strategy's share is retried once on strategies that paid out.
+    function test_WithdrawFromStrategies_RetriesFailedShareOnOtherStrategies() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        vm.deal(address(mockStrategy1), 10 ether);
+        vm.deal(address(mockStrategy2), 10 ether);
+        mockStrategy1.setMaxWithdrawal(10 ether);
+        mockStrategy2.setMaxWithdrawal(10 ether);
+        mockStrategy2.setRevertWithdraw(true);
+
+        vm.expectEmit(true, false, false, true, address(strategyManager));
+        emit IStrategyManager.StrategyWithdrawFailed(
+            strategy2, abi.encodeWithSelector(MockStrategy.MockStrategyWithdrawReverted.selector)
+        );
+
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategies(6 ether);
+
+        // strategy1: 3.5 ether weighted share + strategy2's failed 2.5 ether on the retry
+        assertEq(withdrawn, 6 ether);
+        assertEq(address(mockStrategy1).balance, 4 ether);
+        assertEq(address(mockStrategy2).balance, 10 ether);
+    }
+
+    /// @dev Reallocation never spills into weight-0 strategies, even when the weighted ones are short.
+    function test_WithdrawFromStrategies_ReallocationSkipsZeroWeight() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 0);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        vm.deal(address(mockStrategy1), 10 ether);
+        vm.deal(address(mockStrategy2), 10 ether);
+        mockStrategy1.setMaxWithdrawal(10 ether);
+        mockStrategy2.setMaxWithdrawal(3 ether);
+
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategies(6 ether);
+
+        assertEq(withdrawn, 3 ether);
+        assertEq(address(mockStrategy1).balance, 10 ether);
+    }
+
+    /// @dev Same cap-aware split on deposits: the part above one strategy's maxDeposit goes to
+    ///      the others instead of back to the Controller.
+    function test_DepositToStrategies_ReallocatesAboveMaxDeposit() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70); // weighted share 4 ether, cap 1 ether
+        strategyManager.addStrategy(strategy2, 60, 50); // weighted share 3 ether
+        vm.stopPrank();
+
+        mockStrategy1.setMaxDeposit(1 ether);
+        mockStrategy2.setMaxDeposit(10 ether);
+        mockStrategy1.setIsHealthy(true);
+        mockStrategy2.setIsHealthy(true);
+
+        vm.deal(controller, 7 ether);
+        controllerContract.depositToStrategies(7 ether);
+
+        assertEq(address(mockStrategy1).balance, 1 ether);
+        assertEq(address(mockStrategy2).balance, 6 ether);
+        assertEq(controller.balance, 0);
+    }
+
     /*//////////////////////////////////////////////////////////////
                     PERFORMANCE FEE HARVESTING TESTS
     //////////////////////////////////////////////////////////////*/
