@@ -108,8 +108,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     IUniswapV3Factory public immutable factory;
 
     int24 public immutable tickSpacing;
-    /// @notice Estimated paired-token to WETH route fee in parts per million.
-    uint256 public immutable exitRouteFeePips;
     uint256 private immutable _genesisTimestamp;
 
     // ============ Strategy State ============
@@ -141,6 +139,9 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     /// @notice Adapter-specific route bytes for pairedToken -> WETH swaps
     bytes public pairedTokenToWethPath;
+
+    /// @notice Estimated paired-token to WETH route fee in parts per million.
+    uint256 public exitRouteFeePips;
 
     /// @notice Slippage tolerance for inventory-balancing swaps (in basis points, 1-200)
     uint256 public swapSlippageBps;
@@ -187,12 +188,13 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // a dense average rather than a cardinality-1 spot extrapolation.
         _requireTwapOracle(twapInterval);
         _requireTwapOracle(shortTwapInterval);
+        _validateRouteConfig(
+            _params.routes.swapAdapter, _params.routes.wethToPairedTokenPath, _params.routes.pairedTokenToWethPath
+        );
         swapAdapter = _params.routes.swapAdapter;
         wethToPairedTokenPath = _params.routes.wethToPairedTokenPath;
         pairedTokenToWethPath = _params.routes.pairedTokenToWethPath;
         exitRouteFeePips = _params.routes.exitRouteFeePips;
-
-        _validateRouteConfig();
 
         swapSlippageBps = DEFAULT_SWAP_SLIPPAGE_BPS;
         _genesisTimestamp = block.timestamp;
@@ -514,13 +516,22 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         _setMaxTotalNAV(_newMaxTotalNAV);
     }
 
-    /// @dev Select a paired-token to WETH route whose fee is covered by `exitRouteFeePips`.
+    /// @dev Updating the exit route fee estimate re-marks NAV and pending LP performance fees.
     function setRouteConfig(
         address _swapAdapter,
         bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
+        bytes calldata _pairedTokenToWethPath,
+        uint256 _exitRouteFeePips
     ) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        _setRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
+        _validateExitRouteFee(_exitRouteFeePips);
+        _validateRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
+
+        swapAdapter = _swapAdapter;
+        wethToPairedTokenPath = _wethToPairedTokenPath;
+        pairedTokenToWethPath = _pairedTokenToWethPath;
+        exitRouteFeePips = _exitRouteFeePips;
+
+        emit RouteConfigUpdated(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath, _exitRouteFeePips);
     }
 
     /**
@@ -642,28 +653,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function _setMaxTotalNAV(uint256 _newMaxTotalNAV) private {
         emit MaxTotalNAVUpdated(maxTotalNAV, _newMaxTotalNAV);
         maxTotalNAV = _newMaxTotalNAV;
-    }
-
-    function _setRouteConfig(
-        address _swapAdapter,
-        bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
-    ) private {
-        // Validate against the new values before writing storage, so no partial state
-        // mutation occurs even transiently. The storage-based _validateRouteConfig()
-        // is used by the constructor where the values are already written.
-        _validateRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
-
-        swapAdapter = _swapAdapter;
-        wethToPairedTokenPath = _wethToPairedTokenPath;
-        pairedTokenToWethPath = _pairedTokenToWethPath;
-
-        emit RouteConfigUpdated(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
-    }
-
-    /// @dev Validates route config from constructor-initialised storage (values already written)
-    function _validateRouteConfig() private view {
-        _validateRouteConfig(swapAdapter, wethToPairedTokenPath, pairedTokenToWethPath);
     }
 
     /// @dev Validates route config from explicit parameters (check before write)
@@ -1175,9 +1164,12 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (_params.strategy.maxTickDeviation <= 0) revert UniCLStratInvalidConfig();
         _validateTwapInterval(_params.strategy.twapInterval, MIN_TWAP_INTERVAL);
         _validateTwapInterval(_params.strategy.shortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+        _validateExitRouteFee(_params.routes.exitRouteFeePips);
+    }
 
+    function _validateExitRouteFee(uint256 _exitRouteFeePips) private pure {
         uint256 _maxSlippagePips = MAX_SWAP_SLIPPAGE_BPS * (UniCLStratLib.FEE_DENOMINATOR / BASIS_POINTS);
-        if (_params.routes.exitRouteFeePips >= UniCLStratLib.FEE_DENOMINATOR - _maxSlippagePips) {
+        if (_exitRouteFeePips >= UniCLStratLib.FEE_DENOMINATOR - _maxSlippagePips) {
             revert UniCLStratInvalidConfig();
         }
     }

@@ -55,7 +55,9 @@ interface IUniCLStrat is IStrategy {
     event TwapIntervalUpdated(uint32 oldInterval, uint32 newInterval);
     event ShortTwapIntervalUpdated(uint32 oldInterval, uint32 newInterval);
     event MaxTotalNAVUpdated(uint256 oldMaxTotalNAV, uint256 newMaxTotalNAV);
-    event RouteConfigUpdated(address indexed swapAdapter, bytes wethToPairedTokenPath, bytes pairedTokenToWethPath);
+    event RouteConfigUpdated(
+        address indexed swapAdapter, bytes wethToPairedTokenPath, bytes pairedTokenToWethPath, uint256 exitRouteFeePips
+    );
     event SwapSlippageUpdated(uint256 indexed oldSlippage, uint256 newSlippage);
     /// @notice Emitted when the best-effort pool unwind on pause reverted and was skipped
     event LiquidityUnwindSkipped();
@@ -103,7 +105,8 @@ interface IUniCLStrat is IStrategy {
     function setRouteConfig(
         address _swapAdapter,
         bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
+        bytes calldata _pairedTokenToWethPath,
+        uint256 _exitRouteFeePips
     ) external;
 
     function swapSlippageBps() external view returns (uint256);

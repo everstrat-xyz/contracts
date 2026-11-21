@@ -2015,18 +2015,56 @@ contract UniCLStratTest is UniCLStratTestBase {
 
     // ============ setRouteConfig Runtime Setter Tests ============
 
-    function test_SetRouteConfig_UpdatesAdapterAndPaths() public {
+    function test_SetRouteConfig_UpdatesAdapterPathsAndFee() public {
         MockConverterAdapter newAdapter = new MockConverterAdapter(weth, pairedToken);
         converter.setAllowedAdapter(address(newAdapter), true);
-        bytes memory newWethPath = abi.encodePacked(address(weth), uint24(100), address(pairedToken));
-        bytes memory newPairedPath = abi.encodePacked(address(pairedToken), uint24(100), address(weth));
+        uint24 newFee = 100;
+        bytes memory newWethPath = abi.encodePacked(address(weth), newFee, address(pairedToken));
+        bytes memory newPairedPath = abi.encodePacked(address(pairedToken), newFee, address(weth));
 
+        vm.expectEmit(true, false, false, true, address(strategy));
+        emit IUniCLStrat.RouteConfigUpdated(address(newAdapter), newWethPath, newPairedPath, newFee);
         vm.prank(admin);
-        strategy.setRouteConfig(address(newAdapter), newWethPath, newPairedPath);
+        strategy.setRouteConfig(address(newAdapter), newWethPath, newPairedPath, newFee);
 
         assertEq(address(strategy.swapAdapter()), address(newAdapter));
         assertEq(strategy.wethToPairedTokenPath(), newWethPath);
         assertEq(strategy.pairedTokenToWethPath(), newPairedPath);
+        assertEq(strategy.exitRouteFeePips(), newFee);
+    }
+
+    function test_SetRouteConfig_RepricesNavAndLpFees() public {
+        _deposit(DEPOSIT_AMOUNT);
+        IUniCLStrat.Position memory position = _mainPosition();
+        pool.accrueFees(address(strategy), position.tickLower, position.tickUpper, 0, uint128(ACCRUED_FEE_PAIRED));
+        vm.prank(strategyManager);
+        strategy.sync();
+
+        uint256 navBefore = strategy.navInETH();
+        uint256 feeBefore = strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS);
+        uint24 newFee = 3000;
+        uint256 feeIncrease = newFee - EXIT_ROUTE_FEE_PIPS;
+        bytes memory wethPath = strategy.wethToPairedTokenPath();
+        bytes memory pairedPath = abi.encodePacked(address(pairedToken), newFee, address(weth));
+
+        vm.prank(admin);
+        strategy.setRouteConfig(address(swapAdapter), wethPath, pairedPath, newFee);
+
+        assertApproxEqAbs(strategy.navInETH(), navBefore - _pairedInventory() * feeIncrease / 1e6, 1);
+        uint256 expectedFee = feeBefore - ACCRUED_FEE_PAIRED * feeIncrease * PERFORMANCE_FEE_BPS / (1e6 * 10_000);
+        assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), expectedFee);
+        vm.prank(strategyManager);
+        assertEq(strategy.settlePerformanceFee(PERFORMANCE_FEE_BPS), expectedFee);
+    }
+
+    function test_SetRouteConfig_RevertsWhenExitFeeAndMaxSlippageReachFullValue() public {
+        bytes memory wethPath = strategy.wethToPairedTokenPath();
+        bytes memory pairedPath = strategy.pairedTokenToWethPath();
+
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setRouteConfig(address(swapAdapter), wethPath, pairedPath, 980_000);
+
         assertEq(strategy.exitRouteFeePips(), EXIT_ROUTE_FEE_PIPS);
     }
 
@@ -2035,7 +2073,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         bytes memory _pairedPath = abi.encodePacked(address(pairedToken), uint24(3000), address(weth));
         _expectMissingRole(Auth.ADMIN_ROLE);
         vm.prank(user);
-        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath);
+        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath, EXIT_ROUTE_FEE_PIPS);
     }
 
     function test_SetRouteConfig_RevertsWithZeroAdapter() public {
@@ -2043,7 +2081,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         bytes memory _pairedPath = abi.encodePacked(address(pairedToken), uint24(3000), address(weth));
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
-        strategy.setRouteConfig(address(0), _wethPath, _pairedPath);
+        strategy.setRouteConfig(address(0), _wethPath, _pairedPath, EXIT_ROUTE_FEE_PIPS);
     }
 
     function test_SetRouteConfig_RevertsWithWrongDirectionPath() public {
@@ -2052,7 +2090,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         // Pass the pairedToken→WETH path as the WETH→pairedToken path
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
-        strategy.setRouteConfig(address(swapAdapter), _wrongPath, _pairedPath);
+        strategy.setRouteConfig(address(swapAdapter), _wrongPath, _pairedPath, EXIT_ROUTE_FEE_PIPS);
     }
 
     function test_SetRouteConfig_RevertsWithCodelessAdapter() public {
@@ -2060,7 +2098,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         bytes memory _pairedPath = abi.encodePacked(address(pairedToken), uint24(3000), address(weth));
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
-        strategy.setRouteConfig(makeAddr("codelessAdapter"), _wethPath, _pairedPath);
+        strategy.setRouteConfig(makeAddr("codelessAdapter"), _wethPath, _pairedPath, EXIT_ROUTE_FEE_PIPS);
     }
 
     function test_SetRouteConfig_RevertsWhenConverterRejectsEitherRoute() public {
@@ -2074,7 +2112,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         );
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
-        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath);
+        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath, EXIT_ROUTE_FEE_PIPS);
         vm.clearMockedCalls();
 
         vm.mockCall(
@@ -2084,14 +2122,14 @@ contract UniCLStratTest is UniCLStratTestBase {
         );
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
-        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath);
+        strategy.setRouteConfig(address(swapAdapter), _wethPath, _pairedPath, EXIT_ROUTE_FEE_PIPS);
     }
 
     function test_SetRouteConfig_RevertsWhenReturnPathHasWrongDirection() public {
         bytes memory _wethPath = abi.encodePacked(address(weth), uint24(3000), address(pairedToken));
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratInvalidRouteConfig.selector);
-        strategy.setRouteConfig(address(swapAdapter), _wethPath, _wethPath);
+        strategy.setRouteConfig(address(swapAdapter), _wethPath, _wethPath, EXIT_ROUTE_FEE_PIPS);
     }
 
     // ============ Coverage gap tests ============

@@ -15,7 +15,7 @@ import {Auth} from "../src/libraries/Auth.sol";
  *
  * @dev IMPORTANT DEPLOYMENT ORDER:
  *
- *      The UniCLStrat constructor calls `_validateRouteConfig()`, which reads the
+ *      The UniCLStrat constructor calls `_validateRouteConfig`, which reads the
  *      Registry to resolve the Converter address (`_registry.converter()`) and then
  *      calls `converter.validateRoute(...)` and `converter.routeTokens(...)`.
  *      This means the following prerequisites MUST be met BEFORE deploying UniCLStrat:
