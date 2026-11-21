@@ -171,13 +171,12 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
             controller.checkAndRebalanceStrategies();
             emit StrategyUpkeepPerformed(strategyAction, 0);
         } else if (strategyAction == StrategyAction.WithdrawShortfall) {
-            uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
-            uint256 controllerBalance = address(controller).balance;
-            if (needsETH <= controllerBalance || needsETH - controllerBalance < minWithdrawETH) {
+            uint256 withdrawAmount =
+                _shortfallWithdrawal(_pendingRedemptionNeedsETH(registry_), address(controller).balance);
+            if (withdrawAmount == 0 || _totalMaxWithdrawal(strategyManager_) == 0) {
                 revert KeeperExecutorNoUpkeepNeeded();
             }
-            uint256 shortfall = needsETH - controllerBalance;
-            uint256 actualWithdrawn = controller.withdrawFromStrategies(shortfall);
+            uint256 actualWithdrawn = controller.withdrawFromStrategies(withdrawAmount);
             emit StrategyUpkeepPerformed(strategyAction, actualWithdrawn);
         } else if (strategyAction == StrategyAction.ProvideExitLiquidity) {
             uint256 topUp =
@@ -230,11 +229,9 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
 
         uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
         uint256 controllerBalance = controller.balance;
-        if (
-            needsETH > controllerBalance && needsETH - controllerBalance >= minWithdrawETH
-                && _totalMaxWithdrawal(strategyManager_) > 0
-        ) {
-            return (StrategyAction.WithdrawShortfall, needsETH - controllerBalance);
+        uint256 withdrawAmount = _shortfallWithdrawal(needsETH, controllerBalance);
+        if (withdrawAmount > 0 && _totalMaxWithdrawal(strategyManager_) > 0) {
+            return (StrategyAction.WithdrawShortfall, withdrawAmount);
         }
 
         uint256 topUp = _exitLiquidityTopUp(registry_, controllerBalance, needsETH);
@@ -268,9 +265,13 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         return false;
     }
 
+    /// @dev Liquidity `withdrawFromStrategies` can actually reach: weight-0 strategies are excluded
+    ///      from batch withdrawals, so counting them would recommend a WithdrawShortfall that
+    ///      cannot pull anything (audit G6).
     function _totalMaxWithdrawal(IStrategyManager _strategyManager) internal view returns (uint256 total) {
         address[] memory strategies = _strategyManager.strategies();
         for (uint256 i = 0; i < strategies.length; i++) {
+            if (_strategyManager.withdrawalWeight(strategies[i]) == 0) continue;
             total += IStrategy(strategies[i]).maxWithdrawal();
         }
     }
@@ -294,6 +295,20 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         for (uint256 i = 0; i < strategies.length; i++) {
             totalFeeETH += _strategyManager.pendingPerformanceFeeInETH(strategies[i]);
         }
+    }
+
+    /// @dev ETH to pull from strategies so the Controller can settle priced batches: the
+    ///      shortfall `_needsETH - _controllerBalance`, rounded UP to `minWithdrawETH` (audit G9).
+    ///      `minWithdrawETH` is a dust floor on withdrawal size, not a threshold below which a
+    ///      shortfall is ignored — a gap smaller than the floor would otherwise leave a priced
+    ///      batch unfunded (and uncancellable) until it expires. Over-pulling by less than
+    ///      `minWithdrawETH` is harmless: it stays idle, or is redeployed by DepositExcess only
+    ///      once it clears the reserve and `minDepositETH`, which cannot re-open the shortfall.
+    ///      Returns 0 when nothing is owed.
+    function _shortfallWithdrawal(uint256 _needsETH, uint256 _controllerBalance) internal view returns (uint256) {
+        if (_needsETH <= _controllerBalance) return 0;
+        uint256 shortfall = _needsETH - _controllerBalance;
+        return shortfall < minWithdrawETH ? minWithdrawETH : shortfall;
     }
 
     function _idleExcess(uint256 _controllerBalance, uint256 _needsETH) internal view returns (uint256) {

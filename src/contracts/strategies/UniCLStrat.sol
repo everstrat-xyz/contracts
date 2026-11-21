@@ -354,12 +354,16 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        TWAP/oracle (a skewed burn does not crystallize IL into NAV), the conversion swap
      *        is independently bounded, and a calm revert would stall exit liquidity when
      *        redemptions spike. See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
+     *      The paired -> WETH swap is best effort: if it reverts (quote fails, outside the
+     *      oracle band, or the swap itself fails) the paired token stays in the strategy, still
+     *      in NAV, {WethConversionSkipped} is emitted and the payout is whatever ETH/WETH is
+     *      already held — a partial withdrawal instead of a blocked one (audit G7).
      *      In both paths the receiver gets a single native ETH transfer and the return value
      *      is the ETH actually delivered. A near-full request triggers a drain: after sourcing
      *      WETH for the request, the strategy tries to swap leftover paired token to WETH and
      *      pays out all WETH on hand. The payout can exceed `_amount` by the unspent part of
      *      the NAV exit-cost mark-down plus the difference between NAV and the request. The
-     *      drain swap is skipped when the route is untradable or the leftover is dust.
+     *      drain is best effort, so a failed swap leaves the payout available.
      */
     function withdraw(address _receiver, uint256 _amount)
         external
@@ -396,7 +400,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             // less than the estimate would strand the difference (and leave more than the
             // removal residue behind). Drain it: best-effort convert the leftover paired token
             // and pay out all WETH.
-            if (_nearFullWithdrawal) UniCLStratLib.trySwapAllPairedToWeth(_swapConfig(), pairedTokenToWethPath);
+            if (_nearFullWithdrawal) UniCLStratLib.drainPairedToWeth();
 
             uint256 _wethBalance = weth.balanceOf(address(this));
             uint256 _wethToUnwrap = _nearFullWithdrawal || _wethBalance < _remainder ? _wethBalance : _remainder;
@@ -734,6 +738,18 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         pairedToken.forceApprove(address(_registry.converter()), 0);
     }
 
+    /**
+     * @notice Self-call hook that buys `_amountOut` WETH or drains the paired balance when `_amountOut` is zero.
+     * @dev Callable only by the strategy itself. Exists so `withdraw` can attempt the
+     *      paired -> WETH swap inside a try/catch — an untradable route must not block a
+     *      partial payout (audit G7). Oracle-bounded exact-output swap with
+     *      balance-cap fallback for a positive target. The drain uses an exact-input swap.
+     */
+    function selfConvertToWeth(uint256 _amountOut) external {
+        if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
+        UniCLStratLib.swapPairedToWeth(_swapConfig(), pairedTokenToWethPath, _amountOut);
+    }
+
     function _unpauseStrategy() private {
         _giveConverterAllowances();
         _unpause();
@@ -965,8 +981,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // fallback when the partial path still leaves WETH short and liquidity remains.
         for (uint256 _pass; _pass < 2; ++_pass) {
             if (_fullUnwind) _removeLiquidityAndCollect();
-            _convertToWeth(_wethTarget);
-            if (weth.balanceOf(address(this)) >= _wethTarget || !_hasPoolLiquidity()) return;
+            UniCLStratLib.convertToWeth(address(weth), _wethTarget);
+            if (
+                weth.balanceOf(address(this)) >= _wethTarget
+                    || !UniCLStratLib.hasPoolLiquidity(pool, positionMain, positionAlt)
+            ) return;
             _fullUnwind = true;
         }
     }
@@ -990,15 +1009,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     /// @dev Full unwind of both positions with LP-fee accrual; see {UniCLStratLib-removeAllLiquidity}.
     function _removeLiquidityAndCollect() internal {
         UniCLStratLib.removeAllLiquidity(pool, _lpFees, positionMain, positionAlt);
-    }
-
-    function _positionLiquidity(Position memory _position) internal view returns (uint128 _liquidity) {
-        if (!_positionIsValid(_position)) return 0;
-        (_liquidity,,,,) = pool.positions(_positionKey(_position));
-    }
-
-    function _hasPoolLiquidity() internal view returns (bool) {
-        return _positionLiquidity(positionMain) > 0 || _positionLiquidity(positionAlt) > 0;
     }
 
     /// @dev True when the main range has been placed and spot has left it or drifted past
@@ -1062,10 +1072,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         );
     }
 
-    function _positionKey(Position memory _position) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(address(this), _position.tickLower, _position.tickUpper));
-    }
-
     function _positionIsValid(Position memory _position) internal pure returns (bool) {
         return _position.tickLower < _position.tickUpper && _position.tickLower >= TickMath.MIN_TICK
             && _position.tickUpper <= TickMath.MAX_TICK;
@@ -1093,22 +1099,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         );
     }
 
-    /**
-     * @notice Tops up the strategy's WETH balance to `_targetWethAmount` by swapping
-     *         paired tokens for exactly the missing WETH amount.
-     * @dev Uses an exact-output swap so the strategy receives precisely the WETH it is
-     *      missing (no oracle-estimate drift on the output side). If the paired-token
-     *      balance cannot cover the required input, {_swapViaRouteExactAmountOut} falls back
-     *      to a best-effort exact-input swap of the whole balance — mirroring the
-     *      historical "cap the input at the available balance" behaviour.
-     */
-    function _convertToWeth(uint256 _targetWethAmount) internal {
-        uint256 _wethBalance = weth.balanceOf(address(this));
-        if (_wethBalance >= _targetWethAmount) return;
-
-        _swapViaRouteExactAmountOut(pairedTokenToWethPath, _targetWethAmount - _wethBalance);
-    }
-
     function _swapWethToPairedToken(uint256 _amountIn) internal {
         if (_amountIn == 0) return;
         uint256 _swapAmountIn = _amountIn > weth.balanceOf(address(this)) ? weth.balanceOf(address(this)) : _amountIn;
@@ -1126,11 +1116,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     ///      {UniCLStratLib-swapExactIn} (TWAP quote, oracle floor/ceiling, slippage cap).
     function _swapViaRouteExactAmountIn(bytes memory _path, uint256 _amountIn) internal returns (uint256) {
         return UniCLStratLib.swapExactIn(_swapConfig(), _path, _amountIn);
-    }
-
-    /// @dev Oracle-bounded exact-output swap with balance-cap fallback; see {UniCLStratLib-swapExactOut}.
-    function _swapViaRouteExactAmountOut(bytes memory _path, uint256 _amountOut) internal returns (uint256) {
-        return UniCLStratLib.swapExactOut(_swapConfig(), _path, _amountOut);
     }
 
     function _swapConfig() internal view returns (UniCLStratLib.SwapConfig memory) {

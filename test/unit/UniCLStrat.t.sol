@@ -788,38 +788,66 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertApproxEqAbs(_grossNavInETH(), DEPOSIT_AMOUNT + IDLE_ETH_DONATION - withdrawAmount, NAV_TOLERANCE);
     }
 
-    function test_Withdraw_RevertsWhenExactOutputQuoteFails() public {
+    /// @dev Audit G7: when the paired -> WETH swap cannot run, `withdraw` pays out the WETH it
+    ///      already has instead of reverting; the unconverted paired token stays in NAV.
+    function _assertPartialPayoutWhenConversionSkipped(uint256 _request) internal {
+        uint256 navBefore = strategy.navInETH();
+
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit IUniCLStrat.WethConversionSkipped();
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, _request);
+
+        assertGt(withdrawn, 0);
+        assertLt(withdrawn, _request);
+        assertEq(receiver.balance, withdrawn);
+        assertGt(pairedToken.balanceOf(address(strategy)), 0);
+        assertApproxEqRel(strategy.navInETH(), navBefore - withdrawn, PERFORMANCE_FEE_NAV_REL_TOLERANCE);
+    }
+
+    function test_Withdraw_PaysPartialWhenExactOutputQuoteFails() public {
         _deposit(DEPOSIT_AMOUNT);
         converter.setQuoteShouldRevert(true);
 
         // 6 ETH requires a paired -> WETH top-up, whose exact-output quote now reverts
-        vm.prank(strategyManager);
-        vm.expectRevert(IUniCLStrat.UniCLStratQuoteFailed.selector);
-        strategy.withdraw(receiver, 6 ether);
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
     }
 
-    function test_Withdraw_RevertsWhenExactOutputQuoteExceedsOracleCeiling() public {
+    function test_Withdraw_PaysPartialWhenExactOutputQuoteExceedsOracleCeiling() public {
         _deposit(DEPOSIT_AMOUNT);
 
         // 80% multiplier inflates the exact-output quote (requires 1.25x input),
         // breaching the +2% oracle ceiling on the required input.
         converter.setQuoteMultiplierBps(8_000);
 
-        vm.prank(strategyManager);
-        vm.expectPartialRevert(IUniCLStrat.UniCLStratQuoteExceedsOracleCeiling.selector);
-        strategy.withdraw(receiver, 6 ether);
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
     }
 
-    function test_Withdraw_RevertsWhenExactOutputQuoteBelowOracleFloor() public {
+    function test_Withdraw_PaysPartialWhenExactOutputQuoteBelowOracleFloor() public {
         _deposit(DEPOSIT_AMOUNT);
 
         // 120% multiplier deflates the exact-output quote (requires ~0.83x input),
         // breaching the -2% oracle floor on the required input.
         converter.setQuoteMultiplierBps(12_000);
 
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
+    }
+
+    /// @dev Quote and oracle bounds pass, but the swap itself reverts (e.g. the router rejects
+    ///      the padded input cap under a moved spot price) — still a partial payout.
+    function test_Withdraw_PaysPartialWhenConversionSwapReverts() public {
+        _deposit(DEPOSIT_AMOUNT);
+        converter.setSwapShouldRevert(true);
+
+        _assertPartialPayoutWhenConversionSkipped(PARTIAL_PAYOUT_REQUEST);
+    }
+
+    function test_SelfConvertToWeth_RevertsWhenCallerIsNotSelf() public {
+        _deposit(DEPOSIT_AMOUNT);
+
         vm.prank(strategyManager);
-        vm.expectPartialRevert(IUniCLStrat.UniCLStratQuoteBelowOracleFloor.selector);
-        strategy.withdraw(receiver, 6 ether);
+        vm.expectRevert(IUniCLStrat.UniCLStratCallerNotSelf.selector);
+        strategy.selfConvertToWeth(1 ether);
     }
 
     function test_Withdraw_RevertsWithZeroReceiver() public {
@@ -2438,6 +2466,24 @@ contract UniCLStratTest is UniCLStratTestBase {
         uint256 withdrawn = strategy.withdraw(receiver, nav);
 
         assertEq(withdrawn, nav);
+        assertGt(pairedToken.balanceOf(address(strategy)), 0);
+    }
+
+    function test_Withdraw_FullNAVPaysOutWhenDrainSwapReverts() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 nav = strategy.navInETH();
+        vm.mockCallRevert(
+            address(converter), abi.encodeWithSelector(IConverter.executeSwapExactAmountIn.selector), "SWAP_FAILED"
+        );
+
+        vm.expectEmit(false, false, false, true, address(strategy));
+        emit IUniCLStrat.WethConversionSkipped();
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, nav);
+
+        assertEq(withdrawn, nav);
+        assertEq(receiver.balance, nav);
+        assertEq(converter.lastExecuteSwapExactAmountOutCall(), 1);
         assertGt(pairedToken.balanceOf(address(strategy)), 0);
     }
 

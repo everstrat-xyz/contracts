@@ -28,6 +28,7 @@ contract UniCLStratTestBase is ProtocolTestBase {
     uint256 public constant MAX_TOTAL_NAV = 100 ether;
     uint256 public constant DEPOSIT_AMOUNT = 10 ether;
     uint256 public constant WITHDRAW_AMOUNT = 3 ether;
+    uint256 public constant PARTIAL_PAYOUT_REQUEST = 6 ether; // needs a paired -> WETH top-up
     uint256 public constant PERFORMANCE_FEE_BPS = 1_000;
     uint24 public constant EXIT_ROUTE_FEE_PIPS = 500;
     uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 100;

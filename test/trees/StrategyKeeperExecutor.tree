@@ -9,7 +9,9 @@ StrategyKeeperExecutor::perform(uint8 action) — called by the allowlisted auto
 │   └── It should revert with KeeperExecutorNoUpkeepNeeded when all strategies are healthy
 ├── Given action is WithdrawShortfall
 │   ├── It should withdraw the live shortfall from strategies to the Controller
-│   └── It should revert with KeeperExecutorNoUpkeepNeeded when needs are covered
+│   ├── It should round a shortfall below minWithdrawETH up to minWithdrawETH (never skip it)
+│   ├── It should revert with KeeperExecutorNoUpkeepNeeded when needs are covered
+│   └── It should revert with KeeperExecutorNoUpkeepNeeded when only weight-0 strategies hold liquidity
 ├── Given action is DepositExcess
 │   ├── It should deploy idle Controller ETH above the reserve to strategies
 │   ├── It should cap at the strategy maxDeposit and emit the actual amount

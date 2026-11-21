@@ -19,7 +19,7 @@ enforced on-chain.
 
 | Actor | On-chain identity | Delay | Powers |
 |---|---|---|---|
-| **Security multisig** | holds `SECURITY_ROLE` on the Registry directly | none | `pause()` on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, Converter, and Registry; `Controller.emergencyExitToAMM()`; `StrategyManager.emergencyWithdrawToController()`; `UniCLStrat.emergencyExit()`; `StrategyManager.removeSupportedERC20()` (instant stale-feed / dust-NAV unfreeze; `addSupportedERC20` stays ADMIN-only); `CANCELLER_ROLE` on the admin timelock. **Cannot** unpause, configure, or upgrade. |
+| **Security multisig** | holds `SECURITY_ROLE` on the Registry directly | none | `pause()` on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, Converter, and Registry; `Controller.emergencyExitToAMM()`; `StrategyManager.emergencyWithdrawToController()`; `UniCLStrat.emergencyExit()`; `StrategyManager.removeSupportedERC20()` (instant stale-feed / dust-NAV unfreeze; `addSupportedERC20` stays ADMIN-only); `StrategyManager.convertSupportedERC20ToETH()` (sell stranded supported ERC-20s for ETH to the Controller); `CANCELLER_ROLE` on the admin timelock. **Cannot** unpause, configure, or upgrade. |
 | **ADMIN timelock** | 48h OpenZeppelin `TimelockController` holding `ADMIN_ROLE` on the Registry | 48h minimum | All configuration: Oracle feed/token setters, `unpause()` everywhere (including Converter), strategy add/remove, Registry contract registration and role management, all `set*` functions, UUPS upgrades, Converter adapter allowlist. ADMIN can also `pause()` (same gate as SECURITY). |
 | **DAO multisig** | `PROPOSER_ROLE` (and `CANCELLER_ROLE`) on the admin timelock | schedules ops | Holds **no direct protocol role**. Every ADMIN action below is: DAO proposes on the timelock → 48h elapses → anyone executes (executor is `address(0)`, open execution). |
 | **Keeper** | holds `KEEPER_ROLE` on the Registry | none | Controller operational functions: deposits/withdrawals to strategies, rebalance, sync, `priceBatch()`, `processRequest(s)()`, `provideExitLiquidity()`, fee harvest. In the automated setup `KEEPER_ROLE` is held by the two Mimic-driven keeper executors (`QueueKeeperExecutor`, `StrategyKeeperExecutor`) and by nothing else; a manual break-glass multisig is an **optional, opt-in** additional holder — see §0.1 for the decision, risks, and policy. `StrategyKeeperExecutor` funds the AMM immediate-exit float via its `ProvideExitLiquidity` action (tops `AMM.freeBalance()` up to `exitLiquidityTargetETH` from idle Controller ETH above the reserve and pending redemption needs). |
@@ -430,12 +430,24 @@ StrategyManager.forceRemoveStrategy(strategy) (4) ADMIN timelock, 48h
    > no external calls, works while paused) drops that value out of NAV
    > immediately.
    >
-   > On-chain swap recovery of those ERC-20s back to native ETH via the shared
-   > Converter is **deferended to a follow-up PR**. When the pool and Converter
-   > are functional, prefer draining the strategy via keeper
-   > `Controller.withdrawFromStrategy(strategy, amount)` first (which converts
-   > paired tokens to WETH internally); keep `emergencyExit()` for when the
-   > normal path is unusable.
+   > When the pool and Converter are functional, prefer draining the strategy
+   > via keeper `Controller.withdrawFromStrategy(strategy, amount)` first (which
+   > converts paired tokens to WETH internally); keep `emergencyExit()` for when
+   > the normal path is unusable.
+   >
+   > **Converting the paired token afterwards.** Until it is sold, the paired
+   > token counts in NAV but cannot pay redemptions: early exiters drain the
+   > ETH and later ones are left short. As soon as a working route exists, call
+   > `StrategyManager.convertSupportedERC20ToETH(token, adapter, path,
+   > amountIn, minETHOut)` (ADMIN or SECURITY; works while paused). `adapter`
+   > must be allowed on the Converter and `path` must sell `token` for WETH
+   > (any pool or fee tier — it need not be the strategy's pool). The swap
+   > must return at least `max(minETHOut, Oracle value × 97%)`
+   > (`MAX_ERC20_RECOVERY_SLIPPAGE_BPS` = 300), so NAV falls by at most the
+   > realised discount. The ETH lands on the Controller. Split a large balance
+   > into several calls (`amountIn` may be partial) if one swap would exceed
+   > the floor. If the paired token's feed is stale the call reverts — wait
+   > for the feed or, as a last resort, `removeSupportedERC20()`.
 
 2. **`StrategyManager.emergencyWithdrawToController()`**
    `onlyEitherAuthRole(ADMIN_ROLE, SECURITY_ROLE)`, `nonReentrant`. Sweeps the
@@ -889,6 +901,7 @@ execute them during a redemption wave, and announce the execution block.
 - `FundsWithdrawnFromStrategy(address strategy, uint256 amount)`
 - `StrategyRebalanced(address strategy)` / `StrategySynced(address strategy)` — absence over the expected keeper cadence is the alert
 - `StrategyDepositFailed(address strategy, bytes reason)` / `StrategyWithdrawFailed(address strategy, bytes reason)` / `StrategyRebalanceFailed(address strategy, bytes reason)` / `StrategyHarvestFailed(address strategy, bytes reason)` / `StrategySyncFailed(address strategy, bytes reason)` — **page**: a per-strategy keeper op failed inside the batch try/catch (the batch itself did not revert)
+- `SupportedERC20Converted(address token, uint256 amountIn, uint256 ethOut)` — stranded supported ERC-20 sold for ETH to the Controller; `ethOut` below the Oracle value of `amountIn` is the realised NAV loss
 - `SupportedERC20Added(address token)` / `SupportedERC20Removed(address token)` — governance changes; a `SupportedERC20Removed` under an active freeze is the supported-ERC-20 feed-stale escape hatch (§2.1 / §2.3) and may be emitted by SECURITY without a timelock
 - `CallerRoleRevokeFailed(address strategy)` — orphaned `CONVERTER_CALLER_ROLE`, needs cleanup
 - `EmergencyWithdrawnToController(uint256 amount)` — **page: emergency path used**

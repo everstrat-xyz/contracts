@@ -16,6 +16,7 @@ import {StrategyKeeperExecutor} from "../../src/contracts/automation/StrategyKee
 import {Auth} from "../../src/libraries/Auth.sol";
 import {IKeeperExecutorBase} from "../../src/interfaces/automation/IKeeperExecutorBase.sol";
 import {IStrategyKeeperExecutor} from "../../src/interfaces/automation/IStrategyKeeperExecutor.sol";
+import {IQueueKeeperExecutor} from "../../src/interfaces/automation/IQueueKeeperExecutor.sol";
 import {IRegistryClient} from "interfaces/IRegistryClient.sol";
 
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
@@ -37,6 +38,7 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     uint256 public constant DEPOSIT_TO_STRATEGY = 9.5 ether;
     uint256 public constant EXIT_ETH = 1 ether;
     uint256 public constant EXIT_LIQUIDITY_TARGET = 2 ether;
+    uint256 public constant SHORTFALL_BELOW_FLOOR_MARGIN = 0.5 ether; // floor set this far above the shortfall
 
     uint8 public constant DEPOSIT_WEIGHT = 100;
     uint8 public constant WITHDRAWAL_WEIGHT = 100;
@@ -411,6 +413,65 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         _queueExit(user, EXIT_ETH);
         assertEq(executor.pendingRedemptionNeedsETH(), 0);
         _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+    }
+
+    /// @dev Audit G6: liquidity in a weight-0 strategy is unreachable by `withdrawFromStrategies`,
+    ///      so it must not make the keeper recommend a WithdrawShortfall.
+    function test_WithdrawShortfall_IgnoresZeroWithdrawalWeightLiquidity() public {
+        _deployCapitalToStrategy();
+        strategyManager.setWithdrawalWeight(address(strategy), 0);
+        _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
+
+        assertGt(executor.pendingRedemptionNeedsETH(), address(controller).balance);
+        assertGt(strategy.maxWithdrawal(), 0);
+        (IStrategyKeeperExecutor.StrategyAction action,) = executor.strategyUpkeepStatus();
+        assertNotEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall));
+        _expectNoUpkeep(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+    }
+
+    /// @dev Audit G9: a shortfall smaller than `minWithdrawETH` used to leave both keepers idle
+    ///      and the priced batch unfunded (and uncancellable) until expiry. It is now rounded up
+    ///      to the floor, after which the queue keeper can settle the whole batch.
+    function test_WithdrawShortfall_RoundsSmallShortfallUpToFloor() public {
+        _deployCapitalToStrategy();
+        uint256 batchId = _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
+
+        uint256 needsETH = executor.pendingRedemptionNeedsETH();
+        uint256 controllerBalance = address(controller).balance;
+        uint256 shortfall = needsETH - controllerBalance;
+        uint256 floor = shortfall + SHORTFALL_BELOW_FLOOR_MARGIN;
+        executor.setMinWithdrawETH(floor);
+
+        (IStrategyKeeperExecutor.StrategyAction action, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(uint8(action), uint8(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall));
+        assertEq(amount, floor);
+
+        vm.expectEmit(true, false, false, true, address(executor));
+        emit IStrategyKeeperExecutor.StrategyUpkeepPerformed(
+            IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall, floor
+        );
+        _perform(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+
+        assertEq(address(controller).balance, controllerBalance + floor);
+        assertGe(address(controller).balance, needsETH);
+
+        (IQueueKeeperExecutor.QueueAction queueAction, uint256 queueBatchId,) = queueExecutor.queueUpkeepStatus();
+        assertEq(uint8(queueAction), uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests));
+        assertEq(queueBatchId, batchId);
+    }
+
+    function test_WithdrawShortfall_ExactShortfallWhenAboveFloor() public {
+        _deployCapitalToStrategy();
+        _queueExit(user, EXIT_ETH);
+        _priceQueuedBatch();
+
+        uint256 shortfall = executor.pendingRedemptionNeedsETH() - address(controller).balance;
+        assertGt(shortfall, executor.minWithdrawETH());
+
+        (, uint256 amount) = executor.strategyUpkeepStatus();
+        assertEq(amount, shortfall);
     }
 
     function test_WithdrawShortfall_NoUpkeepWhenCovered() public {

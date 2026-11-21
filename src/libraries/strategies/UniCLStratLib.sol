@@ -209,7 +209,7 @@ library UniCLStratLib {
      *         enforced in this helper. Minting callers (`deposit` /
      *         `investIdleETH` / `rebalance`, and the re-add branch of
      *         `withdraw`) require calm before inventory swaps. `withdraw` →
-     *         `_convertToWeth` reaches this helper while the pool may be
+     *         {convertToWeth} reaches this helper while the pool may be
      *         dislocated; layers 0, 2, and 3 carry that path. Rationale:
      *         `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *
@@ -377,8 +377,9 @@ library UniCLStratLib {
      *      input is checked against the Chainlink-implied input, and the
      *      slippage tolerance pads the input MAXIMUM instead of flooring the
      *      output minimum. The calm-period guard is a caller-path check, not
-     *      enforced here; the strategy's `_convertToWeth` (withdraw) is the intended non-calm
-     *      caller.
+     *      enforced here; {convertToWeth} (withdraw) is the intended non-calm caller and runs
+     *      this helper inside a try/catch, so a revert here skips the conversion rather than
+     *      blocking the payout.
      *
      *      Balance-cap fallback: if the slippage-padded maximum input exceeds the
      *      strategy's balance of the input token, the exact output is unaffordable.
@@ -430,17 +431,52 @@ library UniCLStratLib {
     }
 
     /**
-     * @notice Best-effort swap of the strategy's whole paired-token balance to WETH along `_path`.
-     * @dev Used to drain a (near-)full withdrawal (audit G2). Skips without reverting when
-     *      {routeCostBps} reports the route untradable — the quote reverts, the oracle value is
-     *      zero (dust), or the quote is outside the oracle band — which is exactly when
-     *      {swapExactIn} would revert. The withdrawal then pays out the WETH it already has
-     *      instead of failing.
+     * @notice Buys `_amountOut` WETH or swaps the remaining paired-token balance when `_amountOut` is zero.
+     * @dev Called inside the strategy's self-call. The drain skips balances with no oracle
+     *      value and quotes outside the oracle band.
      */
-    function trySwapAllPairedToWeth(SwapConfig memory _config, bytes memory _path) public {
+    function swapPairedToWeth(SwapConfig memory _config, bytes memory _path, uint256 _amountOut) public {
+        if (_amountOut != 0) {
+            swapExactOut(_config, _path, _amountOut);
+            return;
+        }
+
         uint256 _balance = IERC20Metadata(_config.pairedToken).balanceOf(address(this));
+        if (_balance == 0) return;
         (bool _tradable,) = routeCostBps(_config, _path, _balance, false);
         if (_tradable) swapExactIn(_config, _path, _balance);
+    }
+
+    /// @notice Attempts to convert all remaining paired tokens after a near-full withdrawal.
+    function drainPairedToWeth() public {
+        _tryConvertToWeth(0);
+    }
+
+    /**
+     * @notice Tops the strategy's WETH balance up to `_targetWethAmount` by buying exactly the
+     *         missing WETH with the paired token, best effort.
+     * @dev Runs {swapExactOut} through the strategy's self-only hook
+     *      `IUniCLStrat.selfConvertToWeth` inside a try/catch: if the route cannot be traded
+     *      (quote fails, or is outside the oracle band) or the swap reverts, the paired token
+     *      stays in the strategy (still in NAV) and `withdraw` pays out the WETH it already
+     *      has instead of reverting the whole payout (audit G7). Emits
+     *      `IUniCLStrat.WethConversionSkipped` from the strategy (delegatecall context). The
+     *      catch is parameterless so a hostile route cannot grief with a returndata bomb.
+     * @param _weth WETH address
+     * @param _targetWethAmount WETH balance to reach
+     */
+    function convertToWeth(address _weth, uint256 _targetWethAmount) public {
+        uint256 _wethBalance = IERC20Metadata(_weth).balanceOf(address(this));
+        if (_wethBalance >= _targetWethAmount) return;
+
+        _tryConvertToWeth(_targetWethAmount - _wethBalance);
+    }
+
+    function _tryConvertToWeth(uint256 _amountOut) private {
+        try IUniCLStrat(address(this)).selfConvertToWeth(_amountOut) {}
+        catch {
+            emit IUniCLStrat.WethConversionSkipped();
+        }
     }
 
     /**
@@ -589,6 +625,21 @@ library UniCLStratLib {
     }
 
     // ============ Liquidity Management & LP-Fee Accounting ============
+
+    /// @notice Whether either strategy position still holds liquidity.
+    function hasPoolLiquidity(
+        IUniswapV3Pool _pool,
+        IUniCLStrat.Position storage _main,
+        IUniCLStrat.Position storage _alt
+    ) public view returns (bool) {
+        return _hasLiquidity(_pool, _main) || _hasLiquidity(_pool, _alt);
+    }
+
+    function _hasLiquidity(IUniswapV3Pool _pool, IUniCLStrat.Position storage _position) private view returns (bool) {
+        if (!_isValid(_position.tickLower, _position.tickUpper)) return false;
+        (uint128 _liquidity,,,,) = _pool.positions(_key(_position));
+        return _liquidity > 0;
+    }
 
     /// @notice Pokes both positions (`burn(…, 0)`) so accrued fees materialize in `tokensOwed`.
     function pokePositions(IUniswapV3Pool _pool, IUniCLStrat.Position storage _main, IUniCLStrat.Position storage _alt)
