@@ -161,7 +161,7 @@ Deposits should be blocked when `isCalm()` is false. The calm gate is load-beari
 `withdraw(_receiver, _amount)` is called by `StrategyManager` and returns native ETH. It is **not** calm-gated on the unwind (see [Calm-Period Gate Asymmetry](#calm-period-gate-asymmetry)).
 
 1. If idle native ETH covers `_amount`, pay out directly — no pool or Converter interaction.
-2. Otherwise spend all idle ETH toward the payout and source only the remainder from WETH: poke-then-accrue, remove both positions, convert paired token via `UniCLStratLib.convertToWeth()` (exact-output, independently bounded by TWAP quote / Chainlink / slippage — not by `_isCalm()`; best effort since audit G7 — a reverting swap emits `WethConversionSkipped` and the payout is a short fill).
+2. Otherwise spend all idle ETH toward the payout and source only the remainder from WETH: poke-then-accrue, remove both positions, convert paired token via `UniCLStratLib.tryTopUpWeth()` (exact-output, independently bounded by TWAP quote / Chainlink / slippage — not by `_isCalm()`; best effort since audit G7 — a reverting swap emits `WethConversionSkipped` and the payout is a short fill).
 3. Unwrap only the WETH portion needed; deliver idle ETH + unwrapped remainder in a single native transfer.
 4. Re-add remaining inventory **only if `_isCalm()`** (minting into a dislocated pool is the thing the calm gate exists to prevent). If not calm, inventory stays idle until a later calm `deposit` / `investIdleETH` / `rebalance`.
 5. Emit `FundsWithdrawn(actualAmount)`.

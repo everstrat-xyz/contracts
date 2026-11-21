@@ -743,11 +743,23 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      * @dev Callable only by the strategy itself. Exists so `withdraw` can attempt the
      *      paired -> WETH swap inside a try/catch — an untradable route must not block a
      *      partial payout (audit G7). Oracle-bounded exact-output swap with
-     *      balance-cap fallback for a positive target. The drain uses an exact-input swap.
+     *      balance-cap fallback for a positive output amount. The drain uses an exact-input
+     *      swap and requires a positive oracle value and an in-band quote.
      */
     function selfConvertToWeth(uint256 _amountOut) external {
         if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
-        UniCLStratLib.swapPairedToWeth(_swapConfig(), pairedTokenToWethPath, _amountOut);
+        UniCLStratLib.SwapConfig memory _config = _swapConfig();
+        bytes memory _path = pairedTokenToWethPath;
+
+        if (_amountOut != 0) {
+            UniCLStratLib.swapExactOut(_config, _path, _amountOut);
+            return;
+        }
+
+        uint256 _balance = pairedToken.balanceOf(address(this));
+        if (_balance == 0) return;
+        (bool _tradable,) = UniCLStratLib.routeCostBps(_config, _path, _balance, false);
+        if (_tradable) _swapViaRouteExactAmountIn(_config, _path, _balance);
     }
 
     function _unpauseStrategy() private {
@@ -981,7 +993,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // fallback when the partial path still leaves WETH short and liquidity remains.
         for (uint256 _pass; _pass < 2; ++_pass) {
             if (_fullUnwind) _removeLiquidityAndCollect();
-            UniCLStratLib.convertToWeth(address(weth), _wethTarget);
+            UniCLStratLib.tryTopUpWeth(address(weth), _wethTarget);
             if (
                 weth.balanceOf(address(this)) >= _wethTarget
                     || !UniCLStratLib.hasPoolLiquidity(pool, positionMain, positionAlt)
@@ -1101,21 +1113,24 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     function _swapWethToPairedToken(uint256 _amountIn) internal {
         if (_amountIn == 0) return;
-        uint256 _swapAmountIn = _amountIn > weth.balanceOf(address(this)) ? weth.balanceOf(address(this)) : _amountIn;
-        _swapViaRouteExactAmountIn(wethToPairedTokenPath, _swapAmountIn);
+        uint256 _balance = weth.balanceOf(address(this));
+        uint256 _swapAmountIn = _amountIn > _balance ? _balance : _amountIn;
+        _swapViaRouteExactAmountIn(_swapConfig(), wethToPairedTokenPath, _swapAmountIn);
     }
 
     function _swapPairedTokenToWeth(uint256 _amountIn) internal {
         if (_amountIn == 0) return;
         uint256 _balance = pairedToken.balanceOf(address(this));
         uint256 _swapAmountIn = _amountIn > _balance ? _balance : _amountIn;
-        _swapViaRouteExactAmountIn(pairedTokenToWethPath, _swapAmountIn);
+        _swapViaRouteExactAmountIn(_swapConfig(), pairedTokenToWethPath, _swapAmountIn);
     }
 
     /// @dev Oracle-bounded exact-input swap; security model documented in
     ///      {UniCLStratLib-swapExactIn} (TWAP quote, oracle floor/ceiling, slippage cap).
-    function _swapViaRouteExactAmountIn(bytes memory _path, uint256 _amountIn) internal returns (uint256) {
-        return UniCLStratLib.swapExactIn(_swapConfig(), _path, _amountIn);
+    function _swapViaRouteExactAmountIn(UniCLStratLib.SwapConfig memory _config, bytes memory _path, uint256 _amountIn)
+        internal
+    {
+        UniCLStratLib.swapExactIn(_config, _path, _amountIn);
     }
 
     function _swapConfig() internal view returns (UniCLStratLib.SwapConfig memory) {

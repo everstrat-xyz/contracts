@@ -209,7 +209,7 @@ library UniCLStratLib {
      *         enforced in this helper. Minting callers (`deposit` /
      *         `investIdleETH` / `rebalance`, and the re-add branch of
      *         `withdraw`) require calm before inventory swaps. `withdraw` →
-     *         {convertToWeth} reaches this helper while the pool may be
+     *         {tryTopUpWeth} reaches this helper while the pool may be
      *         dislocated; layers 0, 2, and 3 carry that path. Rationale:
      *         `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *
@@ -377,7 +377,7 @@ library UniCLStratLib {
      *      input is checked against the Chainlink-implied input, and the
      *      slippage tolerance pads the input MAXIMUM instead of flooring the
      *      output minimum. The calm-period guard is a caller-path check, not
-     *      enforced here; {convertToWeth} (withdraw) is the intended non-calm caller and runs
+     *      enforced here; {tryTopUpWeth} (withdraw) is the intended non-calm caller and runs
      *      this helper inside a try/catch, so a revert here skips the conversion rather than
      *      blocking the payout.
      *
@@ -430,31 +430,13 @@ library UniCLStratLib {
         );
     }
 
-    /**
-     * @notice Buys `_amountOut` WETH or swaps the remaining paired-token balance when `_amountOut` is zero.
-     * @dev Called inside the strategy's self-call. The drain skips balances with no oracle
-     *      value and quotes outside the oracle band.
-     */
-    function swapPairedToWeth(SwapConfig memory _config, bytes memory _path, uint256 _amountOut) public {
-        if (_amountOut != 0) {
-            swapExactOut(_config, _path, _amountOut);
-            return;
-        }
-
-        uint256 _balance = IERC20Metadata(_config.pairedToken).balanceOf(address(this));
-        if (_balance == 0) return;
-        (bool _tradable,) = routeCostBps(_config, _path, _balance, false);
-        if (_tradable) swapExactIn(_config, _path, _balance);
-    }
-
     /// @notice Attempts to convert all remaining paired tokens after a near-full withdrawal.
     function drainPairedToWeth() public {
         _tryConvertToWeth(0);
     }
 
     /**
-     * @notice Tops the strategy's WETH balance up to `_targetWethAmount` by buying exactly the
-     *         missing WETH with the paired token, best effort.
+     * @notice Attempts to reach `_targetWethBalance` by buying the WETH shortfall with paired tokens.
      * @dev Runs {swapExactOut} through the strategy's self-only hook
      *      `IUniCLStrat.selfConvertToWeth` inside a try/catch: if the route cannot be traded
      *      (quote fails, or is outside the oracle band) or the swap reverts, the paired token
@@ -463,13 +445,13 @@ library UniCLStratLib {
      *      `IUniCLStrat.WethConversionSkipped` from the strategy (delegatecall context). The
      *      catch is parameterless so a hostile route cannot grief with a returndata bomb.
      * @param _weth WETH address
-     * @param _targetWethAmount WETH balance to reach
+     * @param _targetWethBalance WETH balance to reach
      */
-    function convertToWeth(address _weth, uint256 _targetWethAmount) public {
+    function tryTopUpWeth(address _weth, uint256 _targetWethBalance) public {
         uint256 _wethBalance = IERC20Metadata(_weth).balanceOf(address(this));
-        if (_wethBalance >= _targetWethAmount) return;
+        if (_wethBalance >= _targetWethBalance) return;
 
-        _tryConvertToWeth(_targetWethAmount - _wethBalance);
+        _tryConvertToWeth(_targetWethBalance - _wethBalance);
     }
 
     function _tryConvertToWeth(uint256 _amountOut) private {
