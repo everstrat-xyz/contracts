@@ -156,7 +156,7 @@ Paths that consume the Oracle:
 |---|---|---|
 | `AMM.eveBasePriceInUSD()` / `evePremiumPriceInUSD()` | `convertTokenToUSD(address(0), …)` | USD view functions revert. ETH-denominated views unaffected. |
 | `AMM.enter()` — **bootstrap only** | `convertTokenToUSD` for the `MIN_INITIAL_DEPOSIT_USD` check | Only the very first deposit (pre-bootstrap) is blocked. |
-| `Controller.harvestPerformanceFeeFromStrategy(/-ies)` → `StrategyManager` harvest paths | Fee base and mint both ETH-denominated — no USD conversion: `IStrategy.settlePerformanceFee` values the paired-token fee leg via `Oracle.convert(… → ETH)` (the WETH leg is 1:1), and `_mintPerformanceFeeEVE` reads `totalNAVInETH()` for the bonding-curve dilution mint | Fee harvest reverts on a stale paired-token or non-zero supported-ERC-20 feed (only when `performanceFeeBps > 0`). |
+| `Controller.harvestPerformanceFeeFromStrategy(/-ies)` → `StrategyManager` harvest paths | UniCLStrat values the paired-token fee leg via `Oracle.convert(… → ETH)` and deducts the same estimated exit cost as NAV. WETH is valued 1:1. `_mintPerformanceFeeEVE` uses total NAV in ETH for the dilution mint. | Fee harvest reverts on a stale paired-token or non-zero supported-ERC-20 feed (only when `performanceFeeBps > 0`). |
 | `UniCLStrat.navInETH()` | `Oracle.convert(pairedToken, address(0), …)` to value paired-token inventory | **See warning below.** |
 | `UniswapV3ConverterAdapter.quoteExactAmountIn/Out` | `Oracle.convert` cross-check of the TWAP quote | All strategy swaps revert (`UniCLStratQuoteFailed` bubbles from the strategy's try/catch around the quote). |
 | `StrategyManager._totalNAVInETH()` | `Oracle.convert(token, address(0), …)` per non-zero supported-ERC-20 balance | A non-zero balance of a supported ERC-20 whose feed is stale **freezes NAV**. Drop the token via `removeSupportedERC20()` (`ADMIN_ROLE` or `SECURITY_ROLE`; no external calls — works while paused) to escape. |
@@ -828,6 +828,22 @@ Do not page on moves with an obvious on-chain explanation:
   `PerformanceFeePaid`);
 - **Documented incident aftermath** — a realized loss from an emergency exit
   (§3.6), a strategy removal, or a feed correction after an oracle outage (§2).
+- **UniCLStrat exit-cost re-mark** — `UniCLStrat.navInETH()` marks the
+  paired-token inventory down by the configured `exitRouteFeePips` estimate
+  plus `swapSlippageBps` (audit G2). A change to either rate moves NAV by
+  the paired value times the change in the combined rate. Correlate route fee
+  changes with `RouteConfigUpdated` and slippage changes with `SwapSlippageUpdated`.
+  The first deployment with the mark-down lowers the paired share by 1.05%
+  with a 5 bps route fee and 100 bps slippage. `emergencyExit()` hands the paired
+  token to the StrategyManager at the full oracle price, which raises its NAV mark.
+
+**Scheduling NAV-moving parameter changes.** A route fee change, a slippage change,
+or the mark-down deployment moves `eveBasePriceInETH()`, the premium price, and the
+live NAV that queued batches settle against. Priced batches keep their
+`finalEvePrice`, so nobody is re-priced retroactively. But anyone who enters or
+exits in the blocks right before a re-mark gets the old price. Execute these
+proposals when the ExitQueue has no open or priced batches of size. Don't
+execute them during a redemption wave, and announce the execution block.
 
 ### 6.3 Response flow (alert → investigate → pause if warranted → fix → unpause)
 

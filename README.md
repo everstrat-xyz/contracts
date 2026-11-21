@@ -882,7 +882,7 @@ Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter
 8. Optional UniCL path (same after `DeployAll`):
    - `DeployUniswapV3ConverterAdapter.s.sol` — adapter bytecode only (needs Oracle; no ADMIN); export `SWAP_ADAPTER_ADDRESS`
    - Admin timelock: `Converter.setAllowedAdapter`, paired-token `Oracle.updateUsdFeedInfo`, optional `addSupportedERC20(pairedToken)`
-   - `DeployUniCLStrat.s.sol` — strategy bytecode only (constructor requires the adapter already allowed); does **not** call `addStrategy`
+   - `DeployUniCLStrat.s.sol` deploys the strategy once the adapter is allowed. Set `EXIT_ROUTE_FEE_PIPS` to the estimated paired-token to WETH route fee in parts per million (500 for 0.05%).
    - Admin timelock: `StrategyManager.addStrategy` — see `DeployUniCLStrat` NatSpec / `docs/STRATEGY_GUARDRAILS.md`; pool selection and launch parameters are documented in [`docs/UNICL_STRATEGY_SETUP.md`](docs/UNICL_STRATEGY_SETUP.md)
 
 ```bash

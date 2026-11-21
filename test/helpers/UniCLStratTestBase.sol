@@ -20,6 +20,8 @@ import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockConverter} from "../mocks/MockConverter.sol";
 import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
 import {MockUniCLPool, MockWETH, MockUniswapV3Factory} from "../mocks/UniCLStratMocks.sol";
+import {LiquidityAmounts} from "../../src/libraries/integrations/uniswap/LiquidityAmounts.sol";
+import {TickMath} from "../../src/libraries/integrations/uniswap/TickMath.sol";
 
 contract UniCLStratTestBase is ProtocolTestBase {
     uint256 public constant INITIAL_TIMESTAMP = 1_700_000_000;
@@ -28,6 +30,7 @@ contract UniCLStratTestBase is ProtocolTestBase {
     uint256 public constant WITHDRAW_AMOUNT = 3 ether;
     uint256 public constant PARTIAL_PAYOUT_REQUEST = 6 ether; // needs a paired -> WETH top-up
     uint256 public constant PERFORMANCE_FEE_BPS = 1_000;
+    uint24 public constant EXIT_ROUTE_FEE_PIPS = 500;
     uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 100;
     uint256 public constant TOKEN_PRICE = 1e8;
     uint256 public constant STALENESS_INTERVAL = 1 hours;
@@ -114,8 +117,9 @@ contract UniCLStratTestBase is ProtocolTestBase {
             }),
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(swapAdapter),
-                wethToPairedTokenPath: abi.encodePacked(address(weth), uint24(3000), address(pairedToken)),
-                pairedTokenToWethPath: abi.encodePacked(address(pairedToken), uint24(3000), address(weth))
+                wethToPairedTokenPath: abi.encodePacked(address(weth), EXIT_ROUTE_FEE_PIPS, address(pairedToken)),
+                pairedTokenToWethPath: abi.encodePacked(address(pairedToken), EXIT_ROUTE_FEE_PIPS, address(weth)),
+                exitRouteFeePips: EXIT_ROUTE_FEE_PIPS
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: POSITION_WIDTH,
@@ -143,6 +147,41 @@ contract UniCLStratTestBase is ProtocolTestBase {
 
     function _mainPosition() internal view returns (IUniCLStrat.Position memory position) {
         (position.tickLower, position.tickUpper) = strategy.positionMain();
+    }
+
+    /// @dev Paired-token inventory the strategy holds: idle balance plus both positions marked at
+    ///      the TWAP tick plus owed. Mock oracle prices are 1:1, so this is also its ETH value.
+    function _pairedInventory() internal view returns (uint256 amount) {
+        amount = pairedToken.balanceOf(address(strategy));
+        (int24 lower, int24 upper) = strategy.positionMain();
+        amount += _pairedInPosition(lower, upper);
+        (lower, upper) = strategy.positionAlt();
+        amount += _pairedInPosition(lower, upper);
+    }
+
+    function _pairedInPosition(int24 _lower, int24 _upper) internal view returns (uint256) {
+        if (_lower >= _upper) return 0;
+        (uint128 liquidity, uint128 owed0, uint128 owed1,,) =
+            pool.positionStates(keccak256(abi.encodePacked(address(strategy), _lower, _upper)));
+        (uint256 amount0, uint256 amount1) = LiquidityAmounts.getAmountsForLiquidity(
+            TickMath.getSqrtRatioAtTick(pool.twapTick()),
+            TickMath.getSqrtRatioAtTick(_lower),
+            TickMath.getSqrtRatioAtTick(_upper),
+            liquidity
+        );
+        return pool.token0() == address(pairedToken) ? amount0 + owed0 : amount1 + owed1;
+    }
+
+    /// @dev Independent restatement of the NAV exit-cost mark-down: route fee estimate (1e-6 units)
+    ///      plus `swapSlippageBps`, applied to the paired-token value and rounded up.
+    function _exitCost(uint256 _pairedValue) internal view returns (uint256) {
+        uint256 costPips = uint256(EXIT_ROUTE_FEE_PIPS) + strategy.swapSlippageBps() * 100;
+        return (_pairedValue * costPips + 1e6 - 1) / 1e6;
+    }
+
+    /// @dev `navInETH()` with the exit-cost mark-down added back (inventory at oracle marks).
+    function _grossNavInETH() internal view returns (uint256) {
+        return strategy.navInETH() + _exitCost(_pairedInventory());
     }
 
     function _assertApproxEqAbs(uint256 _actual, uint256 _expected, uint256 _tolerance) internal pure {

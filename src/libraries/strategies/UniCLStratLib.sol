@@ -61,6 +61,8 @@ library UniCLStratLib {
     }
 
     uint256 internal constant BASIS_POINTS = 10_000;
+    /// @dev Denominator of Uniswap V3 fee tiers (hundredths of a bip).
+    uint256 internal constant FEE_DENOMINATOR = 1_000_000;
     uint256 internal constant SWAP_DEADLINE_OFFSET = 15 minutes;
     /// @dev Maximum deviation between an adapter quote and the Chainlink-implied amount; see
     ///      `UniCLStrat.MAX_QUOTE_DEVIATION_BPS` for the fee-tier interaction.
@@ -207,7 +209,7 @@ library UniCLStratLib {
      *         enforced in this helper. Minting callers (`deposit` /
      *         `investIdleETH` / `rebalance`, and the re-add branch of
      *         `withdraw`) require calm before inventory swaps. `withdraw` →
-     *         {convertToWeth} reaches this helper while the pool may be
+     *         {tryTopUpWeth} reaches this helper while the pool may be
      *         dislocated; layers 0, 2, and 3 carry that path. Rationale:
      *         `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *
@@ -375,7 +377,7 @@ library UniCLStratLib {
      *      input is checked against the Chainlink-implied input, and the
      *      slippage tolerance pads the input MAXIMUM instead of flooring the
      *      output minimum. The calm-period guard is a caller-path check, not
-     *      enforced here; {convertToWeth} (withdraw) is the intended non-calm caller and runs
+     *      enforced here; {tryTopUpWeth} (withdraw) is the intended non-calm caller and runs
      *      this helper inside a try/catch, so a revert here skips the conversion rather than
      *      blocking the payout.
      *
@@ -428,9 +430,13 @@ library UniCLStratLib {
         );
     }
 
+    /// @notice Attempts to convert all remaining paired tokens after a near-full withdrawal.
+    function drainPairedToWeth() public {
+        _tryConvertToWeth(0);
+    }
+
     /**
-     * @notice Tops the strategy's WETH balance up to `_targetWethAmount` by buying exactly the
-     *         missing WETH with the paired token, best effort.
+     * @notice Attempts to reach `_targetWethBalance` by buying the WETH shortfall with paired tokens.
      * @dev Runs {swapExactOut} through the strategy's self-only hook
      *      `IUniCLStrat.selfConvertToWeth` inside a try/catch: if the route cannot be traded
      *      (quote fails, or is outside the oracle band) or the swap reverts, the paired token
@@ -439,13 +445,17 @@ library UniCLStratLib {
      *      `IUniCLStrat.WethConversionSkipped` from the strategy (delegatecall context). The
      *      catch is parameterless so a hostile route cannot grief with a returndata bomb.
      * @param _weth WETH address
-     * @param _targetWethAmount WETH balance to reach
+     * @param _targetWethBalance WETH balance to reach
      */
-    function convertToWeth(address _weth, uint256 _targetWethAmount) public {
+    function tryTopUpWeth(address _weth, uint256 _targetWethBalance) public {
         uint256 _wethBalance = IERC20Metadata(_weth).balanceOf(address(this));
-        if (_wethBalance >= _targetWethAmount) return;
+        if (_wethBalance >= _targetWethBalance) return;
 
-        try IUniCLStrat(address(this)).selfConvertToWeth(_targetWethAmount - _wethBalance) {}
+        _tryConvertToWeth(_targetWethBalance - _wethBalance);
+    }
+
+    function _tryConvertToWeth(uint256 _amountOut) private {
+        try IUniCLStrat(address(this)).selfConvertToWeth(_amountOut) {}
         catch {
             emit IUniCLStrat.WethConversionSkipped();
         }
@@ -597,6 +607,21 @@ library UniCLStratLib {
     }
 
     // ============ Liquidity Management & LP-Fee Accounting ============
+
+    /// @notice Whether either strategy position still holds liquidity.
+    function hasPoolLiquidity(
+        IUniswapV3Pool _pool,
+        IUniCLStrat.Position storage _main,
+        IUniCLStrat.Position storage _alt
+    ) public view returns (bool) {
+        return _hasLiquidity(_pool, _main) || _hasLiquidity(_pool, _alt);
+    }
+
+    function _hasLiquidity(IUniswapV3Pool _pool, IUniCLStrat.Position storage _position) private view returns (bool) {
+        if (!_isValid(_position.tickLower, _position.tickUpper)) return false;
+        (uint128 _liquidity,,,,) = _pool.positions(_key(_position));
+        return _liquidity > 0;
+    }
 
     /// @notice Pokes both positions (`burn(…, 0)`) so accrued fees materialize in `tokensOwed`.
     function pokePositions(IUniswapV3Pool _pool, IUniCLStrat.Position storage _main, IUniCLStrat.Position storage _alt)
@@ -862,8 +887,18 @@ library UniCLStratLib {
 
     /**
      * @notice ETH value of the strategy's (`address(this)`) idle token0/token1 balances plus both
-     *         pool positions (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens).
+     *         pool positions (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens), net of
+     *         the estimated cost of converting the paired-token side back to WETH.
      * @dev Excludes native ETH (added by the caller). Priced via Oracle cross-rates.
+     *
+     *      Exit-cost deduction (audit G2): every payout leaves the strategy as ETH, so the
+     *      paired-token share of the inventory must be swapped before it can be redeemed. Marking
+     *      it at the gross oracle price would let a redeemer exit at a price that ignores that
+     *      cost and leave it with the holders who remain. The paired-token value is therefore
+     *      marked down by the configured route fee estimate plus the strategy's slippage
+     *      tolerance, rounded up to the nearest wei. WETH is valued at its 1:1 unwrap rate.
+     * @param _exitRouteFeePips Estimated paired-token to WETH route fee in parts per million
+     * @param _slippageBps The strategy's swap slippage tolerance (bps)
      */
     function inventoryValueInETH(
         IUniswapV3Pool _pool,
@@ -873,30 +908,61 @@ library UniCLStratLib {
         address _token1,
         IUniCLStrat.Position memory _main,
         IUniCLStrat.Position memory _alt,
-        uint160 _twapSqrtPriceX96
+        uint160 _twapSqrtPriceX96,
+        uint256 _exitRouteFeePips,
+        uint256 _slippageBps
     ) public view returns (uint256) {
         (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _main, _twapSqrtPriceX96);
         (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _alt, _twapSqrtPriceX96);
-        return pairValueInETH(
+        return adjustedPairValueInETH(
             _oracle,
             _weth,
             _token0,
             _token1,
             IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0,
-            IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1
+            IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1,
+            _exitRouteFeePips,
+            _slippageBps
         );
     }
 
-    /// @notice ETH value of `_amount0` token0 plus `_amount1` token1.
-    function pairValueInETH(
+    /// @notice ETH value of the pair net of the estimated cost of converting the paired token to WETH.
+    function adjustedPairValueInETH(
         IOracle _oracle,
         address _weth,
         address _token0,
         address _token1,
         uint256 _amount0,
-        uint256 _amount1
+        uint256 _amount1,
+        uint256 _exitRouteFeePips,
+        uint256 _slippageBps
     ) public view returns (uint256) {
-        return _valueInETH(_oracle, _weth, _token0, _amount0) + _valueInETH(_oracle, _weth, _token1, _amount1);
+        uint256 _value0 = _valueInETH(_oracle, _weth, _token0, _amount0);
+        uint256 _value1 = _valueInETH(_oracle, _weth, _token1, _amount1);
+        uint256 _pairedValue = _token0 == _weth ? _value1 : _value0;
+        return _value0 + _value1 - exitCostInETH(_pairedValue, _exitRouteFeePips, _slippageBps);
+    }
+
+    /**
+     * @notice Estimated ETH cost of converting `_pairedValue` (ETH terms) of paired token to WETH:
+     *         `_exitRouteFeePips` plus `_slippageBps`, rounded up.
+     * @dev The deployment supplies the fee estimate because routes use adapter-specific encodings.
+     */
+    function exitCostInETH(uint256 _pairedValue, uint256 _exitRouteFeePips, uint256 _slippageBps)
+        public
+        pure
+        returns (uint256)
+    {
+        if (_pairedValue == 0) return 0;
+        uint256 _costPips = _exitRouteFeePips + _slippageBps * (FEE_DENOMINATOR / BASIS_POINTS);
+        return (_pairedValue * _costPips + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR;
+    }
+
+    /// @notice Gross oracle value in ETH of the paired token.
+    function pairedValueInETH(IOracle _oracle, address _pairedToken, uint256 _amount) public view returns (uint256) {
+        if (_amount == 0) return 0;
+        // Direct token -> ETH cross-rate (single rounding step, both feeds staleness-checked).
+        return _oracle.convert(_pairedToken, address(0), _amount, IERC20Metadata(_pairedToken).decimals(), 18);
     }
 
     /// @dev Amounts held by a position (liquidity at `_sqrtPriceX96` plus owed); zero for invalid ticks.
@@ -929,10 +995,8 @@ library UniCLStratLib {
         view
         returns (uint256)
     {
-        if (_amount == 0) return 0;
         if (_token == _weth) return _amount;
-        // Direct token -> ETH cross-rate (single rounding step, both feeds staleness-checked).
-        return _oracle.convert(_token, address(0), _amount, IERC20Metadata(_token).decimals(), 18);
+        return pairedValueInETH(_oracle, _token, _amount);
     }
 
     function _tokenValueInETH(SwapConfig memory _config, address _token, uint256 _amount)
