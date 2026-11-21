@@ -29,6 +29,8 @@ UniCLStrat::constructor(DeploymentConfig _params)
 │   └── It should revert with UniCLStratInsufficientObservationCardinality
 ├── Given maxSwapSlippageBps exceeds MAX_SLIPPAGE_BPS
 │   └── It should revert with UniCLStratInvalidConfig
+├── Given the exit route fee plus maximum slippage is at least 100%
+│   └── It should revert with UniCLStratInvalidConfig
 └── Given valid parameters
     ├── It should chain RegistryClient(_params.addresses.registry) in the constructor modifier list
     ├── It should store registry reference via RegistryClient (immutable after deploy)
@@ -64,7 +66,7 @@ UniCLStrat::navInETH()
 │   └── It should include WETH one-to-one
 ├── Given the strategy has paired token balance
 │   ├── It should convert paired token value through the oracle
-│   ├── It should mark the paired value down by the pool fee tier plus swapSlippageBps, rounded up
+│   ├── It should mark the paired value down by the configured exit route fee plus swapSlippageBps, rounded up
 │   └── It should mark down the paired side whichever of token0/token1 is WETH
 ├── Given the strategy has active pool positions
 │   ├── It should include liquidity and tokens owed from the pool

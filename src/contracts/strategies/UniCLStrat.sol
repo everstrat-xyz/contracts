@@ -108,8 +108,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     IUniswapV3Factory public immutable factory;
 
     int24 public immutable tickSpacing;
-    /// @dev Pool fee tier (hundredths of a bip), cached for the NAV and LP-fee exit-cost deduction.
-    uint24 private immutable _poolFee;
+    /// @notice Estimated paired-token to WETH route fee in parts per million.
+    uint256 public immutable exitRouteFeePips;
     uint256 private immutable _genesisTimestamp;
 
     // ============ Strategy State ============
@@ -176,8 +176,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (factory.getPool(_token0Address, _token1Address, _fee) != _params.addresses.pool) {
             revert UniCLStratInvalidPool();
         }
-        _poolFee = _fee;
-
         tickSpacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
         positionWidth = _params.strategy.positionWidth;
         rebalanceTickThreshold = _params.strategy.rebalanceTickThreshold;
@@ -192,6 +190,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         swapAdapter = _params.routes.swapAdapter;
         wethToPairedTokenPath = _params.routes.wethToPairedTokenPath;
         pairedTokenToWethPath = _params.routes.pairedTokenToWethPath;
+        exitRouteFeePips = _params.routes.exitRouteFeePips;
 
         _validateRouteConfig();
 
@@ -227,7 +226,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
     // ============ Strategy Views ============
     /// @dev Net of the estimated cost of converting the paired-token inventory back to WETH
-    ///      (pool fee tier + `swapSlippageBps`); see {UniCLStratLib-inventoryValueInETH}.
+    ///      (`exitRouteFeePips` plus `swapSlippageBps`); see {UniCLStratLib-inventoryValueInETH}.
     function navInETH() public view returns (uint256) {
         return address(this).balance
             + UniCLStratLib.inventoryValueInETH(
@@ -239,7 +238,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
                 positionMain,
                 positionAlt,
                 _twapSqrtPrice(),
-                _poolFee,
+                exitRouteFeePips,
                 swapSlippageBps
             );
     }
@@ -511,9 +510,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         _setMaxTotalNAV(_newMaxTotalNAV);
     }
 
-    /// @dev The NAV exit-cost mark-down uses the strategy pool's fee tier. If the paired -> WETH
-    ///      route trades through a pricier pool, raise `swapSlippageBps` by the fee difference so
-    ///      the mark-down still covers the conversion; see {UniCLStratLib-exitCostInETH}.
+    /// @dev Select a paired-token to WETH route whose fee is covered by `exitRouteFeePips`.
     function setRouteConfig(
         address _swapAdapter,
         bytes calldata _wethToPairedTokenPath,
@@ -525,7 +522,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     /**
      * @notice Sets the slippage tolerance for inventory-balancing swaps
      * @dev Also moves `navInETH()`: the paired-token inventory is marked down by this tolerance
-     *      plus the pool fee tier. A change re-marks NAV, the EVE price, and the pending
+     *      plus the exit route fee estimate. A change re-marks NAV, the EVE price, and the pending
      *      performance fee in the block it executes. See `docs/FREEZE_RUNBOOK.md` for scheduling.
      * @param _newSwapSlippageBps Slippage in basis points (must not exceed MAX_SWAP_SLIPPAGE_BPS)
      */
@@ -1091,7 +1088,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             address(token1),
             _amount0,
             _amount1,
-            _poolFee,
+            exitRouteFeePips,
             swapSlippageBps
         );
     }
@@ -1178,6 +1175,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (_params.strategy.maxTickDeviation <= 0) revert UniCLStratInvalidConfig();
         _validateTwapInterval(_params.strategy.twapInterval, MIN_TWAP_INTERVAL);
         _validateTwapInterval(_params.strategy.shortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+
+        uint256 _maxSlippagePips = MAX_SWAP_SLIPPAGE_BPS * (UniCLStratLib.FEE_DENOMINATOR / BASIS_POINTS);
+        if (_params.routes.exitRouteFeePips >= UniCLStratLib.FEE_DENOMINATOR - _maxSlippagePips) {
+            revert UniCLStratInvalidConfig();
+        }
     }
 
     function _validateTwapInterval(uint32 _interval, uint32 _min) internal pure {

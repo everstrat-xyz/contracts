@@ -817,13 +817,12 @@ Do not page on moves with an obvious on-chain explanation:
 - **Documented incident aftermath** — a realized loss from an emergency exit
   (§3.6), a strategy removal, or a feed correction after an oracle outage (§2).
 - **UniCLStrat exit-cost re-mark** — `UniCLStrat.navInETH()` marks the
-  paired-token inventory down by `pool fee tier + swapSlippageBps` (audit G2).
-  NAV steps by `paired value × Δbps` in three places: the block a new
-  `setSwapSlippageBps` executes (correlate with `SwapSlippageUpdated`), the
-  upgrade that first deploys the mark-down (a one-off drop of about 0.5% of the
-  paired share at the production 5 bps fee + 100 bps slippage), and
-  `emergencyExit()`, which hands the paired token to the StrategyManager at the
-  plain oracle price (a step up).
+  paired-token inventory down by the immutable `exitRouteFeePips` estimate
+  plus `swapSlippageBps` (audit G2). A slippage update moves NAV by the paired
+  value times the change in slippage (correlate with `SwapSlippageUpdated`). The
+  first deployment with the mark-down lowers the paired share by 1.05% with a
+  5 bps route fee and 100 bps slippage. `emergencyExit()` hands the paired token
+  to the StrategyManager at the full oracle price, which raises its NAV mark.
 
 **Scheduling NAV-moving parameter changes.** A slippage change or the
 mark-down deployment moves `eveBasePriceInETH()`, the premium price, and the

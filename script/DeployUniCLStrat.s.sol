@@ -52,6 +52,8 @@ import {Auth} from "../src/libraries/Auth.sol";
  *           so a quiet cardinality-1 pool cannot mark at a spot-extrapolated TWAP.
  *           Grow the ring via `increaseObservationCardinalityNext` and wait for fill
  *           *before* this script if either probe would fail.
+ *           Set `EXIT_ROUTE_FEE_PIPS` to the estimated fee of the paired-token to WETH
+ *           route in parts per million (500 for a 0.05% fee).
  *        C. Schedule `StrategyManager.addStrategy(strategy, depositWeight, withdrawalWeight)`.
  *
  *      See `docs/STRATEGY_GUARDRAILS.md`. Do not use the deployer's temporary bootstrap
@@ -128,7 +130,8 @@ contract DeployUniCLStrat is Script {
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: vm.envAddress("SWAP_ADAPTER_ADDRESS"),
                 wethToPairedTokenPath: vm.envBytes("WETH_TO_PAIRED_TOKEN_PATH"),
-                pairedTokenToWethPath: vm.envBytes("PAIRED_TOKEN_TO_WETH_PATH")
+                pairedTokenToWethPath: vm.envBytes("PAIRED_TOKEN_TO_WETH_PATH"),
+                exitRouteFeePips: vm.envUint("EXIT_ROUTE_FEE_PIPS")
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: int24(vm.envInt("POSITION_WIDTH")),

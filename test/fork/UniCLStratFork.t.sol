@@ -184,7 +184,8 @@ contract UniCLStratForkTest is Test {
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(adapter),
                 wethToPairedTokenPath: wethToUsdcPath,
-                pairedTokenToWethPath: usdcToWethPath
+                pairedTokenToWethPath: usdcToWethPath,
+                exitRouteFeePips: POOL_FEE
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: POSITION_WIDTH,

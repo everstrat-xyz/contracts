@@ -862,10 +862,9 @@ library UniCLStratLib {
      *      paired-token share of the inventory must be swapped before it can be redeemed. Marking
      *      it at the gross oracle price would let a redeemer exit at a price that ignores that
      *      cost and leave it with the holders who remain. The paired-token value is therefore
-     *      marked down by `pool fee tier + _slippageBps` — the fee the conversion pays plus the
-     *      slippage the strategy tolerates on it. The WETH side is not marked down: it unwraps 1:1.
-     *      Rounded up, so the mark-down never under-reserves.
-     * @param _poolFee The strategy pool's fee tier (hundredths of a bip)
+     *      marked down by the configured route fee estimate plus the strategy's slippage
+     *      tolerance, rounded up to the nearest wei. WETH is valued at its 1:1 unwrap rate.
+     * @param _exitRouteFeePips Estimated paired-token to WETH route fee in parts per million
      * @param _slippageBps The strategy's swap slippage tolerance (bps)
      */
     function inventoryValueInETH(
@@ -877,7 +876,7 @@ library UniCLStratLib {
         IUniCLStrat.Position memory _main,
         IUniCLStrat.Position memory _alt,
         uint160 _twapSqrtPriceX96,
-        uint256 _poolFee,
+        uint256 _exitRouteFeePips,
         uint256 _slippageBps
     ) public view returns (uint256) {
         (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _main, _twapSqrtPriceX96);
@@ -889,7 +888,7 @@ library UniCLStratLib {
             _token1,
             IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0,
             IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1,
-            _poolFee,
+            _exitRouteFeePips,
             _slippageBps
         );
     }
@@ -902,32 +901,27 @@ library UniCLStratLib {
         address _token1,
         uint256 _amount0,
         uint256 _amount1,
-        uint256 _poolFee,
+        uint256 _exitRouteFeePips,
         uint256 _slippageBps
     ) public view returns (uint256) {
         uint256 _value0 = _valueInETH(_oracle, _weth, _token0, _amount0);
         uint256 _value1 = _valueInETH(_oracle, _weth, _token1, _amount1);
         uint256 _pairedValue = _token0 == _weth ? _value1 : _value0;
-        return _value0 + _value1 - exitCostInETH(_pairedValue, _poolFee, _slippageBps);
+        return _value0 + _value1 - exitCostInETH(_pairedValue, _exitRouteFeePips, _slippageBps);
     }
 
     /**
      * @notice Estimated ETH cost of converting `_pairedValue` (ETH terms) of paired token to WETH:
-     *         `_poolFee` plus `_slippageBps`, rounded up.
-     * @dev The fee tier is the strategy pool's, not the route's: routes are adapter-specific
-     *      bytes (see {_calculateOracleAmountOut}), so a fee cannot be read off them generically.
-     *      The production route is a single hop through the strategy pool, so the two match. A
-     *      route through a pricier pool under-reserves by the fee difference unless
-     *      `swapSlippageBps` is raised to cover it; see `UniCLStrat.setRouteConfig`. Uniswap V3
-     *      fees are in hundredths of a bip (1e-6), hence the {FEE_DENOMINATOR} scale.
+     *         `_exitRouteFeePips` plus `_slippageBps`, rounded up.
+     * @dev The deployment supplies the fee estimate because routes use adapter-specific encodings.
      */
-    function exitCostInETH(uint256 _pairedValue, uint256 _poolFee, uint256 _slippageBps)
+    function exitCostInETH(uint256 _pairedValue, uint256 _exitRouteFeePips, uint256 _slippageBps)
         public
         pure
         returns (uint256)
     {
         if (_pairedValue == 0) return 0;
-        uint256 _costPips = _poolFee + _slippageBps * (FEE_DENOMINATOR / BASIS_POINTS);
+        uint256 _costPips = _exitRouteFeePips + _slippageBps * (FEE_DENOMINATOR / BASIS_POINTS);
         return (_pairedValue * _costPips + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR;
     }
 

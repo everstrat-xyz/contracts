@@ -29,6 +29,7 @@ contract UniCLStratTestBase is ProtocolTestBase {
     uint256 public constant DEPOSIT_AMOUNT = 10 ether;
     uint256 public constant WITHDRAW_AMOUNT = 3 ether;
     uint256 public constant PERFORMANCE_FEE_BPS = 1_000;
+    uint24 public constant EXIT_ROUTE_FEE_PIPS = 500;
     uint256 public constant MAX_SWAP_SLIPPAGE_BPS = 100;
     uint256 public constant TOKEN_PRICE = 1e8;
     uint256 public constant STALENESS_INTERVAL = 1 hours;
@@ -115,8 +116,9 @@ contract UniCLStratTestBase is ProtocolTestBase {
             }),
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(swapAdapter),
-                wethToPairedTokenPath: abi.encodePacked(address(weth), uint24(3000), address(pairedToken)),
-                pairedTokenToWethPath: abi.encodePacked(address(pairedToken), uint24(3000), address(weth))
+                wethToPairedTokenPath: abi.encodePacked(address(weth), EXIT_ROUTE_FEE_PIPS, address(pairedToken)),
+                pairedTokenToWethPath: abi.encodePacked(address(pairedToken), EXIT_ROUTE_FEE_PIPS, address(weth)),
+                exitRouteFeePips: EXIT_ROUTE_FEE_PIPS
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: POSITION_WIDTH,
@@ -169,10 +171,10 @@ contract UniCLStratTestBase is ProtocolTestBase {
         return pool.token0() == address(pairedToken) ? amount0 + owed0 : amount1 + owed1;
     }
 
-    /// @dev Independent restatement of the NAV exit-cost mark-down: pool fee tier (1e-6 units)
+    /// @dev Independent restatement of the NAV exit-cost mark-down: route fee estimate (1e-6 units)
     ///      plus `swapSlippageBps`, applied to the paired-token value and rounded up.
     function _exitCost(uint256 _pairedValue) internal view returns (uint256) {
-        uint256 costPips = uint256(pool.fee()) + strategy.swapSlippageBps() * 100;
+        uint256 costPips = uint256(EXIT_ROUTE_FEE_PIPS) + strategy.swapSlippageBps() * 100;
         return (_pairedValue * costPips + 1e6 - 1) / 1e6;
     }
 

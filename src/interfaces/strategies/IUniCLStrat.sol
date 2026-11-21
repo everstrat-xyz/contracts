@@ -28,6 +28,8 @@ interface IUniCLStrat is IStrategy {
         address swapAdapter;
         bytes wethToPairedTokenPath;
         bytes pairedTokenToWethPath;
+        /// @dev Estimated fee for paired-token to WETH conversion, in parts per million.
+        uint256 exitRouteFeePips;
     }
 
     struct StrategyConfig {

@@ -142,6 +142,14 @@ contract UniCLStratTest is UniCLStratTestBase {
         new UniCLStrat(config);
     }
 
+    function test_Constructor_RevertsWhenExitFeeAndMaxSlippageReachFullValue() public {
+        IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
+        config.routes.exitRouteFeePips = 980_000;
+
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        new UniCLStrat(config);
+    }
+
     function test_Constructor_RevertsWithInvalidRebalanceTickThreshold() public {
         IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
         config.strategy.rebalanceTickThreshold = 0;
@@ -256,11 +264,13 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(strategy.navInETH(), NAV_BALANCE_AMOUNT - _exitCost(NAV_BALANCE_AMOUNT));
     }
 
-    function test_NavInETH_MarksDownPairedTokenByPoolFeePlusSlippage() public {
+    function test_NavInETH_MarksDownPairedTokenByExitRouteFeePlusSlippage() public {
         pairedToken.mint(address(strategy), NAV_BALANCE_AMOUNT);
 
-        // 0.3% pool fee tier + 1% default slippage tolerance = 1.3% of the paired value.
-        assertEq(strategy.navInETH(), NAV_BALANCE_AMOUNT - NAV_BALANCE_AMOUNT * 130 / 10_000);
+        // The exit route fee is 0.05%, and the strategy pool fee is 0.3%.
+        assertEq(strategy.exitRouteFeePips(), EXIT_ROUTE_FEE_PIPS);
+        assertTrue(strategy.exitRouteFeePips() != pool.fee());
+        assertEq(strategy.navInETH(), NAV_BALANCE_AMOUNT - NAV_BALANCE_AMOUNT * 105 / 10_000);
     }
 
     function test_NavInETH_DoesNotMarkDownWethOrNativeETH() public {
@@ -291,10 +301,10 @@ contract UniCLStratTest is UniCLStratTestBase {
         uint256 expected = 3 * NAV_BALANCE_AMOUNT - _exitCost(NAV_BALANCE_AMOUNT);
 
         uint256 wethIsToken0 = UniCLStratLib.inventoryValueInETH(
-            pool, oracle, address(weth), address(weth), address(pairedToken), none, none, 0, pool.fee(), 100
+            pool, oracle, address(weth), address(weth), address(pairedToken), none, none, 0, EXIT_ROUTE_FEE_PIPS, 100
         );
         uint256 wethIsToken1 = UniCLStratLib.inventoryValueInETH(
-            pool, oracle, address(weth), address(pairedToken), address(weth), none, none, 0, pool.fee(), 100
+            pool, oracle, address(weth), address(pairedToken), address(weth), none, none, 0, EXIT_ROUTE_FEE_PIPS, 100
         );
 
         assertEq(wethIsToken0, expected);
@@ -302,7 +312,7 @@ contract UniCLStratTest is UniCLStratTestBase {
     }
 
     function test_NavInETH_ExitCostRoundsUp() public {
-        // 1 wei of paired token: 1.3% rounds up to the whole wei, never down to zero.
+        // The exit cost on 1 wei of paired token rounds up to the whole wei.
         pairedToken.mint(address(strategy), 1);
 
         assertEq(strategy.navInETH(), 0);
@@ -320,15 +330,16 @@ contract UniCLStratTest is UniCLStratTestBase {
     }
 
     function test_NavInETH_CoversRealizedExitCostOfAFullWithdrawal() public {
-        // Route costs 0.3% (within the 1.3% mark-down): a holder exiting the whole strategy at
-        // NAV is paid out of the proceeds in full — the conversion cost was already priced in.
+        // A 3 bps route cost fits the 5 bps fee estimate, so the exact-output leg can fill.
+        // The resulting proceeds should still cover the reported NAV.
         _deposit(DEPOSIT_AMOUNT);
-        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
+        converter.setQuoteMultiplierBps(9_997);
         uint256 nav = strategy.navInETH();
 
         vm.prank(strategyManager);
         uint256 withdrawn = strategy.withdraw(receiver, nav);
 
+        assertEq(converter.lastExecuteSwapExactAmountOutCall(), 1);
         assertGe(withdrawn, nav);
         assertLt(withdrawn, DEPOSIT_AMOUNT);
     }
@@ -678,7 +689,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         uint256 withdrawn = strategy.withdraw(receiver, withdrawAmount);
 
         assertEq(converter.lastExecuteSwapExactAmountOutCall(), 0);
-        // The 1% realized cost is inside the 1.3% mark-down, so the request is still met.
+        // The 1% realized cost is inside the mark-down, so the request is still met.
         assertGe(withdrawn, withdrawAmount);
         assertEq(receiver.balance, withdrawn);
         assertApproxEqAbs(strategy.navInETH(), 0, NAV_TOLERANCE);
@@ -1979,8 +1990,8 @@ contract UniCLStratTest is UniCLStratTestBase {
     function test_SetRouteConfig_UpdatesAdapterAndPaths() public {
         MockConverterAdapter newAdapter = new MockConverterAdapter(weth, pairedToken);
         converter.setAllowedAdapter(address(newAdapter), true);
-        bytes memory newWethPath = abi.encodePacked(address(weth), uint24(500), address(pairedToken));
-        bytes memory newPairedPath = abi.encodePacked(address(pairedToken), uint24(500), address(weth));
+        bytes memory newWethPath = abi.encodePacked(address(weth), uint24(100), address(pairedToken));
+        bytes memory newPairedPath = abi.encodePacked(address(pairedToken), uint24(100), address(weth));
 
         vm.prank(admin);
         strategy.setRouteConfig(address(newAdapter), newWethPath, newPairedPath);
@@ -1988,6 +1999,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(address(strategy.swapAdapter()), address(newAdapter));
         assertEq(strategy.wethToPairedTokenPath(), newWethPath);
         assertEq(strategy.pairedTokenToWethPath(), newPairedPath);
+        assertEq(strategy.exitRouteFeePips(), EXIT_ROUTE_FEE_PIPS);
     }
 
     function test_SetRouteConfig_RevertsWhenCallerLacksRole() public {
