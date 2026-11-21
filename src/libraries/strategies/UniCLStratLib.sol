@@ -882,11 +882,31 @@ library UniCLStratLib {
     ) public view returns (uint256) {
         (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _main, _twapSqrtPriceX96);
         (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _alt, _twapSqrtPriceX96);
-        uint256 _value0 =
-            _valueInETH(_oracle, _weth, _token0, IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0);
-        uint256 _value1 =
-            _valueInETH(_oracle, _weth, _token1, IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1);
+        return adjustedPairValueInETH(
+            _oracle,
+            _weth,
+            _token0,
+            _token1,
+            IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0,
+            IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1,
+            _poolFee,
+            _slippageBps
+        );
+    }
 
+    /// @notice ETH value of the pair net of the estimated cost of converting the paired token to WETH.
+    function adjustedPairValueInETH(
+        IOracle _oracle,
+        address _weth,
+        address _token0,
+        address _token1,
+        uint256 _amount0,
+        uint256 _amount1,
+        uint256 _poolFee,
+        uint256 _slippageBps
+    ) public view returns (uint256) {
+        uint256 _value0 = _valueInETH(_oracle, _weth, _token0, _amount0);
+        uint256 _value1 = _valueInETH(_oracle, _weth, _token1, _amount1);
         uint256 _pairedValue = _token0 == _weth ? _value1 : _value0;
         return _value0 + _value1 - exitCostInETH(_pairedValue, _poolFee, _slippageBps);
     }
@@ -901,22 +921,21 @@ library UniCLStratLib {
      *      `swapSlippageBps` is raised to cover it; see `UniCLStrat.setRouteConfig`. Uniswap V3
      *      fees are in hundredths of a bip (1e-6), hence the {FEE_DENOMINATOR} scale.
      */
-    function exitCostInETH(uint256 _pairedValue, uint256 _poolFee, uint256 _slippageBps) public pure returns (uint256) {
+    function exitCostInETH(uint256 _pairedValue, uint256 _poolFee, uint256 _slippageBps)
+        public
+        pure
+        returns (uint256)
+    {
         if (_pairedValue == 0) return 0;
         uint256 _costPips = _poolFee + _slippageBps * (FEE_DENOMINATOR / BASIS_POINTS);
         return (_pairedValue * _costPips + FEE_DENOMINATOR - 1) / FEE_DENOMINATOR;
     }
 
-    /// @notice ETH value of `_amount0` token0 plus `_amount1` token1.
-    function pairValueInETH(
-        IOracle _oracle,
-        address _weth,
-        address _token0,
-        address _token1,
-        uint256 _amount0,
-        uint256 _amount1
-    ) public view returns (uint256) {
-        return _valueInETH(_oracle, _weth, _token0, _amount0) + _valueInETH(_oracle, _weth, _token1, _amount1);
+    /// @notice Gross oracle value in ETH of the paired token.
+    function pairedValueInETH(IOracle _oracle, address _pairedToken, uint256 _amount) public view returns (uint256) {
+        if (_amount == 0) return 0;
+        // Direct token -> ETH cross-rate (single rounding step, both feeds staleness-checked).
+        return _oracle.convert(_pairedToken, address(0), _amount, IERC20Metadata(_pairedToken).decimals(), 18);
     }
 
     /// @dev Amounts held by a position (liquidity at `_sqrtPriceX96` plus owed); zero for invalid ticks.
@@ -949,10 +968,8 @@ library UniCLStratLib {
         view
         returns (uint256)
     {
-        if (_amount == 0) return 0;
         if (_token == _weth) return _amount;
-        // Direct token -> ETH cross-rate (single rounding step, both feeds staleness-checked).
-        return _oracle.convert(_token, address(0), _amount, IERC20Metadata(_token).decimals(), 18);
+        return pairedValueInETH(_oracle, _token, _amount);
     }
 
     function _tokenValueInETH(SwapConfig memory _config, address _token, uint256 _amount)

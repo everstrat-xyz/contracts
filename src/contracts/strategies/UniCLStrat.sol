@@ -108,7 +108,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     IUniswapV3Factory public immutable factory;
 
     int24 public immutable tickSpacing;
-    /// @dev Pool fee tier (hundredths of a bip), cached for the NAV exit-cost mark-down.
+    /// @dev Pool fee tier (hundredths of a bip), cached for the NAV and LP-fee exit-cost deduction.
     uint24 private immutable _poolFee;
     uint256 private immutable _genesisTimestamp;
 
@@ -356,12 +356,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        is independently bounded, and a calm revert would stall exit liquidity when
      *        redemptions spike. See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
      *      In both paths the receiver gets a single native ETH transfer and the return value
-     *      is the ETH actually delivered. A near-full request (the same threshold that skips
-     *      the route probe) drains the strategy: after the full unwind, the leftover paired
-     *      token is swapped to WETH and all WETH is paid out, so the payout can exceed
-     *      `_amount` — by the unspent part of the NAV exit-cost mark-down, plus whatever the
-     *      request fell short of NAV. The drain swap is skipped when the route is untradable or
-     *      the leftover is dust; the payout is then the WETH on hand.
+     *      is the ETH actually delivered. A near-full request triggers a drain: after sourcing
+     *      WETH for the request, the strategy tries to swap leftover paired token to WETH and
+     *      pays out all WETH on hand. The payout can exceed `_amount` by the unspent part of
+     *      the NAV exit-cost mark-down plus the difference between NAV and the request. The
+     *      drain swap is skipped when the route is untradable or the leftover is dust.
      */
     function withdraw(address _receiver, uint256 _amount)
         external
@@ -389,8 +388,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             // from WETH via liquidity removal and paired-token conversion.
             uint256 _remainder = _amount - _idleETH;
 
-            // Padded by slippage, a (near-)full request would burn every position on the
-            // partial path anyway: unwind outright and skip the route-cost probe.
+            // Near-full requests use a full unwind when idle WETH falls short. The
+            // route-cost probe sizes partial burns; any swap still quotes its actual size.
             bool _nearFullWithdrawal = _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
             _sourceWeth(_remainder, _nearFullWithdrawal);
 
@@ -450,7 +449,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      * @dev Over already-materialized `tokensOwed` plus stored counters (via the live
      *      `tokensOwed - snapshot` delta in `UniCLStratLib.unchargedLpFeeAmounts`). Unpoked fee growth is
      *      invisible until `sync()` or a remove/collect poke. Accrue is not required for the
-     *      view — only for durable counter updates on settle/remove.
+     *      view — only for durable counter updates on settle/remove. Paired-token fees carry
+     *      the same estimated exit-cost deduction as NAV.
      */
     function pendingPerformanceFeeInETH(uint256 _performanceFeeBps) external view returns (uint256 feeETH) {
         if (_performanceFeeBps == 0 || paused()) return 0;
@@ -475,9 +475,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
         (uint256 _uncharged0, uint256 _uncharged1) =
             UniCLStratLib.accrueLpFees(pool, _lpFees, positionMain, positionAlt);
-        if (_uncharged0 == 0 && _uncharged1 == 0) return 0;
-
-        uint256 _feeBaseETH = _pairValueInETH(_uncharged0, _uncharged1);
+        uint256 _feeBaseETH = _lpFeeBaseInETH(_uncharged0, _uncharged1);
         feeETH = _feeBaseETH * _performanceFeeBps / BASIS_POINTS;
         // Dust base: floor-division to zero must not write off the uncharged amounts.
         if (feeETH == 0) return 0;
@@ -527,8 +525,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     /**
      * @notice Sets the slippage tolerance for inventory-balancing swaps
      * @dev Also moves `navInETH()`: the paired-token inventory is marked down by this tolerance
-     *      plus the pool fee tier, so a change re-marks NAV (and the EVE price) in the block it
-     *      executes. Schedule it away from heavy queue activity; see `docs/FREEZE_RUNBOOK.md`.
+     *      plus the pool fee tier. A change re-marks NAV, the EVE price, and the pending
+     *      performance fee in the block it executes. See `docs/FREEZE_RUNBOOK.md` for scheduling.
      * @param _newSwapSlippageBps Slippage in basis points (must not exceed MAX_SWAP_SLIPPAGE_BPS)
      */
     function setSwapSlippageBps(uint256 _newSwapSlippageBps) external onlyAuthRole(Auth.ADMIN_ROLE) {
@@ -944,8 +942,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        everything is unwound as a fallback.
      *      - Route untradable (quote fails or is outside the oracle band): full unwind first,
      *        which maximises the WETH obtained without swapping.
-     *      - `_fullUnwind` set by the caller (near-full withdrawal): full unwind first, without
-     *        probing the route, since the partial burn would consume every position anyway.
+     *      - `_fullUnwind` set by the caller (near-full withdrawal): full unwind first. If
+     *        WETH is still short after the burn, the exact-output swap quotes that shortfall.
      */
     function _sourceWeth(uint256 _wethTarget, bool _fullUnwind) internal {
         uint256 _wethBalance = weth.balanceOf(address(this));
@@ -960,9 +958,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             if (_tradable) {
                 uint256 _needed = _shortfall * (BASIS_POINTS + swapSlippageBps + _costBps) / BASIS_POINTS;
                 uint256 _pairedBalance = pairedToken.balanceOf(address(this));
-                uint256 _idlePairedValue = address(pairedToken) == address(token0)
-                    ? _pairValueInETH(_pairedBalance, 0)
-                    : _pairValueInETH(0, _pairedBalance);
+                uint256 _idlePairedValue =
+                    UniCLStratLib.pairedValueInETH(IOracle(_registry.oracle()), address(pairedToken), _pairedBalance);
                 if (_needed > _idlePairedValue) _decreaseLiquidityForValue(_needed - _idlePairedValue);
             }
         }
@@ -1082,7 +1079,21 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function _unchargedLpFeesInETH() internal view returns (uint256) {
         (uint256 _uncharged0, uint256 _uncharged1) =
             UniCLStratLib.unchargedLpFeeAmounts(pool, _lpFees, positionMain, positionAlt);
-        return _pairValueInETH(_uncharged0, _uncharged1);
+        return _lpFeeBaseInETH(_uncharged0, _uncharged1);
+    }
+
+    function _lpFeeBaseInETH(uint256 _amount0, uint256 _amount1) internal view returns (uint256) {
+        if (_amount0 == 0 && _amount1 == 0) return 0;
+        return UniCLStratLib.adjustedPairValueInETH(
+            IOracle(_registry.oracle()),
+            address(weth),
+            address(token0),
+            address(token1),
+            _amount0,
+            _amount1,
+            _poolFee,
+            swapSlippageBps
+        );
     }
 
     /**
@@ -1134,12 +1145,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             pairedToken: address(pairedToken),
             slippageBps: swapSlippageBps
         });
-    }
-
-    function _pairValueInETH(uint256 _amount0, uint256 _amount1) internal view returns (uint256) {
-        return UniCLStratLib.pairValueInETH(
-            IOracle(_registry.oracle()), address(weth), address(token0), address(token1), _amount0, _amount1
-        );
     }
 
     function _giveConverterAllowances() internal {

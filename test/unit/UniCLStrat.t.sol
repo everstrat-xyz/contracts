@@ -1063,7 +1063,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         strategy.sync();
     }
 
-    function test_PendingPerformanceFeeInETH_AccruesOnNewLpFees() public {
+    function test_PerformanceFee_DeductsExitCostFromPairedTokenFees() public {
         _deposit(DEPOSIT_AMOUNT);
         IUniCLStrat.Position memory mainPosition = _mainPosition();
 
@@ -1078,7 +1078,13 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         strategy.sync();
 
-        assertGt(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), 0);
+        uint256 feeBase = ACCRUED_FEE_WETH + ACCRUED_FEE_PAIRED - _exitCost(ACCRUED_FEE_PAIRED);
+        uint256 expectedFee = feeBase * PERFORMANCE_FEE_BPS / 10_000;
+        assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), expectedFee);
+
+        vm.prank(strategyManager);
+        assertEq(strategy.settlePerformanceFee(PERFORMANCE_FEE_BPS), expectedFee);
+        assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), 0);
     }
 
     function test_PendingPerformanceFeeInETH_ReturnsZeroWhenPaused() public {
@@ -1869,8 +1875,8 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         strategy.sync();
 
-        // Mock feeds price pairedToken 1:1 with ETH, so the ETH fee base is the sum.
-        uint256 _expectedFee = (_newFeeWeth + _newFeePaired) * PERFORMANCE_FEE_BPS / 10_000;
+        // The mock oracle values the paired token 1:1 with ETH before the exit-cost deduction.
+        uint256 _expectedFee = (_newFeeWeth + _newFeePaired - _exitCost(_newFeePaired)) * PERFORMANCE_FEE_BPS / 10_000;
         assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), _expectedFee);
 
         vm.prank(strategyManager);
@@ -2487,7 +2493,8 @@ contract UniCLStratTest is UniCLStratTestBase {
 
         // Burned principal passes through tokensOwed and is collected; only the accrued fees
         // may enter the performance-fee base (1:1 mock prices).
-        uint256 expectedFee = (ACCRUED_FEE_WETH + ACCRUED_FEE_PAIRED) * PERFORMANCE_FEE_BPS / 10_000;
+        uint256 feeBase = ACCRUED_FEE_WETH + ACCRUED_FEE_PAIRED - _exitCost(ACCRUED_FEE_PAIRED);
+        uint256 expectedFee = feeBase * PERFORMANCE_FEE_BPS / 10_000;
         assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), expectedFee);
 
         // Later fee growth on the untouched remainder is still picked up exactly once.
