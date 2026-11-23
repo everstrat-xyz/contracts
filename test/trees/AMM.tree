@@ -249,12 +249,14 @@ AMM::Pricing & NAV (ETH-first)
 ├── Given ETH locked for pending claims (after processRedemption)
 │   ├── totalNAVInETH() should use AMM freeBalance() only (exclude lockedForClaims)
 │   └── enter premium price should not be inflated by locked claim ETH
-├── Given an in-window priced ExitQueue batch
-│   ├── totalNAVInETH() should deduct liabilityETH (remainingTokens * finalEvePrice)
-│   ├── eveBasePriceInETH() / evePremiumPriceInETH() should use liveSupply (exclude escrowed EVE)
-│   └── unpriced queued EVE should remain in the supply denominator (cancellable equity)
+├── Given an in-window priced ExitQueue batch (audit G1)
+│   ├── pricing should move neither NAV nor price (queued EVE stays in NAV and supply)
+│   ├── settlement should pay the price live in the paying transaction
+│   ├── settlement should leave the price unchanged for remaining holders (up to rounding dust)
+│   └── processRequests should settle every request in the call at one price
 ├── Given the priced batch is past MAX_BATCH_PROCESSING_TIME
-│   ├── liveRedemptionOffsets should return (0, 0) with no write (liability lapses on the clock)
+│   ├── NAV, base and premium price should not step between the last in-window and first lapsed second
+│   ├── the escape-hatch cancel should not move the price
 │   └── pullRequest / processRedemption should revert with ExitQueueBatchExpired
 ├── Given prices recomputed after operations
 │   ├── ETH prices should follow NAV/supply and change after enter

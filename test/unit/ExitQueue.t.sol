@@ -67,13 +67,21 @@ contract ExitQueueTest is ProtocolTestBase {
         _registerExitQueuePeers(registry, amm, controller, admin);
     }
 
+    /// @dev Prices the current batch and makes the AMM stub report `_price` as the live base
+    ///      price, which is what ExitQueue settles at (audit G1).
+    function _priceBatch(uint256 _price) internal {
+        vm.prank(controller);
+        exitQueue.priceBatch(_price);
+        MockAMMStub(payable(amm)).setEveBasePriceInETH(_price);
+    }
+
     // ============ Initialization Tests ============
 
     function test_Initialize() public view {
         assertEq(exitQueue.currentBatchId(), INITIAL_BATCH_ID);
         assertTrue(registry.hasRole(Auth.ADMIN_ROLE, admin));
         assertEq(address(exitQueue.registry()), address(registry));
-        assertEq(exitQueue.version(), "1.0.0");
+        assertEq(exitQueue.version(), "1.1.0");
         assertEq(exitQueue.liveScanFromBatchId(), INITIAL_BATCH_ID);
         (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
         assertEq(liability, 0);
@@ -107,8 +115,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // Pull request
         vm.prank(amm);
@@ -139,8 +146,7 @@ contract ExitQueueTest is ProtocolTestBase {
         exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
         // Price the batch
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         (bool canBeProcessed, uint256 finalPrice,,,) = exitQueue.batchInfo(INITIAL_BATCH_ID);
         assertTrue(canBeProcessed);
@@ -159,8 +165,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.prank(unauthorized);
         vm.expectRevert();
@@ -276,16 +281,14 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.expectEmit(true, false, false, false);
         emit IExitQueue.BatchPriced(INITIAL_BATCH_ID);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
     }
 
     function test_PriceBatch_SetsBatchInfo() public {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_2);
+        _priceBatch(EVE_PRICE_2);
 
         (bool canBeProcessed, uint256 finalPrice, uint256 totalTokens, uint256 createdAt,) =
             exitQueue.batchInfo(batchId);
@@ -302,8 +305,7 @@ contract ExitQueueTest is ProtocolTestBase {
 
         assertEq(exitQueue.currentBatchId(), INITIAL_BATCH_ID);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         assertEq(exitQueue.currentBatchId(), INITIAL_BATCH_ID + 1);
     }
@@ -331,8 +333,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.expectEmit(true, true, false, false);
         emit IExitQueue.RequestPulled(batchId, user1, true); // isWithinTolerance = true
@@ -345,8 +346,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -359,8 +359,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         assertEq(exitQueue.unprocessedUsersCount(batchId), 1);
 
@@ -376,8 +375,7 @@ contract ExitQueueTest is ProtocolTestBase {
         exitQueue.pushRequest(user2, EVE_PRICE_1, TOKENS_TO_BURN_2, PRICE_TOLERANCE_1_PCT);
         vm.stopPrank();
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         (,, uint256 totalTokensBefore,,) = exitQueue.batchInfo(batchId);
         assertEq(totalTokensBefore, TOKENS_TO_BURN_1 + TOKENS_TO_BURN_2);
@@ -402,8 +400,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -417,8 +414,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.prank(amm);
         vm.expectRevert(IExitQueue.ExitQueueRequestNotInBatch.selector);
@@ -429,8 +425,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         exitQueue.pause();
 
@@ -448,8 +443,7 @@ contract ExitQueueTest is ProtocolTestBase {
         // Price drops by 3% (within 5% tolerance)
         uint256 droppedPrice = (EVE_PRICE_1 * 97e16) / Math.SCALE_FACTOR; // 97% of original
 
-        vm.prank(controller);
-        exitQueue.priceBatch(droppedPrice);
+        _priceBatch(droppedPrice);
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -466,8 +460,7 @@ contract ExitQueueTest is ProtocolTestBase {
         // Price drops by 10% (exceeds 1% tolerance)
         uint256 droppedPrice = (EVE_PRICE_1 * 9e17) / Math.SCALE_FACTOR; // 90% of original
 
-        vm.prank(controller);
-        exitQueue.priceBatch(droppedPrice);
+        _priceBatch(droppedPrice);
 
         vm.expectEmit(true, true, false, false);
         emit IExitQueue.RequestPulled(batchId, user1, false); // isWithinTolerance = false
@@ -487,8 +480,7 @@ contract ExitQueueTest is ProtocolTestBase {
         // Price drops by exactly 1% (at tolerance boundary)
         uint256 droppedPrice = (EVE_PRICE_1 * 99e16) / Math.SCALE_FACTOR; // 99% of original
 
-        vm.prank(controller);
-        exitQueue.priceBatch(droppedPrice);
+        _priceBatch(droppedPrice);
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -516,8 +508,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
 
@@ -592,8 +583,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -630,8 +620,7 @@ contract ExitQueueTest is ProtocolTestBase {
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
         // Price the batch - this makes it processable
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // Verify batch is now processable
         (bool canBeProcessed,,,,) = exitQueue.batchInfo(batchId);
@@ -652,8 +641,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.stopPrank();
 
         // Price the batch
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // All users should not be able to close their requests
         vm.prank(amm);
@@ -673,8 +661,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // At exactly MAX_BATCH_PROCESSING_TIME, close should still revert (upper bound is exclusive)
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()));
@@ -688,8 +675,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // After MAX_BATCH_PROCESSING_TIME has passed, user can close (escape hatch)
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
@@ -714,8 +700,7 @@ contract ExitQueueTest is ProtocolTestBase {
         exitQueue.pushRequest(user3, EVE_PRICE_1, TOKENS_TO_BURN_3, PRICE_TOLERANCE_1_PCT);
         vm.stopPrank();
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
 
@@ -749,8 +734,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_2);
+        _priceBatch(EVE_PRICE_2);
 
         (bool canBeProcessed, uint256 finalPrice, uint256 totalTokens, uint256 createdAt, uint256 pricedAt) =
             exitQueue.batchInfo(batchId);
@@ -770,8 +754,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.warp(block.timestamp + 1 hours);
         uint256 expectedPricedAt = block.timestamp;
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_2);
+        _priceBatch(EVE_PRICE_2);
 
         (,,, uint256 createdAt, uint256 pricedAt) = exitQueue.batchInfo(batchId);
 
@@ -802,8 +785,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         assertFalse(exitQueue.requestCanBeClosed(batchId, user1));
     }
@@ -812,8 +794,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()));
 
@@ -824,8 +805,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
 
@@ -836,8 +816,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -1001,8 +980,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId1 = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // Second batch (currentBatchId incremented)
         vm.prank(amm);
@@ -1028,8 +1006,7 @@ contract ExitQueueTest is ProtocolTestBase {
         exitQueue.pushRequest(user3, EVE_PRICE_1, TOKENS_TO_BURN_3, PRICE_TOLERANCE_1_PCT);
         vm.stopPrank();
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // Process all requests
         vm.startPrank(amm);
@@ -1064,8 +1041,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         exitQueue.closeRequest(batchId, user2);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         // Pull user3's request
         vm.prank(amm);
@@ -1086,8 +1062,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, 0);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_3); // Price drops significantly
+        _priceBatch(EVE_PRICE_3); // Price drops significantly
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -1107,25 +1082,109 @@ contract ExitQueueTest is ProtocolTestBase {
         assertEq(escrowed, 0);
     }
 
-    function test_LiveRedemptionOffsets_AfterPriceBatch() public {
+    function test_LiveRedemptionOffsets_ZeroAfterPriceBatch() public {
         vm.prank(amm);
         exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
+        // Audit G1: a priced batch is no longer carved out of NAV or supply.
         (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertEq(escrowed, TOKENS_TO_BURN_1);
-        assertEq(liability, Math.convertAssets(TOKENS_TO_BURN_1, EVE_PRICE_1));
+        assertEq(escrowed, 0);
+        assertEq(liability, 0);
         assertEq(exitQueue.liveScanFromBatchId(), INITIAL_BATCH_ID);
+    }
+
+    // ============ Live Settlement Price (audit G1) ============
+
+    function test_BatchInfo_InWindow_ReturnsLivePrice() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        _priceBatch(EVE_PRICE_1);
+
+        MockAMMStub(payable(amm)).setEveBasePriceInETH(EVE_PRICE_2);
+
+        (, uint256 price,,,) = exitQueue.batchInfo(batchId);
+        assertEq(price, EVE_PRICE_2, "in-window batch must report the live price");
+    }
+
+    function test_BatchInfo_AfterExpiry_ReturnsStoredPriceWithoutAMMRead() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        _priceBatch(EVE_PRICE_1);
+
+        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
+        // A reverting price read must not affect a lapsed batch.
+        vm.mockCallRevert(amm, abi.encodeWithSignature("eveBasePriceInETH()"), "");
+
+        (, uint256 price,,,) = exitQueue.batchInfo(batchId);
+        assertEq(price, EVE_PRICE_1);
+    }
+
+    function test_BatchInfo_Unpriced_DoesNotReadAMM() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        vm.mockCallRevert(amm, abi.encodeWithSignature("eveBasePriceInETH()"), "");
+
+        (bool canBeProcessed, uint256 price,,,) = exitQueue.batchInfo(batchId);
+        assertFalse(canBeProcessed);
+        assertEq(price, 0);
+    }
+
+    function test_PullRequest_SlippageJudgedAgainstLivePrice() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        // Priced at the request price (within tolerance) ...
+        _priceBatch(EVE_PRICE_1);
+        // ... but NAV fell past the tolerance before payout.
+        MockAMMStub(payable(amm)).setEveBasePriceInETH(EVE_PRICE_3);
+
+        vm.prank(amm);
+        exitQueue.pullRequest(batchId, user1);
+
+        (, bool closedDueToSlippage,,,) = exitQueue.requestInfo(batchId, user1);
+        assertTrue(closedDueToSlippage, "slippage must use the settlement price, not the priceBatch price");
+    }
+
+    function test_PullRequest_ZeroLivePrice_Reverts() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        _priceBatch(EVE_PRICE_1);
+        MockAMMStub(payable(amm)).setEveBasePriceInETH(0);
+
+        vm.prank(amm);
+        vm.expectRevert(IExitQueue.ExitQueueZeroPrice.selector);
+        exitQueue.pullRequest(batchId, user1);
+    }
+
+    function test_PullRequest_PinsPriceForRestOfTransaction() public {
+        vm.prank(amm);
+        uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        vm.prank(amm);
+        exitQueue.pushRequest(user2, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
+        _priceBatch(EVE_PRICE_1);
+
+        // Forge clears transient storage between top-level test calls, so both pulls must run
+        // inside one call: put a probe with the same storage layout at the AMM address.
+        vm.etch(amm, address(new PinProbeAMM()).code);
+        (uint256 priceAfterFirstPull, bool secondClosedDueToSlippage) =
+            PinProbeAMM(payable(amm)).pullTwiceMovingPrice(exitQueue, batchId, user1, user2, EVE_PRICE_3);
+
+        // A live-price move inside the same transaction (e.g. the AMM burning before it locks
+        // the ETH) must not change what this batch settles at.
+        assertEq(priceAfterFirstPull, EVE_PRICE_1, "settlement price must be pinned for the transaction");
+        assertFalse(secondClosedDueToSlippage, "second pull must use the pinned price");
+
+        // A new transaction reads the live price again.
+        (, uint256 price,,,) = exitQueue.batchInfo(batchId);
+        assertEq(price, EVE_PRICE_3);
     }
 
     function test_LiveRedemptionOffsets_PullReducesOffsets() public {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.prank(amm);
         exitQueue.pullRequest(batchId, user1);
@@ -1140,8 +1199,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
 
@@ -1156,8 +1214,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
 
@@ -1170,8 +1227,7 @@ contract ExitQueueTest is ProtocolTestBase {
         vm.prank(amm);
         uint256 batchId = exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
 
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        _priceBatch(EVE_PRICE_1);
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
 
@@ -1189,8 +1245,7 @@ contract ExitQueueTest is ProtocolTestBase {
         for (uint256 i; i < cap; ++i) {
             vm.prank(amm);
             exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
-            vm.prank(controller);
-            exitQueue.priceBatch(EVE_PRICE_1);
+            _priceBatch(EVE_PRICE_1);
         }
 
         vm.prank(amm);
@@ -1205,25 +1260,41 @@ contract ExitQueueTest is ProtocolTestBase {
         for (uint256 i; i < cap; ++i) {
             vm.prank(amm);
             exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
-            vm.prank(controller);
-            exitQueue.priceBatch(EVE_PRICE_1);
+            _priceBatch(EVE_PRICE_1);
         }
 
         vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
 
         vm.prank(amm);
         exitQueue.pushRequest(user1, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
-        vm.prank(controller);
-        exitQueue.priceBatch(EVE_PRICE_1);
+        uint256 pricedBatchId = exitQueue.currentBatchId();
+        _priceBatch(EVE_PRICE_1);
 
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertEq(escrowed, TOKENS_TO_BURN_1);
-        assertEq(liability, Math.convertAssets(TOKENS_TO_BURN_1, EVE_PRICE_1));
+        assertEq(
+            exitQueue.currentBatchId(), pricedBatchId + 1, "pricing must succeed once expired batches free the cap"
+        );
     }
 
     function test_PushRequest_TokensOverflow() public {
         vm.prank(amm);
         vm.expectRevert(IExitQueue.ExitQueueTokensOverflow.selector);
         exitQueue.pushRequest(user1, EVE_PRICE_1, uint256(type(uint128).max) + 1, PRICE_TOLERANCE_1_PCT);
+    }
+}
+
+/// @dev AMM stand-in that pulls two requests in one call and moves the live price in between.
+contract PinProbeAMM is MockAMMStub {
+    function pullTwiceMovingPrice(
+        IExitQueue _queue,
+        uint256 _batchId,
+        address _first,
+        address _second,
+        uint256 _newPrice
+    ) external returns (uint256 priceAfterFirstPull_, bool secondClosedDueToSlippage_) {
+        _queue.pullRequest(_batchId, _first);
+        eveBasePriceInETH = _newPrice;
+        (, priceAfterFirstPull_,,,) = _queue.batchInfo(_batchId);
+        _queue.pullRequest(_batchId, _second);
+        (, secondClosedDueToSlippage_,,,) = _queue.requestInfo(_batchId, _second);
     }
 }

@@ -977,15 +977,16 @@ contract StrategyManagerTest is ProtocolTestBase {
         assertEq(strategyManager.totalNAVInETH(), navBefore);
     }
 
-    function test_TotalNAVInETH_DeductsPricedQueueLiability() public {
+    function test_TotalNAVInETH_PricedQueueNotDeducted() public {
         uint256 navBefore = strategyManager.totalNAVInETH();
         _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
         controllerContract.priceBatch();
 
+        // Audit G1: queued EVE stays equity until paid, so pricing does not carve out NAV.
         (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertGt(liability, 0);
-        assertGt(escrowed, 0);
-        assertEq(strategyManager.totalNAVInETH(), navBefore - liability);
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
+        assertEq(strategyManager.totalNAVInETH(), navBefore);
     }
 
     function test_TotalNAVInETH_PricedQueueLiabilityLapsesAfterExpiry() public {
@@ -1016,65 +1017,34 @@ contract StrategyManagerTest is ProtocolTestBase {
         strategyManager.totalNAVInETH();
     }
 
-    function test_TotalNAVInETH_QueuedLiabilityFreeze_BlastRadiusAndEscapeHatch() public {
+    /// @dev FREEZE_RUNBOOK scenario 10 is retired by audit G1: a post-price NAV drop reprices
+    ///      everyone, including the priced batch, instead of freezing NAV.
+    function test_TotalNAVInETH_PostPriceNAVDrop_DoesNotFreeze() public {
         vm.deal(user1, SECOND_USER_DEPOSIT);
         vm.prank(user1);
         amm.enter{value: SECOND_USER_DEPOSIT}(1);
 
         uint256 pricedBatchId = _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
         controllerContract.priceBatch();
-        uint256 unpricedBatchId = _queueExitAs(user1, UNPRICED_QUEUE_EXIT_ETH);
-        assertGt(unpricedBatchId, pricedBatchId);
+        uint256 priceAtPricing = amm.eveBasePriceInETH();
 
-        // Simulate a post-price NAV drop (IL / market move): wipe in-flight ETH so
-        // gross NAV < locked-in liability. Documented freeze — FREEZE_RUNBOOK scenario 10.
-        vm.deal(controller, 0);
-        vm.deal(address(strategyManager), 0);
-        vm.deal(address(amm), 0);
+        // Post-price NAV drop (IL / market move).
+        vm.deal(controller, controller.balance / 2);
 
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        strategyManager.totalNAVInETH();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        strategyManager.totalNAVInUSD();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.eveBasePriceInETH();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.evePremiumPriceInETH();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.eveBasePriceInUSD();
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.evePremiumPriceInUSD();
+        uint256 navAfterDrop = strategyManager.totalNAVInETH();
+        assertGt(navAfterDrop, 0);
+        assertLt(amm.eveBasePriceInETH(), priceAtPricing, "the drop reprices everyone");
+        (, uint256 settlementPrice,,,) = exitQueue.batchInfo(pricedBatchId);
+        assertEq(settlementPrice, amm.eveBasePriceInETH(), "the priced batch floats with NAV");
 
-        address lateEntrant = makeAddr("lateEntrant");
-        vm.deal(lateEntrant, LATE_ENTER_ETH);
-        vm.prank(lateEntrant);
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.enter{value: LATE_ENTER_ETH}(1);
-
-        uint256 leftover = token.balanceOf(address(this));
-        token.approve(address(amm), leftover);
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        amm.exit(LEFTOVER_EXIT_ETH, leftover, 0);
-
-        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
-        controllerContract.priceBatch();
-
-        // Unpriced requests do not read NAV — cancel still works during the freeze.
-        vm.prank(user1);
-        amm.cancelRedemption(unpricedBatchId);
-        assertGt(token.balanceOf(user1), 0);
-
-        // Priced in-window requests cannot close; users wait out the 3-day window.
+        // The cancel lock is kept: priced in-window requests cannot close.
         vm.expectRevert(IExitQueue.ExitQueueRequestCannotBeClosed.selector);
         amm.cancelRedemption(pricedBatchId);
 
         vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertEq(liability, 0);
-        assertEq(escrowed, 0);
-        strategyManager.totalNAVInETH();
-
+        uint256 priceBeforeCancel = amm.eveBasePriceInETH();
         amm.cancelRedemption(pricedBatchId);
+        assertEq(amm.eveBasePriceInETH(), priceBeforeCancel, "escape-hatch cancel must not move the price");
     }
 
     function test_Harvest_RevertsWhenQueuedLiabilityExceedsNAV() public {

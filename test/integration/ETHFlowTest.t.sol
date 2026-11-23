@@ -846,7 +846,9 @@ contract ETHFlowTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.convertAssets(tokensToBurn, finalEvePrice);
 
         // Fund Controller with ETH for redemption
-        vm.deal(address(controller), ethToRedeem);
+        // Controller balance is in NAV: only top up a real shortfall, so the live settlement
+        // price (audit G1) is not moved by test funding.
+        if (address(controller).balance < ethToRedeem) vm.deal(address(controller), ethToRedeem);
 
         // Step 5: Keeper processes the request (pull-over-push: ETH is credited, not pushed)
         uint256 userBalanceBefore = user.balance;
@@ -916,7 +918,11 @@ contract ETHFlowTest is ProtocolTestBase {
         uint256 ethToRedeem2 = Math.convertAssets(tokensToBurn2, finalEvePrice);
 
         // Fund Controller
-        vm.deal(address(controller), ethToRedeem1 + ethToRedeem2);
+        // Controller balance is in NAV: only top up a real shortfall, so the live settlement
+        // price (audit G1) is not moved by test funding.
+        if (address(controller).balance < ethToRedeem1 + ethToRedeem2) {
+            vm.deal(address(controller), ethToRedeem1 + ethToRedeem2);
+        }
 
         // Process both requests (pull-over-push: ETH is credited, not pushed)
         uint256 user1BalanceBefore = user.balance;

@@ -178,10 +178,10 @@ interface IExitQueue {
     function liveScanFromBatchId() external view returns (uint256);
 
     /**
-     * @notice Live share-price offsets for in-window priced, unfinished batches.
-     * `liabilityETH` is deducted from StrategyManager NAV; `escrowedSupply` from EVE
-     * `totalSupply` in AMM pricing and fee mint. Both are zero for unpriced requests
-     * (still cancellable equity) and for batches past `MAX_BATCH_PROCESSING_TIME`.
+     * @notice Share-price offsets for queued redemptions. Always `(0, 0)` since v1.1.0
+     * (audit G1): queued EVE stays ordinary equity in NAV and supply until it is paid, and
+     * is paid at the live price, so there is no fixed-price carve-out that could lapse and
+     * step the price. Kept so AMM and StrategyManager pricing need no change.
      * @return liabilityETH ETH reserved for in-window priced redemptions
      * @return escrowedSupply EVE still escrowed on the AMM for those redemptions
      */
@@ -191,7 +191,10 @@ interface IExitQueue {
      * @notice Get the information about a batch
      * @param _batchId The ID of the batch
      * @return canBeProcessed Whether the batch can be processed
-     * @return finalEvePrice The final EVE price
+     * @return finalEvePrice The EVE settlement price. For a priced batch inside
+     * `MAX_BATCH_PROCESSING_TIME` this is the live `AMM.eveBasePriceInETH()`, or the price
+     * {pullRequest} already pinned earlier in the same transaction (audit G1). For an
+     * unpriced (0) or lapsed batch it is the value stored by {priceBatch}.
      * @return totalTokensToBurn The total amount of tokens to burn
      * @return createdAt The timestamp when the batch was created
      * @return pricedAt The timestamp when the batch was priced
@@ -276,7 +279,8 @@ interface IExitQueue {
      * - Contract is not paused
      * - `_evePrice` is non-zero
      * - `[liveScanFromBatchId, currentBatchId)` width is below `MAX_LIVE_PRICED_BATCHES`
-     * @param _evePrice The final EVE settlement price (the live base price, NAV−L / live supply)
+     * @param _evePrice The base price at pricing time. Recorded for reference only: requests
+     * settle at the live price at payout (audit G1), see {batchInfo}.
      */
     function priceBatch(uint256 _evePrice) external;
 
@@ -301,6 +305,11 @@ interface IExitQueue {
      * Requirements:
      * - Contract is not paused
      * - Batch is priced and still inside `MAX_BATCH_PROCESSING_TIME`
+     * - The settlement price is non-zero (`ExitQueueZeroPrice`)
+     *
+     * Slippage is judged against the settlement price: the live `AMM.eveBasePriceInETH()`
+     * on the first pull of the batch in a transaction, which is then pinned in transient
+     * storage for the rest of that transaction (audit G1).
      * @param _batchId The ID of the batch
      * @param _user The address of the user
      */
