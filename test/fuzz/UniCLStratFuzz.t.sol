@@ -21,7 +21,8 @@ contract UniCLStratFuzzTest is UniCLStratTestBase {
         assertTrue(strategy.initTicks());
         assertTrue(strategy.isHealthy());
         assertLe(strategy.navInETH(), _amount);
-        assertApproxEqAbs(strategy.navInETH(), _amount, NAV_TOLERANCE);
+        assertLe(_grossNavInETH(), _amount);
+        assertApproxEqAbs(_grossNavInETH(), _amount, NAV_TOLERANCE);
     }
 
     function testFuzz_WithdrawTracksAccounting(uint256 _depositAmount, uint256 _withdrawAmount) public {
@@ -30,14 +31,39 @@ contract UniCLStratFuzzTest is UniCLStratTestBase {
 
         _deposit(_depositAmount);
         uint256 navBeforeWithdrawal = strategy.navInETH();
+        uint256 grossNavBeforeWithdrawal = _grossNavInETH();
         if (_withdrawAmount > navBeforeWithdrawal) _withdrawAmount = navBeforeWithdrawal;
 
         vm.prank(strategyManager);
-        strategy.withdraw(receiver, _withdrawAmount);
+        uint256 withdrawn = strategy.withdraw(receiver, _withdrawAmount);
 
-        assertEq(receiver.balance, _withdrawAmount);
-        assertEq(strategy.totalWithdrawn(), _withdrawAmount);
-        assertApproxEqAbs(strategy.navInETH(), navBeforeWithdrawal - _withdrawAmount, NAV_TOLERANCE);
+        // A near-full request (padded by slippage it covers NAV) drains the strategy and may pay
+        // out more than requested; any other request pays out exactly what was asked.
+        bool nearFull = _withdrawAmount * (10_000 + strategy.swapSlippageBps()) >= navBeforeWithdrawal * 10_000;
+        if (nearFull) {
+            assertGe(withdrawn, _withdrawAmount);
+        } else {
+            assertEq(withdrawn, _withdrawAmount);
+        }
+        assertEq(receiver.balance, withdrawn);
+        assertEq(strategy.totalWithdrawn(), withdrawn);
+        assertApproxEqAbs(_grossNavInETH(), grossNavBeforeWithdrawal - withdrawn, NAV_TOLERANCE);
+    }
+
+    function testFuzz_NetNavNeverExceedsGross(uint256 _weth, uint256 _paired, uint256 _slippageBps) public {
+        _weth = bound(_weth, 0, MAX_PAYABLE_DEPOSIT);
+        _paired = bound(_paired, 0, MAX_PAYABLE_DEPOSIT);
+        _slippageBps = bound(_slippageBps, 1, strategy.MAX_SWAP_SLIPPAGE_BPS());
+        vm.prank(admin);
+        strategy.setSwapSlippageBps(_slippageBps);
+        weth.mint(address(strategy), _weth);
+        pairedToken.mint(address(strategy), _paired);
+
+        // Mock oracle prices are 1:1, so the gross value is the plain balance sum.
+        uint256 gross = _weth + _paired;
+        assertLe(strategy.navInETH(), gross);
+        assertEq(gross - strategy.navInETH(), _exitCost(_paired));
+        assertLe(_exitCost(_paired), _paired);
     }
 
     function testFuzz_MaxDepositReflectsCapacity(uint256 _amount) public {

@@ -22,31 +22,32 @@ interface IExitQueue {
      * New batches are supposed to be created once in some relatively short interval of time,
      * and users can submit only one request per batch.
      *
-     * Note: existing batch can be sealed (and thus, new batch can be created) only
+     * Note: existing batch can be priced (and thus, new batch can be created) only
      * if it is not empty. Hence, difference between current timestamp and `createdAt`
      * can be greater than standard interval between batches.
-     *
-     * A batch carries no price. Sealing fixes its membership and starts the
-     * `MAX_BATCH_PROCESSING_TIME` window; each request settles at the live EVE price of the
-     * transaction that pays it. Queued EVE therefore stays ordinary equity until it is burned,
-     * and nothing has to be re-added to the share price if the window lapses.
      */
     struct RedemptionRequestBatch {
-        // Packed into slot 0 (8 + 8 + 16). `canBeProcessed` is redundant with `sealedAt != 0`
-        // for "is sealed"; lapse is the clock, not this flag (it stays true after expiry).
-        uint64 sealedAt;
+        // Packed into slot 0 (8 + 8 + 16): hot path for liveRedemptionOffsets loads this
+        // word then `finalEvePrice`. `canBeProcessed` is redundant with `pricedAt != 0`
+        // for "is priced"; lapse is the clock, not this flag (it stays true after expiry).
+        uint64 pricedAt;
         uint64 createdAt;
         uint128 totalTokensToBurn;
+        // This price is in ETH terms (and normalized to 18 decimals)
+        uint256 finalEvePrice;
         bool canBeProcessed;
         mapping(address user => RedemptionRequest request) requests;
+        // Iteration order is NOT arrival order: `EnumerableSet.remove` moves the last user into
+        // the freed slot, so every pull / close reorders the tail. Payment order is therefore
+        // not first come, first served (audit G10) — see {unprocessedUsers}.
         EnumerableSet.AddressSet unprocessedUsers;
     }
 
     /**
-     * @notice Emitted when a batch is sealed
+     * @notice Emitted when a batch is priced
      * @param batchId The ID of the batch
      */
-    event BatchSealed(uint256 indexed batchId);
+    event BatchPriced(uint256 indexed batchId);
 
     /**
      * @notice Emitted when a request is pushed to a batch
@@ -59,10 +60,9 @@ interface IExitQueue {
      * @notice Emitted when a request is pulled from a batch.
      * @param batchId The ID of the batch
      * @param user The address of the user
-     * @param evePrice The live EVE price (ETH terms, 18 decimals) the request was settled against
      * @param isWithinTolerance Whether the request is within the price tolerance
      */
-    event RequestPulled(uint256 indexed batchId, address indexed user, uint256 evePrice, bool isWithinTolerance);
+    event RequestPulled(uint256 indexed batchId, address indexed user, bool isWithinTolerance);
 
     /**
      * @notice Emitted when a request is manually closed by user.
@@ -89,7 +89,7 @@ interface IExitQueue {
     error ExitQueueBatchCannotBeProcessed();
 
     /**
-     * @notice Thrown when batch is empty and cannot be sealed
+     * @notice Thrown when batch is empty and cannot be priced
      */
     error ExitQueueBatchIsEmpty();
 
@@ -104,8 +104,8 @@ interface IExitQueue {
     error ExitQueueRequestAlreadyProcessed();
 
     /**
-     * @notice Thrown when request cannot be closed at the moment (batch is sealed
-     * and still within `MAX_BATCH_PROCESSING_TIME` of `sealedAt`).
+     * @notice Thrown when request cannot be closed at the moment (batch is priced
+     * and still within `MAX_BATCH_PROCESSING_TIME` of `pricedAt`).
      */
     error ExitQueueRequestCannotBeClosed();
 
@@ -121,9 +121,17 @@ interface IExitQueue {
 
     /**
      * @notice Thrown when `pullRequest` is called after `MAX_BATCH_PROCESSING_TIME`.
-     * The batch's users may cancel from then on, so settlement is no longer allowed.
+     * Live NAV has already dropped the batch's liability; settlement is no longer allowed.
      */
     error ExitQueueBatchExpired();
+
+    /**
+     * @notice Thrown when pricing would leave more than `MAX_LIVE_PRICED_BATCHES` ids in
+     * `[liveScanFromBatchId, currentBatchId)`. Production overlap is ~3 (keeper `minBatchAge`
+     * vs `MAX_BATCH_PROCESSING_TIME`); keeper `MAX_BATCH_SCAN` is this same cap (aliased). A
+     * DoS bound, not a target.
+     */
+    error ExitQueueTooManyLivePricedBatches();
 
     /**
      * @notice Thrown when adding to `totalTokensToBurn` would exceed `uint128`.
@@ -131,13 +139,20 @@ interface IExitQueue {
     error ExitQueueTokensOverflow();
 
     /**
-     * @notice Maximum time after `sealedAt` during which `pullRequest` may settle a
-     * sealed batch. Within the window a request cannot be cancelled; after it,
-     * `pullRequest` reverts (`ExitQueueBatchExpired`) and users recover their EVE via
-     * `closeRequest` / `AMM.cancelRedemption` (escape hatch). The lapse does not move the
-     * share price: queued EVE was equity throughout, at the live price.
+     * @notice Maximum time after `pricedAt` during which `pullRequest` may settle a
+     * priced batch. After this window, `pullRequest` reverts (`ExitQueueBatchExpired`)
+     * because live NAV has already dropped the batch's liability. Users recover via
+     * `closeRequest` / `AMM.cancelRedemption` (escape hatch).
      */
     function MAX_BATCH_PROCESSING_TIME() external pure returns (uint256);
+
+    /**
+     * @notice Max width of `[liveScanFromBatchId, currentBatchId)` that `priceBatch` will
+     * allow. Keeper `MAX_BATCH_SCAN` is this value (both alias `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`).
+     * Not a production cadence target — keeper `minBatchAge` (1 day) vs `MAX_BATCH_PROCESSING_TIME`
+     * (3 days) implies ~3 overlapping priced batches. The cap is an `enter()` gas / DoS bound.
+     */
+    function MAX_LIVE_PRICED_BATCHES() external pure returns (uint256);
 
     /**
      * @notice Get the version of the exit queue
@@ -147,23 +162,53 @@ interface IExitQueue {
 
     /**
      * @notice Current batch ID, i.e. ID of the batch where the next request will be added.
-     * The batch with this ID is not sealed yet; batch IDs start from 1.
+     * The batch with this ID is not priced yet; batch IDs start from 1.
      * @return uint256 The current batch ID
      */
     function currentBatchId() external view returns (uint256);
 
     /**
+     * @notice Left cursor of the live-NAV scan `[liveScanFromBatchId, currentBatchId)`.
+     * Every id in that range has been priced (`priceBatch` increments `currentBatchId`
+     * only after marking the batch priced). Equals `currentBatchId` when the range is
+     * empty — including at initialize, when batch 1 is the unpriced current batch.
+     * Advanced on writes past empty or expired batches; the view still time-filters
+     * so liability lapses at expiry with no tx.
+     */
+    function liveScanFromBatchId() external view returns (uint256);
+
+    /**
+     * @notice Share-price offsets for queued redemptions. Always `(0, 0)` since v1.1.0
+     * (audit G1): queued EVE stays ordinary equity in NAV and supply until it is paid, and
+     * is paid at the live price, so there is no fixed-price carve-out that could lapse and
+     * step the price. Kept so AMM and StrategyManager pricing need no change.
+     * @return liabilityETH ETH reserved for in-window priced redemptions
+     * @return escrowedSupply EVE still escrowed on the AMM for those redemptions
+     */
+    function liveRedemptionOffsets() external view returns (uint256 liabilityETH, uint256 escrowedSupply);
+
+    /**
      * @notice Get the information about a batch
      * @param _batchId The ID of the batch
-     * @return canBeProcessed Whether the batch can be processed (it has been sealed)
-     * @return totalTokensToBurn The total amount of tokens still queued in the batch
+     * @return canBeProcessed Whether the batch can be processed
+     * @return finalEvePrice The EVE settlement price. For a priced batch inside
+     * `MAX_BATCH_PROCESSING_TIME` this is the live `AMM.eveBasePriceInETH()`, or the price
+     * {pullRequest} already pinned earlier in the same transaction (audit G1). For an
+     * unpriced (0) or lapsed batch it is the value stored by {priceBatch}.
+     * @return totalTokensToBurn The total amount of tokens to burn
      * @return createdAt The timestamp when the batch was created
-     * @return sealedAt The timestamp when the batch was sealed (0 if not sealed yet)
+     * @return pricedAt The timestamp when the batch was priced
      */
     function batchInfo(uint256 _batchId)
         external
         view
-        returns (bool canBeProcessed, uint256 totalTokensToBurn, uint256 createdAt, uint256 sealedAt);
+        returns (
+            bool canBeProcessed,
+            uint256 finalEvePrice,
+            uint256 totalTokensToBurn,
+            uint256 createdAt,
+            uint256 pricedAt
+        );
 
     /**
      * @notice Get the information about a request
@@ -203,6 +248,12 @@ interface IExitQueue {
 
     /**
      * @notice Get the addresses of the unprocessed users in a batch in the given range
+     * @dev Indices are positions in an OpenZeppelin `EnumerableSet`, NOT arrival order. Each
+     *      `pullRequest` / `closeRequest` (payment, slippage close, cancellation) swaps the last
+     *      user into the removed slot, so the order depends on the history of removals. The
+     *      keepers settle a batch from index 0 upward, so when a batch can only be partly
+     *      funded, who is paid first is not first come, first served; users left unpaid when the
+     *      batch expires recover their EVE via `AMM.cancelRedemption` (audit G10).
      * @param _batchId The ID of the batch
      * @param _startIndex The start index (inclusive)
      * @param _endIndex The end index (exclusive)
@@ -215,21 +266,23 @@ interface IExitQueue {
 
     /**
      * @notice Get the addresses of all the unprocessed users in a batch
+     * @dev Same ordering caveat as the ranged overload: set order, not arrival order.
      * @param _batchId The ID of the batch
      * @return users The addresses of the unprocessed users
      */
     function unprocessedUsers(uint256 _batchId) external view returns (address[] memory users);
 
     /**
-     * @notice Seal the current batch (makes it possible to process requests inside it) and
-     * open the next one. Sealing fixes the batch's membership and starts its
-     * `MAX_BATCH_PROCESSING_TIME` window; it does not fix a settlement price.
+     * @notice Price a batch (makes it possible to process requests inside it)
      *
      * Requirements:
      * - Contract is not paused
-     * - The current batch is not empty
+     * - `_evePrice` is non-zero
+     * - `[liveScanFromBatchId, currentBatchId)` width is below `MAX_LIVE_PRICED_BATCHES`
+     * @param _evePrice The base price at pricing time. Recorded for reference only: requests
+     * settle at the live price at payout (audit G1), see {batchInfo}.
      */
-    function sealBatch() external;
+    function priceBatch(uint256 _evePrice) external;
 
     /**
      * @notice Push a request to a current batch
@@ -247,19 +300,20 @@ interface IExitQueue {
         returns (uint256 batchId_);
 
     /**
-     * @notice Pull a request from a batch (removes it from the batch) for settlement at
-     * `_evePrice`. The request is flagged `closedDueToSlippage` when `_evePrice` is below the
-     * user's request-time price by more than their tolerance.
+     * @notice Pull a request from a batch (removes it from the batch)
      *
      * Requirements:
      * - Contract is not paused
-     * - `_evePrice` is non-zero
-     * - Batch is sealed and still inside `MAX_BATCH_PROCESSING_TIME`
+     * - Batch is priced and still inside `MAX_BATCH_PROCESSING_TIME`
+     * - The settlement price is non-zero (`ExitQueueZeroPrice`)
+     *
+     * Slippage is judged against the settlement price: the live `AMM.eveBasePriceInETH()`
+     * on the first pull of the batch in a transaction, which is then pinned in transient
+     * storage for the rest of that transaction (audit G1).
      * @param _batchId The ID of the batch
      * @param _user The address of the user
-     * @param _evePrice The live EVE price (ETH terms, 18 decimals) the request settles at
      */
-    function pullRequest(uint256 _batchId, address _user, uint256 _evePrice) external;
+    function pullRequest(uint256 _batchId, address _user) external;
 
     /**
      * @notice Close a request in a batch.

@@ -11,7 +11,6 @@ import {ExitQueue} from "../../src/contracts/ExitQueue.sol";
 import {QueueKeeperExecutor} from "../../src/contracts/automation/QueueKeeperExecutor.sol";
 
 import {Auth} from "../../src/libraries/Auth.sol";
-import {Math} from "../../src/libraries/Math.sol";
 import {IKeeperExecutorBase} from "../../src/interfaces/automation/IKeeperExecutorBase.sol";
 import {IQueueKeeperExecutor} from "../../src/interfaces/automation/IQueueKeeperExecutor.sol";
 
@@ -23,7 +22,6 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
     uint256 public constant STALENESS_INTERVAL = 3600;
     uint256 public constant BOOTSTRAP_DEPOSIT = 10 ether;
     uint256 public constant EXIT_ETH = 1 ether;
-    uint256 public constant NAV_GAIN_ETH = 1 ether;
     uint256 public constant PRICE_TOLERANCE = 1e17;
     uint256 public constant MIN_TOKENS_TO_MINT = 1;
 
@@ -92,7 +90,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         QueueKeeperExecutor fresh = new QueueKeeperExecutor(address(registry));
         vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
         vm.prank(automationAccount);
-        fresh.perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(uint256(1)));
+        fresh.perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(uint256(1)));
     }
 
     function test_Perform_OnlyAllowlistedCaller() public {
@@ -101,11 +99,11 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
 
         vm.expectRevert(abi.encodeWithSelector(IKeeperExecutorBase.KeeperExecutorUnauthorizedCaller.selector, stranger));
         vm.prank(stranger);
-        executor.perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
+        executor.perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
 
         // The allowlisted proxy still goes through.
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
-        (bool canBeProcessed,,,) = exitQueue.batchInfo(batchId);
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
+        (bool canBeProcessed,,,,) = exitQueue.batchInfo(batchId);
         assertTrue(canBeProcessed);
     }
 
@@ -122,7 +120,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
 
         vm.expectRevert(IKeeperExecutorBase.KeeperExecutorNoAllowedCallers.selector);
         vm.prank(automationAccount);
-        executor.perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(uint256(1)));
+        executor.perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(uint256(1)));
     }
 
     function test_AllowExecutorCaller_RejectsZeroAddress() public {
@@ -141,7 +139,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
 
         vm.expectRevert(Pausable.EnforcedPause.selector);
         vm.prank(automationAccount);
-        executor.perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
+        executor.perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
     }
 
     // ============ Checker ============
@@ -149,7 +147,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
     function test_Checker_NoWork_CannotExec() public {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
         _perform(uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
 
         (IQueueKeeperExecutor.QueueAction action,,) = executor.queueUpkeepStatus();
@@ -161,7 +159,7 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         assertTrue(execPayload.length > 0);
     }
 
-    function test_Checker_SealBatch_CalldataTargetsPerform() public {
+    function test_Checker_PriceBatch_CalldataTargetsPerform() public {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
 
@@ -170,48 +168,48 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         assertTrue(execPayload.length > 4);
 
         // execPayload is the exact calldata for perform: submitting it as the
-        // allowlisted proxy must seal the batch.
+        // allowlisted proxy must price the batch.
         vm.prank(automationAccount);
         (bool ok,) = address(executor).call(execPayload);
         assertTrue(ok);
-        (bool canBeProcessed,,,) = exitQueue.batchInfo(batchId);
+        (bool canBeProcessed,,,,) = exitQueue.batchInfo(batchId);
         assertTrue(canBeProcessed);
     }
 
-    function test_MaxBatchScan_IsSharedScanWidth() public view {
-        assertEq(executor.MAX_BATCH_SCAN(), 25);
+    function test_MaxBatchScan_MatchesExitQueueLiveCap() public view {
+        assertEq(executor.MAX_BATCH_SCAN(), exitQueue.MAX_LIVE_PRICED_BATCHES());
     }
 
     // ============ Cursor skippability ============
 
-    /// @dev `_isBatchSkippable` checks "is sealed" FIRST. An unsealed batch — including an
+    /// @dev `_isBatchSkippable` checks "is priced" FIRST. An unpriced batch — including an
     ///      empty current batch — must never be skipped: it can still receive requests and
-    ///      has to be sealed before the cursor may move past it.
-    function test_NextLiveBatchId_DoesNotSkipUnsealedCurrentBatch() public view {
-        // Nothing queued yet: batch 1 is current, unsealed, and empty.
+    ///      has to be priced before the cursor may move past it.
+    function test_NextLiveBatchId_DoesNotSkipUnpricedCurrentBatch() public view {
+        // Nothing queued yet: batch 1 is current, unpriced, and empty.
         assertEq(exitQueue.currentBatchId(), 1);
         assertEq(exitQueue.unprocessedUsersCount(1), 0);
         assertEq(executor.nextLiveBatchIdToProcess(), 1);
         assertEq(executor.nextBatchIdToProcess(), 1);
     }
 
-    /// @dev A sealed batch with no unprocessed users is fully settled — the cursor advances.
+    /// @dev A priced batch with no unprocessed users is fully settled — the cursor advances.
     function test_NextLiveBatchId_SkipsFullySettledBatch() public {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
         _perform(uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
 
         assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
         assertGt(executor.nextLiveBatchIdToProcess(), batchId);
     }
 
-    /// @dev A sealed batch past MAX_BATCH_PROCESSING_TIME is skippable — users self-serve via
+    /// @dev A priced batch past MAX_BATCH_PROCESSING_TIME is skippable — users self-serve via
     ///      the ExitQueue escape hatch, so the keeper stops blocking the cursor on it.
     function test_NextLiveBatchId_SkipsExpiredBatch() public {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
 
         // Still inside the processing window: real work, cursor stays put.
         assertEq(executor.nextLiveBatchIdToProcess(), batchId);
@@ -230,27 +228,27 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
 
     // ============ Actions ============
 
-    function test_QueueUpkeepStatus_AndSealBatch() public {
+    function test_QueueUpkeepStatus_AndPriceBatch() public {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
 
         (IQueueKeeperExecutor.QueueAction action, uint256 statusBatchId, uint256 count) = executor.queueUpkeepStatus();
-        assertEq(uint8(action), uint8(IQueueKeeperExecutor.QueueAction.SealBatch));
+        assertEq(uint8(action), uint8(IQueueKeeperExecutor.QueueAction.PriceBatch));
         assertEq(statusBatchId, batchId);
         assertEq(count, 0);
 
         vm.expectEmit(true, true, false, true, address(executor));
-        emit IQueueKeeperExecutor.QueueUpkeepPerformed(IQueueKeeperExecutor.QueueAction.SealBatch, batchId, 0);
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
+        emit IQueueKeeperExecutor.QueueUpkeepPerformed(IQueueKeeperExecutor.QueueAction.PriceBatch, batchId, 0);
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
 
-        (bool canBeProcessed,,,) = exitQueue.batchInfo(batchId);
+        (bool canBeProcessed,,,,) = exitQueue.batchInfo(batchId);
         assertTrue(canBeProcessed);
     }
 
     function test_ProcessRequests_RevalidatesRange() public {
         uint256 batchId = _queueExit(user, EXIT_ETH);
         _warpPastMinBatchAge();
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
+        _perform(uint8(IQueueKeeperExecutor.QueueAction.PriceBatch), abi.encode(batchId));
 
         (IQueueKeeperExecutor.QueueAction action, uint256 statusBatchId, uint256 count) = executor.queueUpkeepStatus();
         assertEq(uint8(action), uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests));
@@ -268,52 +266,5 @@ contract QueueKeeperExecutorTest is ProtocolTestBase {
         _perform(uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
         assertEq(exitQueue.unprocessedUsersCount(batchId), 0);
         assertApproxEqAbs(amm.claimableBalances(user), EXIT_ETH, 1);
-    }
-
-    // ============ Live-price settlement (audit G1) ============
-
-    /// @dev A sealed batch carries no price: a NAV gain between seal and payout is paid to the
-    ///      queued user too, at the price live when the keeper processes the request.
-    function test_ProcessRequests_SettlesAtLivePriceNotSealTimePrice() public {
-        uint256 batchId = _queueExit(user, EXIT_ETH);
-        _warpPastMinBatchAge();
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
-        uint256 priceAtSeal = amm.eveBasePriceInETH();
-
-        vm.deal(address(controller), address(controller).balance + NAV_GAIN_ETH);
-        uint256 priceAtPayout = amm.eveBasePriceInETH();
-        assertGt(priceAtPayout, priceAtSeal);
-
-        (,,, uint256 tokensToBurn,) = exitQueue.requestInfo(batchId, user);
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.ProcessRequests), abi.encode(batchId, uint256(0), uint256(1)));
-
-        assertEq(amm.claimableBalances(user), Math.convertAssets(tokensToBurn, priceAtPayout));
-        assertGt(amm.claimableBalances(user), Math.convertAssets(tokensToBurn, priceAtSeal));
-    }
-
-    /// @dev Affordability is costed at the live price against the Controller's own balance.
-    ///      Moving ETH between the Controller and the AMM float leaves NAV — and so the live
-    ///      price — unchanged, which isolates the balance side of the check.
-    function test_AffordableRequests_CostedAtLivePrice() public {
-        uint256 batchId = _queueExit(user, EXIT_ETH);
-        _warpPastMinBatchAge();
-        _perform(uint8(IQueueKeeperExecutor.QueueAction.SealBatch), abi.encode(batchId));
-        assertEq(executor.affordableRequests(batchId), 1);
-
-        uint256 priceBefore = amm.eveBasePriceInETH();
-        uint256 controllerBalance = address(controller).balance;
-        vm.deal(address(controller), 0);
-        vm.deal(address(amm), address(amm).balance + controllerBalance);
-        assertEq(amm.eveBasePriceInETH(), priceBefore);
-        assertEq(executor.affordableRequests(batchId), 0);
-        (IQueueKeeperExecutor.QueueAction action,,) = executor.queueUpkeepStatus();
-        assertEq(uint8(action), uint8(IQueueKeeperExecutor.QueueAction.None));
-
-        (,,, uint256 tokensToBurn,) = exitQueue.requestInfo(batchId, user);
-        uint256 cost = Math.convertAssets(tokensToBurn, priceBefore);
-        vm.deal(address(amm), address(amm).balance - cost);
-        vm.deal(address(controller), cost);
-        assertEq(amm.eveBasePriceInETH(), priceBefore);
-        assertEq(executor.affordableRequests(batchId), 1);
     }
 }

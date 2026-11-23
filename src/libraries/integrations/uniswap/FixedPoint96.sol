@@ -1,5 +1,6 @@
-// SPDX-License-Identifier: MIT
-// Adapted from Uniswap V3 Core's FixedPoint96 library.
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Adapted from Uniswap V3 Core's FixedPoint96 library (GPL-2.0-or-later):
+// https://github.com/Uniswap/v3-core/blob/main/contracts/libraries/FixedPoint96.sol
 pragma solidity ^0.8.30;
 // solhint-disable compiler-version, use-natspec
 

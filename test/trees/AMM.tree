@@ -71,7 +71,7 @@ AMM::exit(uint256 _requestedETH, uint256 _maxTokensToBurn, uint256 _priceToleran
 │   ├── When _priceTolerance is greater than Math.SCALE_FACTOR (1e18)
 │   │   └── It should revert with AMMInvalidRange
 │   ├── When calculating tokensToBurn and ethToRedeem
-│   │   └── It should use the live base price in ETH (NAV / totalSupply via _basePriceFromNAV)
+│   │   └── It should use the live base price in ETH (NAV−L / liveSupply via _basePriceFromNAV)
 │   ├── When tokensToBurn calculation results in zero
 │   │   └── It should revert with AMMTooLowETHRequested
 │   ├── When _maxTokensToBurn is less than calculated tokensToBurn
@@ -105,7 +105,7 @@ AMM::exit(uint256 _requestedETH, uint256 _maxTokensToBurn, uint256 _priceToleran
 └── Given caller is not whitelisted
     └── It should still succeed (exit() never consults the Whitelist — users can always leave)
 
-AMM::processRedemption(uint256 _batchId, address _user, uint256 _evePrice) payable
+AMM::processRedemption(uint256 _batchId, address _user) payable
 ├── Given caller does not have CONTROLLER_ROLE
 │   └── It should revert with AccessControlUnauthorizedAccount
 ├── Given batch ID does not exist or user not in batch
@@ -113,15 +113,15 @@ AMM::processRedemption(uint256 _batchId, address _user, uint256 _evePrice) payab
 ├── Given request is already processed
 │   └── It should revert (ExitQueue reverts)
 ├── Given request was closed due to slippage (closedDueToSlippage == true)
-│   ├── It should call exitQueue.pullRequest() with _evePrice
+│   ├── It should call exitQueue.pullRequest()
 │   ├── It should refund tokens to user (via safeTransfer)
 │   ├── It should return all sent ETH (msg.value) to controller (via sendValue)
 │   ├── It should NOT credit claimableBalances or update lockedForClaims
 │   └── It should emit RedemptionProcessed event
 └── Given request is within price tolerance (sufficient ETH sent)
-    ├── It should call exitQueue.pullRequest() with _evePrice to mark as processed
+    ├── It should call exitQueue.pullRequest() to mark as processed
     ├── It should burn tokens from AMM (via burn)
-    ├── It should calculate ethToRedeem from _evePrice (the live base price the Controller read in this transaction)
+    ├── It should calculate ethToRedeem from finalEvePrice (via batchInfo)
     ├── It should credit ethToRedeem to claimableBalances[user] (pull-over-push, not direct transfer)
     ├── It should increment lockedForClaims by ethToRedeem
     ├── It should return excess ETH (msg.value - ethToRedeem) to controller
@@ -211,15 +211,15 @@ AMM::evePremiumPriceInETH()
 ├── Given total supply is zero
 │   └── It should revert with AMMZeroTotalSupply
 └── Given valid state
-    ├── It should match formula: (NAV * NORMALIZATION_FACTOR) / (totalSupply * cw / SCALE_FACTOR)
-    ├── It should use totalNAVInETH() (strategies + controller + AMM free balance; nothing deducted for the ExitQueue)
-    └── It should use totalSupply (queued EVE, sealed or not, stays in until it is settled)
+    ├── It should match formula: (liveNAV * NORMALIZATION_FACTOR) / (liveSupply * cw / SCALE_FACTOR)
+    ├── It should use totalNAVInETH() (strategies + controller + AMM free balance − in-window priced liability)
+    └── It should use liveSupply = totalSupply − in-window priced escrow (unpriced queued EVE stays in)
 
 AMM::eveBasePriceInETH()
 └── Given valid state
-    ├── It should match formula: (NAV * NORMALIZATION_FACTOR) / totalSupply
-    ├── It should use totalNAVInETH() (strategies + controller + AMM free balance; nothing deducted for the ExitQueue)
-    └── It should use totalSupply (queued EVE, sealed or not, stays in until it is settled)
+    ├── It should match formula: (liveNAV * NORMALIZATION_FACTOR) / liveSupply
+    ├── It should use totalNAVInETH() (strategies + controller + AMM free balance − in-window priced liability)
+    └── It should use liveSupply = totalSupply − in-window priced escrow (unpriced queued EVE stays in)
 
 AMM::evePremiumPriceInUSD()
 ├── Given total supply is zero
@@ -234,7 +234,7 @@ AMM::eveBasePriceInUSD()
 ├── Given oracle price is stale
 │   └── It should revert
 └── Given valid state
-    ├── It should match formula: totalNAVInUSD() * NORMALIZATION_FACTOR / totalSupply
+    ├── It should match formula: totalNAVInUSD() * NORMALIZATION_FACTOR / liveSupply
     └── It should equal eveBasePriceInETH() converted via oracle.convertTokenToUSD
 
 AMM::Pricing & NAV (ETH-first)
@@ -249,15 +249,14 @@ AMM::Pricing & NAV (ETH-first)
 ├── Given ETH locked for pending claims (after processRedemption)
 │   ├── totalNAVInETH() should use AMM freeBalance() only (exclude lockedForClaims)
 │   └── enter premium price should not be inflated by locked claim ETH
-├── Given a sealed ExitQueue batch (audit G1)
-│   ├── sealBatch should change neither totalNAVInETH() nor the base price
-│   ├── a NAV gain after sealing should be shared by every EVE, queued or not
-│   ├── the request should settle at the base price live at payout, not at seal time
-│   └── settlement should leave the base price unchanged for remaining holders (rounding dust only)
-├── Given the sealed batch passes MAX_BATCH_PROCESSING_TIME
-│   ├── NAV, base price and premium price should be identical in the last second of the window and the first second after it
-│   ├── cancelRedemption via the escape hatch should not move the base price
-│   ├── entering just before the lapse should gain nothing from it
+├── Given an in-window priced ExitQueue batch (audit G1)
+│   ├── pricing should move neither NAV nor price (queued EVE stays in NAV and supply)
+│   ├── settlement should pay the price live in the paying transaction
+│   ├── settlement should leave the price unchanged for remaining holders (up to rounding dust)
+│   └── processRequests should settle every request in the call at one price
+├── Given the priced batch is past MAX_BATCH_PROCESSING_TIME
+│   ├── NAV, base and premium price should not step between the last in-window and first lapsed second
+│   ├── the escape-hatch cancel should not move the price
 │   └── pullRequest / processRedemption should revert with ExitQueueBatchExpired
 ├── Given prices recomputed after operations
 │   ├── ETH prices should follow NAV/supply and change after enter

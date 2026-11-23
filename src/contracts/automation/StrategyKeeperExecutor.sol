@@ -48,11 +48,11 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
     using Math for uint256;
     using Auth for IRegistry;
 
-    /// @dev Gas-bounded scan of sealed batches. Bound to `ExitQueueLimits.MAX_BATCH_SCAN` (shared
-    ///      with `QueueKeeperExecutor`) so a change cannot silently desync the two keepers.
-    ///      A DoS bound, not cadence — `minBatchAge` vs `MAX_BATCH_PROCESSING_TIME` implies
-    ///      ~3 overlapping batches.
-    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_BATCH_SCAN;
+    /// @dev Gas-bounded scan of priced batches. Bound to `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`
+    ///      (same cap as `ExitQueue.MAX_LIVE_PRICED_BATCHES`) so a change cannot silently
+    ///      desync the keeper. A DoS bound, not cadence — `minBatchAge` vs
+    ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping batches.
+    uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
     uint256 public constant MAX_USERS_COST_SCAN = 50;
 
     uint256 private constant _DEFAULT_MIN_DEPOSIT_ETH = 0.1 ether;
@@ -171,13 +171,12 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
             controller.checkAndRebalanceStrategies();
             emit StrategyUpkeepPerformed(strategyAction, 0);
         } else if (strategyAction == StrategyAction.WithdrawShortfall) {
-            uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
-            uint256 controllerBalance = address(controller).balance;
-            if (needsETH <= controllerBalance || needsETH - controllerBalance < minWithdrawETH) {
+            uint256 withdrawAmount =
+                _shortfallWithdrawal(_pendingRedemptionNeedsETH(registry_), address(controller).balance);
+            if (withdrawAmount == 0 || _totalMaxWithdrawal(strategyManager_) == 0) {
                 revert KeeperExecutorNoUpkeepNeeded();
             }
-            uint256 shortfall = needsETH - controllerBalance;
-            uint256 actualWithdrawn = controller.withdrawFromStrategies(shortfall);
+            uint256 actualWithdrawn = controller.withdrawFromStrategies(withdrawAmount);
             emit StrategyUpkeepPerformed(strategyAction, actualWithdrawn);
         } else if (strategyAction == StrategyAction.ProvideExitLiquidity) {
             uint256 topUp =
@@ -230,11 +229,9 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
 
         uint256 needsETH = _pendingRedemptionNeedsETH(registry_);
         uint256 controllerBalance = controller.balance;
-        if (
-            needsETH > controllerBalance && needsETH - controllerBalance >= minWithdrawETH
-                && _totalMaxWithdrawal(strategyManager_) > 0
-        ) {
-            return (StrategyAction.WithdrawShortfall, needsETH - controllerBalance);
+        uint256 withdrawAmount = _shortfallWithdrawal(needsETH, controllerBalance);
+        if (withdrawAmount > 0 && _totalMaxWithdrawal(strategyManager_) > 0) {
+            return (StrategyAction.WithdrawShortfall, withdrawAmount);
         }
 
         uint256 topUp = _exitLiquidityTopUp(registry_, controllerBalance, needsETH);
@@ -268,9 +265,13 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         return false;
     }
 
+    /// @dev Liquidity `withdrawFromStrategies` can actually reach: weight-0 strategies are excluded
+    ///      from batch withdrawals, so counting them would recommend a WithdrawShortfall that
+    ///      cannot pull anything (audit G6).
     function _totalMaxWithdrawal(IStrategyManager _strategyManager) internal view returns (uint256 total) {
         address[] memory strategies = _strategyManager.strategies();
         for (uint256 i = 0; i < strategies.length; i++) {
+            if (_strategyManager.withdrawalWeight(strategies[i]) == 0) continue;
             total += IStrategy(strategies[i]).maxWithdrawal();
         }
     }
@@ -296,6 +297,20 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         }
     }
 
+    /// @dev ETH to pull from strategies so the Controller can settle priced batches: the
+    ///      shortfall `_needsETH - _controllerBalance`, rounded UP to `minWithdrawETH` (audit G9).
+    ///      `minWithdrawETH` is a dust floor on withdrawal size, not a threshold below which a
+    ///      shortfall is ignored — a gap smaller than the floor would otherwise leave a priced
+    ///      batch unfunded (and uncancellable) until it expires. Over-pulling by less than
+    ///      `minWithdrawETH` is harmless: it stays idle, or is redeployed by DepositExcess only
+    ///      once it clears the reserve and `minDepositETH`, which cannot re-open the shortfall.
+    ///      Returns 0 when nothing is owed.
+    function _shortfallWithdrawal(uint256 _needsETH, uint256 _controllerBalance) internal view returns (uint256) {
+        if (_needsETH <= _controllerBalance) return 0;
+        uint256 shortfall = _needsETH - _controllerBalance;
+        return shortfall < minWithdrawETH ? minWithdrawETH : shortfall;
+    }
+
     function _idleExcess(uint256 _controllerBalance, uint256 _needsETH) internal view returns (uint256) {
         uint256 reserved = controllerReserveETH + _needsETH;
         return _controllerBalance > reserved ? _controllerBalance - reserved : 0;
@@ -317,36 +332,28 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         return shortfall < excess ? shortfall : excess;
     }
 
-    /// @dev ETH the Controller must hold to settle in-window sealed batches, costed at the
-    ///      live EVE base price — the price they will actually settle at, so the figure moves
-    ///      with NAV until they are paid. The current unsealed batch is still cancellable, so
-    ///      counting it here would let a queue-then-cancel loop pull LP (`WithdrawShortfall`)
-    ///      and re-deposit (`DepositExcess`). After `sealBatch` the batch is in
-    ///      `[cursor, currentBatchId)`. The price is read only when that range is non-empty,
-    ///      so an idle queue never touches NAV.
+    /// @dev ETH the Controller must hold to settle in-window priced batches. Matches
+    ///      share-price accounting: the current unpriced batch is still cancellable
+    ///      equity (`liveRedemptionOffsets` is 0), so counting it here would let a
+    ///      queue-then-cancel loop pull LP (`WithdrawShortfall`) and re-deposit
+    ///      (`DepositExcess`). After `priceBatch` the batch is in
+    ///      `[cursor, currentBatchId)` and is costed at `finalEvePrice`.
     function _pendingRedemptionNeedsETH(IRegistry _registry) internal view returns (uint256 needsETH) {
         IExitQueue queue = IExitQueue(_registry.exitQueue());
         uint256 currentBatchId = queue.currentBatchId();
 
         uint256 cursor = IQueueKeeperExecutor(_registry.queueKeeperExecutor()).nextLiveBatchIdToProcess();
-        if (cursor >= currentBatchId) return 0;
-
-        uint256 evePrice = IAMM(_registry.amm()).eveBasePriceInETH();
 
         uint256 scanLimit = cursor + MAX_BATCH_SCAN;
         for (uint256 batchId = cursor; batchId < currentBatchId && batchId < scanLimit; batchId++) {
-            needsETH += _batchSettlementCost(queue, batchId, evePrice);
+            needsETH += _batchSettlementCost(queue, batchId);
         }
     }
 
-    function _batchSettlementCost(IExitQueue _queue, uint256 _batchId, uint256 _evePrice)
-        internal
-        view
-        returns (uint256 cost)
-    {
-        (bool canBeProcessed,,, uint256 sealedAt) = _queue.batchInfo(_batchId);
+    function _batchSettlementCost(IExitQueue _queue, uint256 _batchId) internal view returns (uint256 cost) {
+        (bool canBeProcessed, uint256 finalEvePrice,,, uint256 pricedAt) = _queue.batchInfo(_batchId);
         if (!canBeProcessed) return 0;
-        if (sealedAt > 0 && block.timestamp > sealedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
+        if (pricedAt > 0 && block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
 
         uint256 count = _queue.unprocessedUsersCount(_batchId);
         if (count == 0) return 0;
@@ -358,8 +365,8 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
             (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
                 _queue.requestInfo(_batchId, users[i]);
 
-            if (!_evePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)) {
-                cost += tokensToBurn.convertAssets(_evePrice);
+            if (!finalEvePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)) {
+                cost += tokensToBurn.convertAssets(finalEvePrice);
             }
         }
     }

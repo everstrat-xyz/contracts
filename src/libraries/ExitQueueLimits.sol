@@ -3,12 +3,14 @@ pragma solidity ^0.8.13;
 
 /**
  * @title ExitQueueLimits
- * @notice Shared sealed-batch scan width for the keeper executors.
- * @dev `QueueKeeperExecutor.MAX_BATCH_SCAN` and `StrategyKeeperExecutor.MAX_BATCH_SCAN` both
- *      alias this so the two gas-bounded scans cannot silently desync.
+ * @notice Shared live-priced batch cap for ExitQueue and the keeper executors.
+ * @dev `ExitQueue.MAX_LIVE_PRICED_BATCHES` and keeper `MAX_BATCH_SCAN` both alias this
+ *      so a cap change cannot silently desync the keeper's gas-bounded scan.
+ *      Direct `ExitQueue.MAX_LIVE_PRICED_BATCHES` references from other contracts
+ *      do not compile (interface getter shadows the constant).
  *      Not a production cadence target — keeper `minBatchAge` vs
- *      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping sealed batches.
+ *      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping priced batches.
  */
 library ExitQueueLimits {
-    uint256 internal constant MAX_BATCH_SCAN = 25;
+    uint256 internal constant MAX_LIVE_PRICED_BATCHES = 25;
 }

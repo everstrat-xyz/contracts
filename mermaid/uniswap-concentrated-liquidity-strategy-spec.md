@@ -161,7 +161,7 @@ Deposits should be blocked when `isCalm()` is false. The calm gate is load-beari
 `withdraw(_receiver, _amount)` is called by `StrategyManager` and returns native ETH. It is **not** calm-gated on the unwind (see [Calm-Period Gate Asymmetry](#calm-period-gate-asymmetry)).
 
 1. If idle native ETH covers `_amount`, pay out directly — no pool or Converter interaction.
-2. Otherwise spend all idle ETH toward the payout and source only the remainder from WETH: poke-then-accrue, remove both positions, convert paired token via `_convertToWeth()` (exact-output, independently bounded by TWAP quote / Chainlink / slippage — not by `_isCalm()`).
+2. Otherwise spend all idle ETH toward the payout and source only the remainder from WETH: poke-then-accrue, remove both positions, convert paired token via `UniCLStratLib.tryTopUpWeth()` (exact-output, independently bounded by TWAP quote / Chainlink / slippage — not by `_isCalm()`; best effort since audit G7 — a reverting swap emits `WethConversionSkipped` and the payout is a short fill).
 3. Unwrap only the WETH portion needed; deliver idle ETH + unwrapped remainder in a single native transfer.
 4. Re-add remaining inventory **only if `_isCalm()`** (minting into a dislocated pool is the thing the calm gate exists to prevent). If not calm, inventory stays idle until a later calm `deposit` / `investIdleETH` / `rebalance`.
 5. Emit `FundsWithdrawn(actualAmount)`.
@@ -267,7 +267,7 @@ The deposit-path *swap* is not the vulnerable part: `_swapToMainRatio()` (v2) ta
 - **The conversion swap is independently bounded** (adapter TWAP quote, `MAX_QUOTE_DEVIATION_BPS = 200`, `MAX_SWAP_SLIPPAGE_BPS = 200` padded off the TWAP quote). A seriously manipulated pool misses the bound and reverts the whole `withdraw()`, burn included. Residual window: between the calm band (`maxTickDeviation = 60` ≈ 0.6%) and the ~2% swap tolerance, max extraction is ~2% minus the fee tier on the *converted* notional only.
 - **`maxWithdrawal()` advertises full `navInETH()` whenever unpaused.** A calm revert would make that view a lie and keep StrategyManager routing amounts to a strategy that always fails.
 
-A hard `_isCalm()` revert on `withdraw()` is therefore ranked last among alternatives (status quo; fractional burn so a small withdrawal does not park the whole position idle; skip `_convertToWeth()` when not calm and return a short fill).
+A hard `_isCalm()` revert on `withdraw()` is therefore ranked last among alternatives (status quo; fractional burn so a small withdrawal does not park the whole position idle; skip the conversion when not calm and return a short fill — since audit G7 a reverting conversion already yields a short fill).
 
 ## DAO Performance Fees
 
@@ -275,7 +275,7 @@ Performance fees are implemented **inside each strategy** (LP-fee base for UniCL
 
 ### StrategyManager model (source of truth)
 
-- **Fee base (v1)**: Uncharged LP trading fees only — tracked in native token quantities inside UniCLStrat; converted to ETH at view/settle time via Oracle.
+- **Fee base (v1)** uses uncharged LP trading fees tracked in native token quantities. At preview and settlement, UniCLStrat values WETH 1:1 and applies the same estimated exit-cost deduction as NAV to the paired-token fees after Oracle conversion to ETH. The deduction combines the configured `exitRouteFeePips` estimate and `swapSlippageBps`, with the cost rounded up to the nearest wei.
 - **Accrual**: UniCLStrat pokes positions (`burn(..., 0)`) then accrues `tokensOwed` deltas into cumulative counters on every remove/collect path (`deposit` / `withdraw` / `rebalance` / `investIdleETH` / pause unwind) — required before collect zeros owed, otherwise the pending view's live delta is lost. Accruing after a full burn would briefly include withdrawn principal in `tokensOwed` and inflate the fee base — poke-then-accrue avoids that. `sync()` is poke-only (NAV and pending update from `tokensOwed`; no counter flush). `pendingPerformanceFeeInETH(bps)` includes already-materialized fees via a live `tokensOwed - snapshot` delta; `settlePerformanceFee(bps)` accrues that same base then charges (no poke — settlement matches the pending view that SM/keepers gate on). Unpoked fee growth waits for `sync()` or remove/collect. StrategyManager delegates via `pendingPerformanceFeeInETH(strategy)`.
 - **Settlement**: `Controller.harvestPerformanceFeeFromStrategy(s)` → StrategyManager calls `strategy.settlePerformanceFee(bps)` (accrue already-materialized fees, no poke); one EVE mint per batch at `evesToMint = totalFeeETH * supply / (totalNAV - totalFeeETH)`.
 - **Lifecycle**:
@@ -336,7 +336,7 @@ Because `navInETH()` feeds AMM pricing (via `StrategyManager.totalNAVInETH()`), 
 Constructor takes a single `IUniCLStrat.DeploymentConfig` struct:
 
 - **`AddressConfig`**: `registry`, `weth`, `pool`, `factory` (Oracle / Converter resolved via Registry; constructor verifies `factory.getPool(token0, token1, pool.fee()) == pool` so a malicious interface-compatible pool cannot be trusted as the mint-callback caller)
-- **`RouteConfig`**: `swapAdapter`, `wethToPairedTokenPath`, `pairedTokenToWethPath`
+- **`RouteConfig`** includes `swapAdapter`, `wethToPairedTokenPath`, `pairedTokenToWethPath`, and `exitRouteFeePips`. Set `EXIT_ROUTE_FEE_PIPS` to the initial estimated fee of the paired-token to WETH route in parts per million (500 for 0.05%). Route updates supply the applicable fee estimate in the same transaction.
 - **`StrategyConfig`**: `positionWidth`, `rebalanceTickThreshold`, `maxTickDeviation`, `twapInterval`, `shortTwapInterval`, `maxTotalNAV`
 
 Constructor and `setTwapInterval` / `setShortTwapInterval` probe `pool.observe([interval, 0])` (`UniCLStratPoolTWAPNotAvailable`) **and** require in-use `slot0.observationCardinality >= ceil(interval / MAX_BLOCK_SECONDS)` floored at `MIN_OBSERVATION_CARDINALITY = 150` (`UniCLStratInsufficientObservationCardinality`). Intervals above `MAX_TWAP_INTERVAL` (`uint16.max × 12` s) revert `UniCLStratInvalidConfig` — no V3 ring can densely cover a longer lookback. Observe-only still accepts a quiet cardinality-1 pool that marks at a spot-extrapolated TWAP; cardinality-only does not prove the lookback will compute. Grow the ring and wait for fill before deploy.
@@ -349,7 +349,7 @@ Mutable parameters (`ADMIN_ROLE` on Registry):
 - `setMaxTickDeviation(int56)`
 - `setRebalanceTickThreshold(int24)`
 - `setTwapInterval(uint32)` / `setShortTwapInterval(uint32)`
-- `setRouteConfig(adapter, wethToPairedPath, pairedToWethPath)`
+- `setRouteConfig(adapter, wethToPairedPath, pairedToWethPath, exitRouteFeePips)` updates the adapter, paths, and fee estimate together and emits `RouteConfigUpdated`. A change to the estimate re-marks NAV and pending LP performance fees.
 - `setSwapSlippageBps(uint256)`
 - `setMaxTotalNAV(uint256)`
 - `pause()` / `unpause()`

@@ -1,5 +1,6 @@
-// SPDX-License-Identifier: MIT
-// Adapted from Uniswap V3 Periphery's LiquidityAmounts library.
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Adapted from Uniswap V3 Periphery's LiquidityAmounts library (GPL-2.0-or-later):
+// https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/LiquidityAmounts.sol
 pragma solidity ^0.8.30;
 // solhint-disable compiler-version, use-natspec, reason-string, gas-custom-errors, ordering
 // solhint-disable gas-strict-inequalities

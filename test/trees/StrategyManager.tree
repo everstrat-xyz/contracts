@@ -462,6 +462,25 @@ StrategyManager::addSupportedERC20(address _token)
     ├── It should include the token's balance value in totalNAVInETH()
     └── It should emit SupportedERC20Added
 
+StrategyManager::convertSupportedERC20ToETH(address _token, address _adapter, bytes _path, uint256 _amountIn, uint256 _minETHOut)
+├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
+│   └── It should revert with RegistryClientCallerHasNoneOfRoles
+├── Given token is not whitelisted
+│   └── It should revert with StrategyManagerERC20NotSupported
+├── Given _amountIn is zero
+│   └── It should revert with StrategyManagerNoBalanceToRecover
+├── Given _path does not sell _token for WETH
+│   └── It should revert with StrategyManagerInvalidRecoveryRoute
+├── Given the swap returns less than max(_minETHOut, Oracle value less MAX_ERC20_RECOVERY_SLIPPAGE_BPS)
+│   └── It should revert with ConverterInsufficientOutput
+├── Given contract is paused
+│   └── It should convert (recovery works while paused)
+└── Given valid parameters
+    ├── It should grant itself CONVERTER_CALLER_ROLE via the Converter on first use
+    ├── It should send the ETH out to the Controller and leave no WETH or allowance behind
+    ├── It should change totalNAVInETH() only by the realised discount to the Oracle price
+    └── It should emit SupportedERC20Converted
+
 StrategyManager::removeSupportedERC20(address _token)
 ├── Given caller has neither ADMIN_ROLE nor SECURITY_ROLE on Registry
 │   └── It should revert with RegistryClientCallerHasNoneOfRoles
@@ -509,11 +528,16 @@ StrategyManager::totalNAVInETH()
 │   ├── It should include AMM free balance in ETH (excludes lockedForClaims)
 │   ├── Given AMM holds locked claim ETH
 │   │   └── It should exclude lockedForClaims from NAV (count only freeBalance)
-│   ├── Given queued ExitQueue requests (audit G1)
-│   │   ├── It should not deduct an unsealed batch
-│   │   ├── It should not deduct a sealed batch (queued EVE is equity until it is burned)
-│   │   ├── It should be unchanged when a sealed batch passes MAX_BATCH_PROCESSING_TIME
-│   │   └── A NAV drop after sealing should reprice every EVE instead of freezing NAV, enter/exit and the price views
+│   ├── Given in-window priced ExitQueue batches
+│   │   └── It should not deduct them (audit G1: liveRedemptionOffsets is always (0, 0))
+│   ├── Given a priced batch is past MAX_BATCH_PROCESSING_TIME
+│   │   └── It should not change NAV at lapse
+│   ├── Given NAV drops after a batch is priced
+│   │   ├── It should not freeze (FREEZE_RUNBOOK scenario 10 retired); the drop reprices everyone
+│   │   ├── Priced in-window requests still cannot be closed (ExitQueueRequestCannotBeClosed)
+│   │   └── After MAX_BATCH_PROCESSING_TIME the escape-hatch cancel does not move the price
+│   ├── Given liveRedemptionOffsets is mocked to exceed gross NAV (defensive check kept)
+│   │   └── It should revert with StrategyManagerQueuedLiabilityExceedsNAV
 │   └── It should return total NAV in ETH (18 decimals)
 ├── Given whitelisted supported ERC-20s
 │   ├── Given a supported ERC-20 has a non-zero balance

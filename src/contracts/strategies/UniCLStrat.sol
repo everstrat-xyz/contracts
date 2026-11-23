@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Solidity compiles GPL-licensed Uniswap V3 math into this contract's bytecode.
+// Distribution of the combined build is subject to GPL-2.0-or-later.
 // solhint-disable compiler-version, import-path-check, use-natspec, ordering
 // solhint-disable gas-strict-inequalities, max-states-count
 // solhint-disable immutable-vars-naming, gas-indexed-events, gas-increment-by-one
@@ -138,6 +140,9 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     /// @notice Adapter-specific route bytes for pairedToken -> WETH swaps
     bytes public pairedTokenToWethPath;
 
+    /// @notice Estimated paired-token to WETH route fee in parts per million.
+    uint256 public exitRouteFeePips;
+
     /// @notice Slippage tolerance for inventory-balancing swaps (in basis points, 1-200)
     uint256 public swapSlippageBps;
 
@@ -172,7 +177,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (factory.getPool(_token0Address, _token1Address, _fee) != _params.addresses.pool) {
             revert UniCLStratInvalidPool();
         }
-
         tickSpacing = IUniswapV3Pool(_params.addresses.pool).tickSpacing();
         positionWidth = _params.strategy.positionWidth;
         rebalanceTickThreshold = _params.strategy.rebalanceTickThreshold;
@@ -184,11 +188,13 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // a dense average rather than a cardinality-1 spot extrapolation.
         _requireTwapOracle(twapInterval);
         _requireTwapOracle(shortTwapInterval);
+        _validateRouteConfig(
+            _params.routes.swapAdapter, _params.routes.wethToPairedTokenPath, _params.routes.pairedTokenToWethPath
+        );
         swapAdapter = _params.routes.swapAdapter;
         wethToPairedTokenPath = _params.routes.wethToPairedTokenPath;
         pairedTokenToWethPath = _params.routes.pairedTokenToWethPath;
-
-        _validateRouteConfig();
+        exitRouteFeePips = _params.routes.exitRouteFeePips;
 
         swapSlippageBps = DEFAULT_SWAP_SLIPPAGE_BPS;
         _genesisTimestamp = block.timestamp;
@@ -221,6 +227,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     }
 
     // ============ Strategy Views ============
+    /// @dev Net of the estimated cost of converting the paired-token inventory back to WETH
+    ///      (`exitRouteFeePips` plus `swapSlippageBps`); see {UniCLStratLib-inventoryValueInETH}.
     function navInETH() public view returns (uint256) {
         return address(this).balance
             + UniCLStratLib.inventoryValueInETH(
@@ -231,7 +239,9 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
                 address(token1),
                 positionMain,
                 positionAlt,
-                _twapSqrtPrice()
+                _twapSqrtPrice(),
+                exitRouteFeePips,
+                swapSlippageBps
             );
     }
 
@@ -346,8 +356,16 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        TWAP/oracle (a skewed burn does not crystallize IL into NAV), the conversion swap
      *        is independently bounded, and a calm revert would stall exit liquidity when
      *        redemptions spike. See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
+     *      The paired -> WETH swap is best effort: if it reverts (quote fails, outside the
+     *      oracle band, or the swap itself fails) the paired token stays in the strategy, still
+     *      in NAV, {WethConversionSkipped} is emitted and the payout is whatever ETH/WETH is
+     *      already held — a partial withdrawal instead of a blocked one (audit G7).
      *      In both paths the receiver gets a single native ETH transfer and the return value
-     *      is the ETH actually delivered.
+     *      is the ETH actually delivered. A near-full request triggers a drain: after sourcing
+     *      WETH for the request, the strategy tries to swap leftover paired token to WETH and
+     *      pays out all WETH on hand. The payout can exceed `_amount` by the unspent part of
+     *      the NAV exit-cost mark-down plus the difference between NAV and the request. The
+     *      drain is best effort, so a failed swap leaves the payout available.
      */
     function withdraw(address _receiver, uint256 _amount)
         external
@@ -375,13 +393,19 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             // from WETH via liquidity removal and paired-token conversion.
             uint256 _remainder = _amount - _idleETH;
 
-            // Padded by slippage, a (near-)full request would burn every position on the
-            // partial path anyway: unwind outright and skip the route-cost probe.
+            // Near-full requests use a full unwind when idle WETH falls short. The
+            // route-cost probe sizes partial burns; any swap still quotes its actual size.
             bool _nearFullWithdrawal = _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
             _sourceWeth(_remainder, _nearFullWithdrawal);
 
+            // NAV is net of the estimated exit cost, so a near-full request that converts for
+            // less than the estimate would strand the difference (and leave more than the
+            // removal residue behind). Drain it: best-effort convert the leftover paired token
+            // and pay out all WETH.
+            if (_nearFullWithdrawal) UniCLStratLib.drainPairedToWeth();
+
             uint256 _wethBalance = weth.balanceOf(address(this));
-            uint256 _wethToUnwrap = _wethBalance < _remainder ? _wethBalance : _remainder;
+            uint256 _wethToUnwrap = _nearFullWithdrawal || _wethBalance < _remainder ? _wethBalance : _remainder;
             _withdrawn = _idleETH + _wethToUnwrap;
             if (_withdrawn == 0) revert UniCLStratInsufficientWETH();
 
@@ -430,7 +454,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      * @dev Over already-materialized `tokensOwed` plus stored counters (via the live
      *      `tokensOwed - snapshot` delta in `UniCLStratLib.unchargedLpFeeAmounts`). Unpoked fee growth is
      *      invisible until `sync()` or a remove/collect poke. Accrue is not required for the
-     *      view — only for durable counter updates on settle/remove.
+     *      view — only for durable counter updates on settle/remove. Paired-token fees carry
+     *      the same estimated exit-cost deduction as NAV.
      */
     function pendingPerformanceFeeInETH(uint256 _performanceFeeBps) external view returns (uint256 feeETH) {
         if (_performanceFeeBps == 0 || paused()) return 0;
@@ -455,9 +480,7 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
 
         (uint256 _uncharged0, uint256 _uncharged1) =
             UniCLStratLib.accrueLpFees(pool, _lpFees, positionMain, positionAlt);
-        if (_uncharged0 == 0 && _uncharged1 == 0) return 0;
-
-        uint256 _feeBaseETH = _pairValueInETH(_uncharged0, _uncharged1);
+        uint256 _feeBaseETH = _lpFeeBaseInETH(_uncharged0, _uncharged1);
         feeETH = _feeBaseETH * _performanceFeeBps / BASIS_POINTS;
         // Dust base: floor-division to zero must not write off the uncharged amounts.
         if (feeETH == 0) return 0;
@@ -493,16 +516,29 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         _setMaxTotalNAV(_newMaxTotalNAV);
     }
 
+    /// @dev Updating the exit route fee estimate re-marks NAV and pending LP performance fees.
     function setRouteConfig(
         address _swapAdapter,
         bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
+        bytes calldata _pairedTokenToWethPath,
+        uint256 _exitRouteFeePips
     ) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        _setRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
+        _validateExitRouteFee(_exitRouteFeePips);
+        _validateRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
+
+        swapAdapter = _swapAdapter;
+        wethToPairedTokenPath = _wethToPairedTokenPath;
+        pairedTokenToWethPath = _pairedTokenToWethPath;
+        exitRouteFeePips = _exitRouteFeePips;
+
+        emit RouteConfigUpdated(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath, _exitRouteFeePips);
     }
 
     /**
      * @notice Sets the slippage tolerance for inventory-balancing swaps
+     * @dev Also moves `navInETH()`: the paired-token inventory is marked down by this tolerance
+     *      plus the exit route fee estimate. A change re-marks NAV, the EVE price, and the pending
+     *      performance fee in the block it executes. See `docs/FREEZE_RUNBOOK.md` for scheduling.
      * @param _newSwapSlippageBps Slippage in basis points (must not exceed MAX_SWAP_SLIPPAGE_BPS)
      */
     function setSwapSlippageBps(uint256 _newSwapSlippageBps) external onlyAuthRole(Auth.ADMIN_ROLE) {
@@ -619,28 +655,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         maxTotalNAV = _newMaxTotalNAV;
     }
 
-    function _setRouteConfig(
-        address _swapAdapter,
-        bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
-    ) private {
-        // Validate against the new values before writing storage, so no partial state
-        // mutation occurs even transiently. The storage-based _validateRouteConfig()
-        // is used by the constructor where the values are already written.
-        _validateRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
-
-        swapAdapter = _swapAdapter;
-        wethToPairedTokenPath = _wethToPairedTokenPath;
-        pairedTokenToWethPath = _pairedTokenToWethPath;
-
-        emit RouteConfigUpdated(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
-    }
-
-    /// @dev Validates route config from constructor-initialised storage (values already written)
-    function _validateRouteConfig() private view {
-        _validateRouteConfig(swapAdapter, wethToPairedTokenPath, pairedTokenToWethPath);
-    }
-
     /// @dev Validates route config from explicit parameters (check before write)
     function _validateRouteConfig(
         address _swapAdapter,
@@ -711,6 +725,30 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function selfRevokePairedTokenConverterAllowance() external {
         if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
         pairedToken.forceApprove(address(_registry.converter()), 0);
+    }
+
+    /**
+     * @notice Self-call hook that buys `_amountOut` WETH or drains the paired balance when `_amountOut` is zero.
+     * @dev Callable only by the strategy itself. Exists so `withdraw` can attempt the
+     *      paired -> WETH swap inside a try/catch — an untradable route must not block a
+     *      partial payout (audit G7). Oracle-bounded exact-output swap with
+     *      balance-cap fallback for a positive output amount. The drain uses an exact-input
+     *      swap and requires a positive oracle value and an in-band quote.
+     */
+    function selfConvertToWeth(uint256 _amountOut) external {
+        if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
+        UniCLStratLib.SwapConfig memory _config = _swapConfig();
+        bytes memory _path = pairedTokenToWethPath;
+
+        if (_amountOut != 0) {
+            UniCLStratLib.swapExactOut(_config, _path, _amountOut);
+            return;
+        }
+
+        uint256 _balance = pairedToken.balanceOf(address(this));
+        if (_balance == 0) return;
+        (bool _tradable,) = UniCLStratLib.routeCostBps(_config, _path, _balance, false);
+        if (_tradable) _swapViaRouteExactAmountIn(_config, _path, _balance);
     }
 
     function _unpauseStrategy() private {
@@ -918,8 +956,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
      *        everything is unwound as a fallback.
      *      - Route untradable (quote fails or is outside the oracle band): full unwind first,
      *        which maximises the WETH obtained without swapping.
-     *      - `_fullUnwind` set by the caller (near-full withdrawal): full unwind first, without
-     *        probing the route, since the partial burn would consume every position anyway.
+     *      - `_fullUnwind` set by the caller (near-full withdrawal): full unwind first. If
+     *        WETH is still short after the burn, the exact-output swap quotes that shortfall.
      */
     function _sourceWeth(uint256 _wethTarget, bool _fullUnwind) internal {
         uint256 _wethBalance = weth.balanceOf(address(this));
@@ -934,9 +972,8 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             if (_tradable) {
                 uint256 _needed = _shortfall * (BASIS_POINTS + swapSlippageBps + _costBps) / BASIS_POINTS;
                 uint256 _pairedBalance = pairedToken.balanceOf(address(this));
-                uint256 _idlePairedValue = address(pairedToken) == address(token0)
-                    ? _pairValueInETH(_pairedBalance, 0)
-                    : _pairValueInETH(0, _pairedBalance);
+                uint256 _idlePairedValue =
+                    UniCLStratLib.pairedValueInETH(IOracle(_registry.oracle()), address(pairedToken), _pairedBalance);
                 if (_needed > _idlePairedValue) _decreaseLiquidityForValue(_needed - _idlePairedValue);
             }
         }
@@ -945,8 +982,11 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         // fallback when the partial path still leaves WETH short and liquidity remains.
         for (uint256 _pass; _pass < 2; ++_pass) {
             if (_fullUnwind) _removeLiquidityAndCollect();
-            _convertToWeth(_wethTarget);
-            if (weth.balanceOf(address(this)) >= _wethTarget || !_hasPoolLiquidity()) return;
+            UniCLStratLib.tryTopUpWeth(address(weth), _wethTarget);
+            if (
+                weth.balanceOf(address(this)) >= _wethTarget
+                    || !UniCLStratLib.hasPoolLiquidity(pool, positionMain, positionAlt)
+            ) return;
             _fullUnwind = true;
         }
     }
@@ -970,15 +1010,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     /// @dev Full unwind of both positions with LP-fee accrual; see {UniCLStratLib-removeAllLiquidity}.
     function _removeLiquidityAndCollect() internal {
         UniCLStratLib.removeAllLiquidity(pool, _lpFees, positionMain, positionAlt);
-    }
-
-    function _positionLiquidity(Position memory _position) internal view returns (uint128 _liquidity) {
-        if (!_positionIsValid(_position)) return 0;
-        (_liquidity,,,,) = pool.positions(_positionKey(_position));
-    }
-
-    function _hasPoolLiquidity() internal view returns (bool) {
-        return _positionLiquidity(positionMain) > 0 || _positionLiquidity(positionAlt) > 0;
     }
 
     /// @dev True when the main range has been placed and spot has left it or drifted past
@@ -1042,10 +1073,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         );
     }
 
-    function _positionKey(Position memory _position) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(address(this), _position.tickLower, _position.tickUpper));
-    }
-
     function _positionIsValid(Position memory _position) internal pure returns (bool) {
         return _position.tickLower < _position.tickUpper && _position.tickLower >= TickMath.MIN_TICK
             && _position.tickUpper <= TickMath.MAX_TICK;
@@ -1056,47 +1083,43 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
     function _unchargedLpFeesInETH() internal view returns (uint256) {
         (uint256 _uncharged0, uint256 _uncharged1) =
             UniCLStratLib.unchargedLpFeeAmounts(pool, _lpFees, positionMain, positionAlt);
-        return _pairValueInETH(_uncharged0, _uncharged1);
+        return _lpFeeBaseInETH(_uncharged0, _uncharged1);
     }
 
-    /**
-     * @notice Tops up the strategy's WETH balance to `_targetWethAmount` by swapping
-     *         paired tokens for exactly the missing WETH amount.
-     * @dev Uses an exact-output swap so the strategy receives precisely the WETH it is
-     *      missing (no oracle-estimate drift on the output side). If the paired-token
-     *      balance cannot cover the required input, {_swapViaRouteExactAmountOut} falls back
-     *      to a best-effort exact-input swap of the whole balance — mirroring the
-     *      historical "cap the input at the available balance" behaviour.
-     */
-    function _convertToWeth(uint256 _targetWethAmount) internal {
-        uint256 _wethBalance = weth.balanceOf(address(this));
-        if (_wethBalance >= _targetWethAmount) return;
-
-        _swapViaRouteExactAmountOut(pairedTokenToWethPath, _targetWethAmount - _wethBalance);
+    function _lpFeeBaseInETH(uint256 _amount0, uint256 _amount1) internal view returns (uint256) {
+        if (_amount0 == 0 && _amount1 == 0) return 0;
+        return UniCLStratLib.adjustedPairValueInETH(
+            IOracle(_registry.oracle()),
+            address(weth),
+            address(token0),
+            address(token1),
+            _amount0,
+            _amount1,
+            exitRouteFeePips,
+            swapSlippageBps
+        );
     }
 
     function _swapWethToPairedToken(uint256 _amountIn) internal {
         if (_amountIn == 0) return;
-        uint256 _swapAmountIn = _amountIn > weth.balanceOf(address(this)) ? weth.balanceOf(address(this)) : _amountIn;
-        _swapViaRouteExactAmountIn(wethToPairedTokenPath, _swapAmountIn);
+        uint256 _balance = weth.balanceOf(address(this));
+        uint256 _swapAmountIn = _amountIn > _balance ? _balance : _amountIn;
+        _swapViaRouteExactAmountIn(_swapConfig(), wethToPairedTokenPath, _swapAmountIn);
     }
 
     function _swapPairedTokenToWeth(uint256 _amountIn) internal {
         if (_amountIn == 0) return;
         uint256 _balance = pairedToken.balanceOf(address(this));
         uint256 _swapAmountIn = _amountIn > _balance ? _balance : _amountIn;
-        _swapViaRouteExactAmountIn(pairedTokenToWethPath, _swapAmountIn);
+        _swapViaRouteExactAmountIn(_swapConfig(), pairedTokenToWethPath, _swapAmountIn);
     }
 
     /// @dev Oracle-bounded exact-input swap; security model documented in
     ///      {UniCLStratLib-swapExactIn} (TWAP quote, oracle floor/ceiling, slippage cap).
-    function _swapViaRouteExactAmountIn(bytes memory _path, uint256 _amountIn) internal returns (uint256) {
-        return UniCLStratLib.swapExactIn(_swapConfig(), _path, _amountIn);
-    }
-
-    /// @dev Oracle-bounded exact-output swap with balance-cap fallback; see {UniCLStratLib-swapExactOut}.
-    function _swapViaRouteExactAmountOut(bytes memory _path, uint256 _amountOut) internal returns (uint256) {
-        return UniCLStratLib.swapExactOut(_swapConfig(), _path, _amountOut);
+    function _swapViaRouteExactAmountIn(UniCLStratLib.SwapConfig memory _config, bytes memory _path, uint256 _amountIn)
+        internal
+    {
+        UniCLStratLib.swapExactIn(_config, _path, _amountIn);
     }
 
     function _swapConfig() internal view returns (UniCLStratLib.SwapConfig memory) {
@@ -1108,12 +1131,6 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
             pairedToken: address(pairedToken),
             slippageBps: swapSlippageBps
         });
-    }
-
-    function _pairValueInETH(uint256 _amount0, uint256 _amount1) internal view returns (uint256) {
-        return UniCLStratLib.pairValueInETH(
-            IOracle(_registry.oracle()), address(weth), address(token0), address(token1), _amount0, _amount1
-        );
     }
 
     function _giveConverterAllowances() internal {
@@ -1147,6 +1164,14 @@ contract UniCLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGuard {
         if (_params.strategy.maxTickDeviation <= 0) revert UniCLStratInvalidConfig();
         _validateTwapInterval(_params.strategy.twapInterval, MIN_TWAP_INTERVAL);
         _validateTwapInterval(_params.strategy.shortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+        _validateExitRouteFee(_params.routes.exitRouteFeePips);
+    }
+
+    function _validateExitRouteFee(uint256 _exitRouteFeePips) private pure {
+        uint256 _maxSlippagePips = MAX_SWAP_SLIPPAGE_BPS * (UniCLStratLib.FEE_DENOMINATOR / BASIS_POINTS);
+        if (_exitRouteFeePips >= UniCLStratLib.FEE_DENOMINATOR - _maxSlippagePips) {
+            revert UniCLStratInvalidConfig();
+        }
     }
 
     function _validateTwapInterval(uint32 _interval, uint32 _min) internal pure {

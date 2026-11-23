@@ -349,8 +349,12 @@ contract Controller is
     /**
      * @inheritdoc IController
      */
-    function sealBatch() external onlyAuthRole(Auth.KEEPER_ROLE) whenNotPaused nonReentrant {
-        ExitQueue(payable(registry().exitQueue())).sealBatch();
+    function priceBatch() external onlyAuthRole(Auth.KEEPER_ROLE) whenNotPaused nonReentrant {
+        IRegistry registry_ = registry();
+        // Batches settle at the same price as immediate exit(): the live base price
+        // (NAV−L) / (supply−escrow). This batch is still equity at the moment of the
+        // read; already-priced in-window batches are already deducted.
+        ExitQueue(payable(registry_.exitQueue())).priceBatch(AMM(payable(registry_.amm())).eveBasePriceInETH());
     }
 
     /**
@@ -388,7 +392,8 @@ contract Controller is
         whenNotPaused
         nonReentrant
     {
-        _processRequest(_liveEvePrice(), _batchId, _user);
+        (, uint256 finalEvePrice,,,) = ExitQueue(payable(registry().exitQueue())).batchInfo(_batchId);
+        _processRequest(finalEvePrice, _batchId, _user);
     }
 
     // ============ Internal Functions ============
@@ -441,47 +446,33 @@ contract Controller is
         ExitQueue exitQueue = ExitQueue(registry().exitQueue());
         address[] memory users = exitQueue.unprocessedUsers(_batchId, _startIndex, _endIndex);
 
-        // One read serves the whole call: each settlement burns EVE against exactly its value
-        // at this price, so it leaves the price for the next request unchanged (rounding dust
-        // stays with the protocol).
-        uint256 evePrice = _liveEvePrice();
+        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(_batchId);
 
         for (uint256 i = 0; i < users.length; i++) {
-            _processRequest(evePrice, _batchId, users[i]);
+            _processRequest(finalEvePrice, _batchId, users[i]);
         }
     }
 
     /**
-     * @notice Live EVE base price queued redemptions settle at: NAV / supply, the same price
-     * an immediate `AMM.exit()` gets in this transaction.
-     * @dev Requests are priced when they are paid, not when their batch is sealed, so queued
-     *      EVE never turns into a fixed-price liability that would have to be re-added to the
-     *      share price if the batch's processing window lapsed (audit G1).
-     */
-    function _liveEvePrice() internal view returns (uint256) {
-        return AMM(payable(registry().amm())).eveBasePriceInETH();
-    }
-
-    /**
      * @notice Processes a redemption request from a batch
-     * @param _evePrice The live EVE price the request settles at
+     * @param _finalEvePrice The final EVE price in the given batch
      * @param _batchId The ID of the batch
      * @param _user The address of the user
      */
-    function _processRequest(uint256 _evePrice, uint256 _batchId, address _user) internal {
+    function _processRequest(uint256 _finalEvePrice, uint256 _batchId, address _user) internal {
         IRegistry registry_ = registry();
 
         ExitQueue exitQueue = ExitQueue(registry_.exitQueue());
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(_batchId, _user);
 
-        uint256 ethToRedeem = (_evePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance))
+        uint256 ethToRedeem = (_finalEvePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance))
             ? 0
-            : Math.convertAssets(tokensToBurn, _evePrice);
+            : Math.convertAssets(tokensToBurn, _finalEvePrice);
 
         if (address(this).balance < ethToRedeem) revert ControllerInsufficientBalance();
 
-        AMM(payable(registry_.amm())).processRedemption{value: ethToRedeem}(_batchId, _user, _evePrice);
+        AMM(payable(registry_.amm())).processRedemption{value: ethToRedeem}(_batchId, _user);
     }
 
     // ============ Upgrade Functions ============

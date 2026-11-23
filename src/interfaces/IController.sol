@@ -181,24 +181,24 @@ interface IController {
         external
         returns (uint256 eveAmount, uint256 feeETHEquivalent);
 
-    /// @notice Seals the current ExitQueue batch so its requests can be processed.
-    /// @dev Fixes the batch's membership and starts its processing window. No price is
-    ///      set: requests settle at the live AMM base price when they are processed.
-    function sealBatch() external;
+    /// @notice Prices the current ExitQueue batch at the live AMM base price.
+    /// @dev Reads `eveBasePriceInETH()` before marking this batch priced, so the
+    ///      batch being settled is still equity. Already-priced in-window batches
+    ///      are already deducted from NAV and live supply.
+    function priceBatch() external;
 
-    /// @notice Processes redemption requests from a batch in the given range, each at the
-    ///         live AMM base price (`eveBasePriceInETH()`) read once for the call
+    /// @notice Processes redemption requests from a batch in the given range
     /// @param _batchId The ID of the batch
     /// @param _startIndex The start index (inclusive) of the users to process
     /// @param _endIndex The end index (exclusive) of the users to process
     /// @dev Range is [startIndex, endIndex), meaning users from startIndex up to but not including endIndex
     function processRequests(uint256 _batchId, uint256 _startIndex, uint256 _endIndex) external;
 
-    /// @notice Processes all remaining redemption requests from a batch at the live AMM base price
+    /// @notice Processes all remaining redemption requests from a batch
     /// @param _batchId The ID of the batch
     function processRequests(uint256 _batchId) external;
 
-    /// @notice Processes a specific redemption request at the live AMM base price
+    /// @notice Processes a specific redemption request
     /// @param _batchId The ID of the batch
     /// @param _user The address of the user to process
     function processRequest(uint256 _batchId, address _user) external;

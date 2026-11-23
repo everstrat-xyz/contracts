@@ -4,6 +4,7 @@ pragma solidity ^0.8.0;
 import {Test, console} from "forge-std/Test.sol";
 import {Oracle} from "../../src/contracts/Oracle.sol";
 import {Registry} from "registry/Registry.sol";
+import {IRegistryClient} from "interfaces/IRegistryClient.sol";
 import {IOracle} from "../../src/interfaces/IOracle.sol";
 import {Auth} from "../../src/libraries/Auth.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
@@ -1130,5 +1131,37 @@ contract OracleTest is ProtocolTestBase {
         vm.prank(oracleManager);
         vm.expectRevert(IOracle.OracleInvalidFeedDecimals.selector);
         oracle.updateUsdFeedInfo(address(mockToken), address(invalidFeed), STALENESS_INTERVAL);
+    }
+
+    function test_Version() public view {
+        assertEq(oracle.version(), "1.1.0");
+    }
+
+    function test_GetPairPriceWithStalenessCheck_RevertsWhenPairNotRegistered() public {
+        _registerTokenAndEthUsdFeeds();
+
+        vm.expectRevert(IOracle.OraclePairNotRegistered.selector);
+        oracle.getPairPriceWithStalenessCheck(address(mockToken), address(0), STALENESS_INTERVAL);
+    }
+
+    bytes32 internal constant ERC1967_IMPLEMENTATION_SLOT =
+        0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
+
+    function test_Upgrade_AdminCanUpgrade() public {
+        Oracle newImplementation = new Oracle();
+        vm.prank(admin);
+        oracle.upgradeToAndCall(address(newImplementation), "");
+
+        address implementation = address(uint160(uint256(vm.load(address(oracle), ERC1967_IMPLEMENTATION_SLOT))));
+        assertEq(implementation, address(newImplementation));
+        assertEq(address(oracle.registry()), address(registry));
+    }
+
+    function test_Upgrade_RevertsForNonAdmin() public {
+        Oracle newImplementation = new Oracle();
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(IRegistryClient.RegistryClientMissingRole.selector, Auth.ADMIN_ROLE));
+        oracle.upgradeToAndCall(address(newImplementation), "");
     }
 }

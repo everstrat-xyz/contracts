@@ -82,10 +82,11 @@ contract StrategyManagerTest is ProtocolTestBase {
     /// @dev `amm.enter` in setUp bootstraps the AMM and forwards this ETH to the Controller,
     ///      which `totalNAVInETH()` always counts as in-flight protocol NAV.
     uint256 internal constant BOOTSTRAP_CONTROLLER_ETH = 1 ether;
-    uint256 internal constant SEALED_QUEUE_EXIT_ETH = 0.5 ether;
+    uint256 internal constant PRICED_QUEUE_EXIT_ETH = 0.5 ether;
+    uint256 internal constant UNPRICED_QUEUE_EXIT_ETH = 0.1 ether;
     uint256 internal constant SECOND_USER_DEPOSIT = 1 ether;
     uint256 internal constant LATE_ENTER_ETH = 0.1 ether;
-    uint256 internal constant POST_DROP_CONTROLLER_ETH = 0.1 ether;
+    uint256 internal constant LEFTOVER_EXIT_ETH = 0.01 ether;
 
     event StrategyAdded(address indexed strategy);
 
@@ -966,100 +967,102 @@ contract StrategyManagerTest is ProtocolTestBase {
         assertEq(totalNAV, INITIAL_NAV_1 + 2 ether + BOOTSTRAP_CONTROLLER_ETH);
     }
 
-    function test_TotalNAVInETH_DoesNotDeductUnsealedQueue() public {
+    function test_TotalNAVInETH_DoesNotDeductUnpricedQueue() public {
         uint256 navBefore = strategyManager.totalNAVInETH();
-        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
+        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
 
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
         assertEq(strategyManager.totalNAVInETH(), navBefore);
     }
 
-    /// @dev Audit G1: a sealed batch is not a fixed-price liability. Its EVE stays equity and
-    ///      settles at the live price, so NAV carries no deduction for it at any point.
-    function test_TotalNAVInETH_DoesNotDeductSealedQueue() public {
+    function test_TotalNAVInETH_PricedQueueNotDeducted() public {
         uint256 navBefore = strategyManager.totalNAVInETH();
-        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
-        controllerContract.sealBatch();
+        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+        controllerContract.priceBatch();
 
+        // Audit G1: queued EVE stays equity until paid, so pricing does not carve out NAV.
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0);
+        assertEq(escrowed, 0);
         assertEq(strategyManager.totalNAVInETH(), navBefore);
     }
 
-    /// @dev Audit G1: with nothing deducted there is nothing to re-add when the processing
-    ///      window lapses — NAV is identical in the last second of the window and the first
-    ///      second after it.
-    function test_TotalNAVInETH_UnchangedWhenSealedQueueWindowLapses() public {
-        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
-        controllerContract.sealBatch();
+    function test_TotalNAVInETH_PricedQueueLiabilityLapsesAfterExpiry() public {
+        uint256 navBefore = strategyManager.totalNAVInETH();
+        _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+        controllerContract.priceBatch();
 
-        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME());
-        uint256 navLastSecondOfWindow = strategyManager.totalNAVInETH();
+        (uint256 liability,) = exitQueue.liveRedemptionOffsets();
+        assertEq(strategyManager.totalNAVInETH(), navBefore - liability);
 
-        vm.warp(block.timestamp + 1);
-        assertEq(strategyManager.totalNAVInETH(), navLastSecondOfWindow);
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+
+        (uint256 liabilityAfter, uint256 escrowedAfter) = exitQueue.liveRedemptionOffsets();
+        assertEq(liabilityAfter, 0);
+        assertEq(escrowedAfter, 0);
+        assertEq(strategyManager.totalNAVInETH(), navBefore);
     }
 
-    /// @dev The fixed-price model froze NAV (and with it enter / exit / pricing) for up to the
-    ///      whole processing window when NAV fell below a sealed batch's locked-in claim
-    ///      (FREEZE_RUNBOOK scenario 10). Sealed EVE now floats with NAV, so the same NAV drop
-    ///      just reprices everyone and the protocol keeps working.
-    function test_TotalNAVInETH_NavDropAfterSealDoesNotFreezePricing() public {
+    function test_TotalNAVInETH_RevertsWhenQueuedLiabilityExceedsNAV() public {
+        uint256 grossNav = strategyManager.totalNAVInETH();
+        vm.mockCall(
+            address(exitQueue),
+            abi.encodeWithSelector(IExitQueue.liveRedemptionOffsets.selector),
+            abi.encode(grossNav + 1, uint256(0))
+        );
+
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        strategyManager.totalNAVInETH();
+    }
+
+    /// @dev FREEZE_RUNBOOK scenario 10 is retired by audit G1: a post-price NAV drop reprices
+    ///      everyone, including the priced batch, instead of freezing NAV.
+    function test_TotalNAVInETH_PostPriceNAVDrop_DoesNotFreeze() public {
         vm.deal(user1, SECOND_USER_DEPOSIT);
         vm.prank(user1);
         amm.enter{value: SECOND_USER_DEPOSIT}(1);
 
-        uint256 sealedBatchId = _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
-        controllerContract.sealBatch();
-        uint256 priceAtSeal = amm.eveBasePriceInETH();
+        uint256 pricedBatchId = _queueExitAs(address(this), PRICED_QUEUE_EXIT_ETH);
+        controllerContract.priceBatch();
+        uint256 priceAtPricing = amm.eveBasePriceInETH();
 
-        // Post-seal NAV drop (IL / market move): wipe most in-flight ETH.
-        vm.deal(controller, POST_DROP_CONTROLLER_ETH);
-        vm.deal(address(strategyManager), 0);
-        vm.deal(address(amm), 0);
+        // Post-price NAV drop (IL / market move).
+        vm.deal(controller, controller.balance / 2);
 
-        assertEq(strategyManager.totalNAVInETH(), POST_DROP_CONTROLLER_ETH);
-        uint256 priceAfterDrop = amm.eveBasePriceInETH();
-        assertGt(priceAfterDrop, 0);
-        assertLt(priceAfterDrop, priceAtSeal);
-        amm.evePremiumPriceInETH();
-        amm.eveBasePriceInUSD();
+        uint256 navAfterDrop = strategyManager.totalNAVInETH();
+        assertGt(navAfterDrop, 0);
+        assertLt(amm.eveBasePriceInETH(), priceAtPricing, "the drop reprices everyone");
+        (, uint256 settlementPrice,,,) = exitQueue.batchInfo(pricedBatchId);
+        assertEq(settlementPrice, amm.eveBasePriceInETH(), "the priced batch floats with NAV");
 
-        address lateEntrant = makeAddr("lateEntrant");
-        vm.deal(lateEntrant, LATE_ENTER_ETH);
-        vm.prank(lateEntrant);
-        amm.enter{value: LATE_ENTER_ETH}(1);
-        assertGt(token.balanceOf(lateEntrant), 0);
-
-        // The sealed request is still locked for its window, and settles at the live price:
-        // the queued user's zero tolerance closes it and returns their EVE.
+        // The cancel lock is kept: priced in-window requests cannot close.
         vm.expectRevert(IExitQueue.ExitQueueRequestCannotBeClosed.selector);
-        amm.cancelRedemption(sealedBatchId);
+        amm.cancelRedemption(pricedBatchId);
 
-        uint256 balanceBefore = token.balanceOf(address(this));
-        controllerContract.processRequest(sealedBatchId, address(this));
-        (bool processed, bool closedDueToSlippage,,,) = exitQueue.requestInfo(sealedBatchId, address(this));
-        assertTrue(processed);
-        assertTrue(closedDueToSlippage);
-        assertGt(token.balanceOf(address(this)), balanceBefore);
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+        uint256 priceBeforeCancel = amm.eveBasePriceInETH();
+        amm.cancelRedemption(pricedBatchId);
+        assertEq(amm.eveBasePriceInETH(), priceBeforeCancel, "escape-hatch cancel must not move the price");
     }
 
-    function test_Harvest_MintsAgainstFullSupplyWithSealedQueue() public {
+    function test_Harvest_RevertsWhenQueuedLiabilityExceedsNAV() public {
         vm.prank(admin);
         strategyManager.addStrategy(strategy1, 80, 70);
         _configurePerformanceFees();
         _accrueMockLpFees(mockStrategy1, LP_FEE_BASE_1);
 
-        _queueExitAs(address(this), SEALED_QUEUE_EXIT_ETH);
-        controllerContract.sealBatch();
-
-        // Fee mint dilutes every EVE, queued or not: dS = fee * supply / (NAV - fee).
-        uint256 supply = token.totalSupply();
-        uint256 nav = strategyManager.totalNAVInETH();
-        uint256 feeETH = strategyManager.pendingPerformanceFeeInETH(strategy1);
-        assertGt(feeETH, 0);
+        uint256 grossNav = strategyManager.totalNAVInETH();
+        vm.mockCall(
+            address(exitQueue),
+            abi.encodeWithSelector(IExitQueue.liveRedemptionOffsets.selector),
+            abi.encode(grossNav + 1, uint256(0))
+        );
 
         vm.prank(controller);
-        (uint256 eveMinted,) = strategyManager.harvestPerformanceFeeFromStrategy(strategy1);
-
-        assertEq(eveMinted, feeETH * supply / (nav - feeETH));
+        vm.expectRevert(IStrategyManager.StrategyManagerQueuedLiabilityExceedsNAV.selector);
+        strategyManager.harvestPerformanceFeeFromStrategy(strategy1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -2985,6 +2988,94 @@ contract StrategyManagerTest is ProtocolTestBase {
         assertLe(withdrawn, 12 ether);
     }
 
+    /// @dev Audit G6: the part of a weighted share above a strategy's maxWithdrawal is
+    ///      re-split to strategies with room instead of being dropped.
+    function test_WithdrawFromStrategies_ReallocatesAboveMaxWithdrawal() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70); // weighted share 7 ether, cap 2 ether
+        strategyManager.addStrategy(strategy2, 60, 50); // weighted share 5 ether, cap 10 ether
+        vm.stopPrank();
+
+        vm.deal(address(mockStrategy1), 10 ether);
+        vm.deal(address(mockStrategy2), 10 ether);
+        mockStrategy1.setMaxWithdrawal(2 ether);
+        mockStrategy2.setMaxWithdrawal(10 ether);
+
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategies(12 ether);
+
+        assertEq(withdrawn, 12 ether);
+        assertEq(address(mockStrategy1).balance, 8 ether); // capped at 2 ether
+        assertEq(address(mockStrategy2).balance, 0); // its 5 ether + strategy1's 5 ether overflow
+    }
+
+    /// @dev Audit G6: a reverting strategy's share is retried once on strategies that paid out.
+    function test_WithdrawFromStrategies_RetriesFailedShareOnOtherStrategies() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        vm.deal(address(mockStrategy1), 10 ether);
+        vm.deal(address(mockStrategy2), 10 ether);
+        mockStrategy1.setMaxWithdrawal(10 ether);
+        mockStrategy2.setMaxWithdrawal(10 ether);
+        mockStrategy2.setRevertWithdraw(true);
+
+        vm.expectEmit(true, false, false, true, address(strategyManager));
+        emit IStrategyManager.StrategyWithdrawFailed(
+            strategy2, abi.encodeWithSelector(MockStrategy.MockStrategyWithdrawReverted.selector)
+        );
+
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategies(6 ether);
+
+        // strategy1: 3.5 ether weighted share + strategy2's failed 2.5 ether on the retry
+        assertEq(withdrawn, 6 ether);
+        assertEq(address(mockStrategy1).balance, 4 ether);
+        assertEq(address(mockStrategy2).balance, 10 ether);
+    }
+
+    /// @dev Reallocation never spills into weight-0 strategies, even when the weighted ones are short.
+    function test_WithdrawFromStrategies_ReallocationSkipsZeroWeight() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 0);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        vm.deal(address(mockStrategy1), 10 ether);
+        vm.deal(address(mockStrategy2), 10 ether);
+        mockStrategy1.setMaxWithdrawal(10 ether);
+        mockStrategy2.setMaxWithdrawal(3 ether);
+
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategies(6 ether);
+
+        assertEq(withdrawn, 3 ether);
+        assertEq(address(mockStrategy1).balance, 10 ether);
+    }
+
+    /// @dev Same cap-aware split on deposits: the part above one strategy's maxDeposit goes to
+    ///      the others instead of back to the Controller.
+    function test_DepositToStrategies_ReallocatesAboveMaxDeposit() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70); // weighted share 4 ether, cap 1 ether
+        strategyManager.addStrategy(strategy2, 60, 50); // weighted share 3 ether
+        vm.stopPrank();
+
+        mockStrategy1.setMaxDeposit(1 ether);
+        mockStrategy2.setMaxDeposit(10 ether);
+        mockStrategy1.setIsHealthy(true);
+        mockStrategy2.setIsHealthy(true);
+
+        vm.deal(controller, 7 ether);
+        controllerContract.depositToStrategies(7 ether);
+
+        assertEq(address(mockStrategy1).balance, 1 ether);
+        assertEq(address(mockStrategy2).balance, 6 ether);
+        assertEq(controller.balance, 0);
+    }
+
     /*//////////////////////////////////////////////////////////////
                     PERFORMANCE FEE HARVESTING TESTS
     //////////////////////////////////////////////////////////////*/
@@ -3935,5 +4026,109 @@ contract StrategyManagerTest is ProtocolTestBase {
 
         controllerContract.depositToStrategy(strategy1, 1 ether);
         assertEq(strategy1.balance, 5 ether); // 4 ether left after withdraw + 1 ether redeposited
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        COVERAGE GAP TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Version() public view {
+        assertEq(strategyManager.version(), "1.1.0");
+    }
+
+    function test_StrategyAt_ReturnsStrategiesInInsertionOrder() public {
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        assertEq(strategyManager.strategyAt(0), strategy1);
+        assertEq(strategyManager.strategyAt(1), strategy2);
+    }
+
+    function test_StrategyAt_RevertsOutOfBounds() public {
+        vm.expectRevert();
+        strategyManager.strategyAt(0);
+    }
+
+    function test_RemoveStrategy_StillRemovesWhenCallerRoleRevokeFails() public {
+        vm.prank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        mockStrategy1.setNavInETH(0);
+
+        address converter_ = registry.getContractByKey(Auth.CONVERTER);
+        vm.mockCallRevert(
+            converter_, abi.encodeWithSignature("revokeCallerRole(address)", strategy1), abi.encode("revoke failed")
+        );
+
+        vm.expectEmit(true, false, false, false, address(strategyManager));
+        emit IStrategyManager.CallerRoleRevokeFailed(strategy1);
+        vm.prank(admin);
+        strategyManager.removeStrategy(strategy1);
+
+        assertFalse(strategyManager.isStrategyRegistered(strategy1));
+        // The revoke failed, so the role is still held and must be cleaned up by hand.
+        assertTrue(registry.hasRole(CONVERTER_CALLER_ROLE, strategy1));
+    }
+
+    function test_WithdrawFromStrategies_WithPagination_EmptyRegistry() public {
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerNoStrategiesRegistered.selector);
+        strategyManager.withdrawFromStrategies(0, 1, 1 ether);
+    }
+
+    function test_HarvestPerformanceFeeFromStrategies_EmptyRegistry() public {
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerNoStrategiesRegistered.selector);
+        strategyManager.harvestPerformanceFeeFromStrategies();
+
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerNoStrategiesRegistered.selector);
+        strategyManager.harvestPerformanceFeeFromStrategies(0, 1);
+    }
+
+    function test_HarvestPerformanceFeeFromStrategies_NoMintWhenNoStrategyOwesAFee() public {
+        _configurePerformanceFees();
+        vm.startPrank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        strategyManager.addStrategy(strategy2, 60, 50);
+        vm.stopPrank();
+
+        uint256 supplyBefore = token.totalSupply();
+        vm.prank(controller);
+        (uint256 eveAmount, uint256 feeETH) = strategyManager.harvestPerformanceFeeFromStrategies();
+
+        assertEq(eveAmount, 0);
+        assertEq(feeETH, 0);
+        assertEq(token.totalSupply(), supplyBefore);
+    }
+
+    function test_HarvestPerformanceFee_RevertsWhenFeeIsNotBelowNAV() public {
+        _configurePerformanceFees();
+        vm.prank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+
+        // A fee at least as large as the whole NAV cannot be priced by dS = fee * S / (NAV - fee).
+        uint256 totalNAV = strategyManager.totalNAVInETH();
+        _accrueMockLpFees(mockStrategy1, totalNAV * 10_000 / PERFORMANCE_FEE_BPS);
+
+        vm.prank(controller);
+        vm.expectRevert(IStrategyManager.StrategyManagerFeeMintOverflow.selector);
+        strategyManager.harvestPerformanceFeeFromStrategy(strategy1);
+    }
+
+    function test_WithdrawFromStrategy_ReturnsZeroWhenStrategyHasNothingWithdrawable() public {
+        vm.prank(admin);
+        strategyManager.addStrategy(strategy1, 80, 70);
+        vm.deal(strategy1, INITIAL_NAV_1);
+        mockStrategy1.setMaxWithdrawal(0);
+
+        uint256 controllerBalanceBefore = controller.balance;
+        vm.prank(controller);
+        uint256 withdrawn = strategyManager.withdrawFromStrategy(strategy1, 1 ether);
+
+        assertEq(withdrawn, 0);
+        assertEq(controller.balance, controllerBalanceBefore);
+        assertEq(strategy1.balance, INITIAL_NAV_1);
     }
 }

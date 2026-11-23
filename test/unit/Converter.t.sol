@@ -18,6 +18,7 @@ import {IRegistryClient} from "interfaces/IRegistryClient.sol";
 import {UniswapV3ConverterAdapter} from "../../src/contracts/adapters/UniswapV3ConverterAdapter.sol";
 import {IUniswapV3ConverterAdapter} from "../../src/interfaces/adapters/IUniswapV3ConverterAdapter.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
+import {IConverterAdapter} from "../../src/interfaces/IConverterAdapter.sol";
 import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
 import {MockSimpleOracle} from "../mocks/MockSimpleOracle.sol";
 import {MockWETH, MockUniCLPool, MockUniCLRouter, MockUniswapV3Factory} from "../mocks/UniCLStratMocks.sol";
@@ -1705,5 +1706,168 @@ contract UniswapV3ConverterAdapterTest is ConverterTestBase {
         assertEq(address(adapter.oracle()), address(oracle));
         assertEq(adapter.weth(), address(weth));
         assertEq(adapter.twapInterval(), TWAP_INTERVAL);
+    }
+}
+
+// ================================
+// Coverage gap tests
+// ================================
+
+/// @dev Contract with no receive/fallback: any ETH transfer to it reverts.
+contract ETHRejecter {}
+
+contract ConverterCoverageGapTest is ConverterTestBase {
+    MockConverterAdapter public mockAdapter;
+
+    function setUp() public override {
+        super.setUp();
+        mockAdapter = new MockConverterAdapter(weth, pairedToken);
+        converter.setAllowedAdapter(address(mockAdapter), true);
+    }
+
+    function test_UnwrapWETH_RevertsWhenReceiverRejectsETH() public {
+        address rejecter = address(new ETHRejecter());
+        _fundCallerWETH(VALID_AMOUNT);
+        _approveConverterForCallerWETH(VALID_AMOUNT);
+
+        vm.expectRevert(IConverter.ConverterETHTransferFailed.selector);
+        vm.prank(caller);
+        converter.unwrapWETH(VALID_AMOUNT, rejecter);
+    }
+
+    function test_QuoteSwapExactAmountOut_RevertsWhenAdapterNotAllowed() public {
+        UniswapV3ConverterAdapter rogue = _newAdapter();
+        vm.expectRevert(IConverter.ConverterAdapterNotAllowed.selector);
+        converter.quoteSwapExactAmountOut(address(rogue), wethToPairedPath, SWAP_AMOUNT);
+    }
+
+    function test_QuoteSwapExactAmountOut_RevertsWhenAdapterQuoteReverts() public {
+        mockAdapter.setShouldRevertQuote(true);
+        vm.expectRevert(IConverter.ConverterAdapterCallFailed.selector);
+        converter.quoteSwapExactAmountOut(address(mockAdapter), wethToPairedPath, SWAP_AMOUNT);
+    }
+
+    function test_SetAllowedAdapter_RevertsWhenAlreadyAllowed() public {
+        vm.expectRevert(IConverter.ConverterAdapterAlreadyAllowed.selector);
+        converter.setAllowedAdapter(address(adapter), true);
+    }
+
+    function test_SetAllowedAdapter_RevertsWhenRemovingUnknownAdapter() public {
+        vm.expectRevert(IConverter.ConverterAdapterNotAllowed.selector);
+        converter.setAllowedAdapter(makeAddr("neverAllowed"), false);
+    }
+
+    function test_GetAllowedAdapters_TracksAllowAndRemove() public {
+        address[] memory adapters = converter.getAllowedAdapters();
+        assertEq(adapters.length, 2);
+        assertEq(adapters[0], address(adapter));
+        assertEq(adapters[1], address(mockAdapter));
+
+        converter.setAllowedAdapter(address(adapter), false);
+        adapters = converter.getAllowedAdapters();
+        assertEq(adapters.length, 1);
+        assertEq(adapters[0], address(mockAdapter));
+    }
+
+    function test_ValidateRoute_ReturnsFalseWhenAdapterReverts() public {
+        vm.mockCallRevert(
+            address(mockAdapter), abi.encodeWithSelector(IConverterAdapter.validateRoute.selector), bytes("BROKEN")
+        );
+        assertFalse(converter.validateRoute(address(mockAdapter), wethToPairedPath));
+    }
+
+    function test_ExecuteSwap_RevertsWhenAdapterRouteValidationReverts() public {
+        _setupCallerForSwap(address(weth), SWAP_AMOUNT);
+        vm.mockCallRevert(
+            address(mockAdapter), abi.encodeWithSelector(IConverterAdapter.validateRoute.selector), bytes("BROKEN")
+        );
+
+        vm.expectRevert(IConverter.ConverterAdapterCallFailed.selector);
+        vm.prank(caller);
+        converter.executeSwapExactAmountIn(
+            address(mockAdapter), wethToPairedPath, SWAP_AMOUNT, MIN_OUT_ZERO, DEADLINE_FAR
+        );
+    }
+}
+
+contract UniswapV3ConverterAdapterCoverageGapTest is ConverterTestBase {
+    /// @dev Above tick ~443636 the sqrt price exceeds uint128, which switches
+    ///      `_quoteAtTick` to its 128-bit ratio branch.
+    int24 internal constant HIGH_TICK = 460000;
+    /// @dev floor(1.0001^HIGH_TICK), computed at 60-digit precision.
+    uint256 internal constant HIGH_TICK_RATIO = 94743048965431443141;
+    uint256 internal constant QUOTE_TOLERANCE = 1e16; // 1%
+
+    function test_Adapter_Version() public view {
+        assertEq(adapter.version(), "1.0.0");
+    }
+
+    function test_Adapter_Quotes_RevertOnMalformedRoute() public {
+        bytes memory malformed = abi.encodePacked(address(weth), POOL_FEE);
+
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterInvalidRoute.selector);
+        adapter.quoteExactAmountIn(malformed, SWAP_AMOUNT);
+
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterInvalidRoute.selector);
+        adapter.quoteExactAmountOut(malformed, SWAP_AMOUNT);
+    }
+
+    function test_Adapter_Quotes_RevertOnMultiHopRoute() public {
+        bytes memory multiHop = abi.encodePacked(address(weth), POOL_FEE, address(pairedToken), POOL_FEE, address(weth));
+
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterMultiHopNotSupported.selector);
+        adapter.quoteExactAmountIn(multiHop, SWAP_AMOUNT);
+
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterMultiHopNotSupported.selector);
+        adapter.quoteExactAmountOut(multiHop, SWAP_AMOUNT);
+    }
+
+    function test_Adapter_Swaps_RevertOnMalformedOrMultiHopRoute() public {
+        bytes memory malformed = abi.encodePacked(address(weth), POOL_FEE);
+        bytes memory multiHop = abi.encodePacked(address(weth), POOL_FEE, address(pairedToken), POOL_FEE, address(weth));
+
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterInvalidRoute.selector);
+        adapter.swapExactAmountIn(malformed, SWAP_AMOUNT, 0, receiver, DEADLINE_FAR);
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterInvalidRoute.selector);
+        adapter.swapExactAmountIn(multiHop, SWAP_AMOUNT, 0, receiver, DEADLINE_FAR);
+
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterInvalidRoute.selector);
+        adapter.swapExactAmountOut(malformed, SWAP_AMOUNT, SWAP_AMOUNT, receiver, DEADLINE_FAR);
+        vm.expectRevert(IUniswapV3ConverterAdapter.UniswapV3ConverterAdapterInvalidRoute.selector);
+        adapter.swapExactAmountOut(multiHop, SWAP_AMOUNT, SWAP_AMOUNT, receiver, DEADLINE_FAR);
+    }
+
+    /// @dev Prices the pool far above parity (sqrt price > 2^128) and checks both quote
+    ///      directions against the closed-form price, with the oracle set to agree.
+    function test_Adapter_Quote_AtExtremeTick() public {
+        pool.setCurrentTick(HIGH_TICK);
+        (address lower, address higher) = address(weth) < address(pairedToken)
+            ? (address(weth), address(pairedToken))
+            : (address(pairedToken), address(weth));
+        // At tick T one unit of the lower-address token is worth 1.0001^T of the higher one.
+        oracle.setPrice(_oracleKey(higher), ORACLE_PRICE_USD);
+        oracle.setPrice(_oracleKey(lower), ORACLE_PRICE_USD * HIGH_TICK_RATIO);
+
+        uint256 netOfFee = POOL_FEE_DENOMINATOR - POOL_FEE;
+
+        bytes memory lowerToHigher = abi.encodePacked(lower, POOL_FEE, higher);
+        uint256 amountIn = 1 ether;
+        assertApproxEqRel(
+            adapter.quoteExactAmountIn(lowerToHigher, amountIn),
+            amountIn * HIGH_TICK_RATIO * netOfFee / POOL_FEE_DENOMINATOR,
+            QUOTE_TOLERANCE
+        );
+
+        bytes memory higherToLower = abi.encodePacked(higher, POOL_FEE, lower);
+        uint256 largeAmountIn = 1e55;
+        assertApproxEqRel(
+            adapter.quoteExactAmountIn(higherToLower, largeAmountIn),
+            largeAmountIn / HIGH_TICK_RATIO * netOfFee / POOL_FEE_DENOMINATOR,
+            QUOTE_TOLERANCE
+        );
+    }
+
+    function _oracleKey(address _token) internal view returns (address) {
+        return _token == address(weth) ? address(0) : _token;
     }
 }

@@ -11,7 +11,7 @@ import {IKeeperExecutorBase} from "./IKeeperExecutorBase.sol";
 interface IQueueKeeperExecutor is IKeeperExecutorBase {
     enum QueueAction {
         None,
-        SealBatch,
+        PriceBatch,
         ProcessRequests,
         AdvanceCursor
     }
@@ -52,7 +52,7 @@ interface IQueueKeeperExecutor is IKeeperExecutorBase {
     /// @notice On-chain checker; execPayload targets `perform`
     function checker() external view returns (bool canExec, bytes memory execPayload);
 
-    /// @notice Gas-bounded scan width. Aliased from `ExitQueueLimits.MAX_BATCH_SCAN`.
+    /// @notice Gas-bounded scan width. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
     function MAX_BATCH_SCAN() external pure returns (uint256);
     function MIN_BATCH_AGE_UPPER_BOUND() external pure returns (uint256);
     function MIN_BATCH_AGE_LOWER_BOUND() external pure returns (uint256);
