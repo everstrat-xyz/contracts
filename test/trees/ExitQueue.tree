@@ -38,9 +38,11 @@ ExitQueue::batchInfo(uint256 _batchId)
 │   ├── It should return totalTokensToBurn (sum of all requests)
 │   ├── It should return createdAt (timestamp when batch was created)
 │   └── It should return pricedAt=0
-└── Given batch exists and is priced
+├── Given batch is priced and past MAX_BATCH_PROCESSING_TIME
+│   └── It should return finalEvePrice as stored by priceBatch (no AMM read)
+└── Given batch exists and is priced (in-window)
     ├── It should return canBeProcessed=true
-    ├── It should return finalEvePrice (set by priceBatch)
+    ├── It should return finalEvePrice = the price pinned this tx by pullRequest, else live AMM.eveBasePriceInETH() (audit G1)
     ├── It should return totalTokensToBurn
     ├── It should return createdAt (timestamp when batch was created, not when priced)
     └── It should return pricedAt (timestamp when priceBatch was called)
@@ -113,12 +115,11 @@ ExitQueue::liveRedemptionOffsets()
 ├── Given current batch is unpriced
 │   └── It should return (0, 0) (cancellable equity)
 ├── Given a batch is priced and in-window
-│   ├── It should return escrowedSupply = totalTokensToBurn
-│   └── It should return liabilityETH = convertAssets(tokens, finalEvePrice)
+│   └── It should return (0, 0) (audit G1: queued EVE stays equity until paid)
 ├── Given the in-window request is pulled
 │   └── It should return (0, 0) and advance liveScanFromBatchId
 └── Given the batch is past MAX_BATCH_PROCESSING_TIME
-    └── It should return (0, 0) with no write (liability lapses on the clock)
+    └── It should return (0, 0) (nothing to re-add at lapse)
 
 ExitQueue::priceBatch(uint256 _evePrice)
 ├── Given caller is not the registered Controller

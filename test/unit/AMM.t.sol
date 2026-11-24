@@ -153,8 +153,6 @@ contract AMMTest is ProtocolTestBase {
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
         assertGt(ethToRedeem, 0, "slippage must not zero redemption in test setup");
-
-        vm.deal(address(controller), ethToRedeem);
         controller.processRequest(batchId, user2);
     }
 
@@ -432,11 +430,6 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-
-        // Fund controller with ETH for processing (only if needed)
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
 
         // Process via Controller (which handles ETH transfer)
         vm.expectEmit(true, true, true, true);
@@ -862,9 +855,6 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
 
         // Process the redemption first time
         controller.processRequest(batchId, user2);
@@ -907,9 +897,6 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
 
         // Process the redemption first
         controller.processRequest(batchId, user2);
@@ -1132,9 +1119,6 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
 
         uint256 user2ETHBefore = address(user2).balance;
 
@@ -1169,9 +1153,6 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), ethToRedeem);
-        }
 
         controller.processRequest(batchId, user2);
 
@@ -1209,9 +1190,6 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), address(controller).balance + ethToRedeem);
-        }
 
         controller.processRequest(batchId, user2);
 
@@ -1248,6 +1226,10 @@ contract AMMTest is ProtocolTestBase {
 
         controller.priceBatch();
 
+        // Give the Controller the excess before reading the price: its balance is in NAV, so
+        // funding it after the read would move the live settlement price (audit G1).
+        vm.deal(address(controller), address(controller).balance + EXCESS_ETH);
+
         (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
             exitQueue.requestInfo(batchId, user2);
         (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
@@ -1258,7 +1240,6 @@ contract AMMTest is ProtocolTestBase {
         // Call processRedemption directly as the controller (which already holds CONTROLLER_ROLE),
         // sending ethToRedeem + EXCESS_ETH to exercise the excess-return path.
         uint256 totalSent = ethToRedeem + EXCESS_ETH;
-        vm.deal(address(controller), address(controller).balance + totalSent);
 
         uint256 controllerBalanceBefore = address(controller).balance;
 
@@ -1356,9 +1337,6 @@ contract AMMTest is ProtocolTestBase {
         uint256 ethToRedeem = Math.isRelativelyLessThan(finalEvePrice, evePriceAtRequestTime, priceTolerance)
             ? 0
             : Math.convertAssets(tokensToBurn, finalEvePrice);
-        if (ethToRedeem > 0) {
-            vm.deal(address(controller), address(controller).balance + ethToRedeem);
-        }
 
         controller.processRequest(batchId, user2);
 
@@ -2254,7 +2232,10 @@ contract AMMTest is ProtocolTestBase {
         assertGt(batchId, 0, "exit should queue against the new NAV");
     }
 
-    function test_PricedQueue_ExcludedFromLiveSharePrice() public {
+    // ============ Audit G1: live-price settlement ============
+
+    /// @dev Bootstrap, enter as user2, queue user2's exit and price the batch.
+    function _queueAndPriceUser2Exit() internal returns (uint256 batchId_) {
         vm.prank(user1);
         bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
         vm.roll(block.number + 1);
@@ -2265,31 +2246,13 @@ contract AMMTest is ProtocolTestBase {
         uint256 user2Balance = eve.balanceOf(user2);
         vm.startPrank(user2);
         eve.approve(address(bondingCurve), user2Balance);
-        bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
+        batchId_ = bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
-        (uint256 liabilityBefore, uint256 escrowedBefore) = exitQueue.liveRedemptionOffsets();
-        assertEq(liabilityBefore, 0, "unpriced queue is still equity");
-        assertEq(escrowedBefore, 0);
-
-        uint256 priceBefore = bondingCurve.eveBasePriceInETH();
         controller.priceBatch();
-        uint256 priceAfter = bondingCurve.eveBasePriceInETH();
-
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertGt(escrowed, 0);
-        assertGt(liability, 0);
-        // Unchanged NAV: residual price equals the settlement price up to floor rounding.
-        assertApproxEqRel(priceAfter, priceBefore, 1e12);
-
-        uint256 navNet = strategyManager.totalNAVInETH();
-        vm.deal(address(controller), address(controller).balance + 10 ether);
-        uint256 navAfterGift = strategyManager.totalNAVInETH();
-        assertEq(navAfterGift, navNet + 10 ether, "gift accrues to residual holders, not the priced claim");
-        assertGt(bondingCurve.eveBasePriceInETH(), priceAfter);
     }
 
-    function test_PricedQueue_LiabilityLapsesAfterExpiry() public {
+    function test_PricedQueue_StaysInLiveSharePrice() public {
         vm.prank(user1);
         bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
         vm.roll(block.number + 1);
@@ -2303,15 +2266,102 @@ contract AMMTest is ProtocolTestBase {
         bondingCurve.exit(EXIT_SMALL_ETH, user2Balance, 0);
         vm.stopPrank();
 
+        uint256 navBefore = strategyManager.totalNAVInETH();
+        uint256 priceBefore = bondingCurve.eveBasePriceInETH();
         controller.priceBatch();
-        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
-        assertGt(liability, 0);
-        assertGt(escrowed, 0);
 
-        vm.warp(block.timestamp + uint256(exitQueue.MAX_BATCH_PROCESSING_TIME()) + 1);
-        (liability, escrowed) = exitQueue.liveRedemptionOffsets();
-        assertEq(liability, 0);
-        assertEq(escrowed, 0);
+        (uint256 liability, uint256 escrowed) = exitQueue.liveRedemptionOffsets();
+        assertEq(liability, 0, "priced queue is not carved out of NAV");
+        assertEq(escrowed, 0, "priced queue is not carved out of supply");
+        assertEq(strategyManager.totalNAVInETH(), navBefore, "pricing must not move NAV");
+        assertEq(bondingCurve.eveBasePriceInETH(), priceBefore, "pricing must not move the price");
+    }
+
+    function test_G1_NoPriceStepWhenWindowLapses() public {
+        _queueAndPriceUser2Exit();
+
+        // NAV moves while the batch waits (the case that produced the step before).
+        vm.deal(address(controller), address(controller).balance + 10 ether);
+
+        uint256 pricedAt = block.timestamp;
+        uint256 window = exitQueue.MAX_BATCH_PROCESSING_TIME();
+
+        vm.warp(pricedAt + window); // last in-window second
+        uint256 navIn = strategyManager.totalNAVInETH();
+        uint256 baseIn = bondingCurve.eveBasePriceInETH();
+        uint256 premiumIn = bondingCurve.evePremiumPriceInETH();
+
+        vm.warp(pricedAt + window + 1); // first lapsed second
+        assertEq(strategyManager.totalNAVInETH(), navIn, "NAV must not step at lapse");
+        assertEq(bondingCurve.eveBasePriceInETH(), baseIn, "base price must not step at lapse");
+        assertEq(bondingCurve.evePremiumPriceInETH(), premiumIn, "premium price must not step at lapse");
+    }
+
+    function test_G1_EscapeHatchCancelDoesNotMovePrice() public {
+        uint256 batchId = _queueAndPriceUser2Exit();
+        vm.deal(address(controller), address(controller).balance - 1 ether);
+
+        vm.warp(block.timestamp + exitQueue.MAX_BATCH_PROCESSING_TIME() + 1);
+        uint256 priceBefore = bondingCurve.eveBasePriceInETH();
+
+        vm.prank(user2);
+        bondingCurve.cancelRedemption(batchId);
+
+        assertEq(bondingCurve.eveBasePriceInETH(), priceBefore, "returning queued EVE must not move the price");
+    }
+
+    function test_G1_SettlesAtLivePriceAndLeavesPriceForHolders() public {
+        uint256 batchId = _queueAndPriceUser2Exit();
+        (, uint256 pricedPrice,,,) = exitQueue.batchInfo(batchId);
+
+        // NAV rises after pricing: the queued user shares in it.
+        vm.deal(address(controller), address(controller).balance + 1 ether);
+        uint256 livePrice = bondingCurve.eveBasePriceInETH();
+        assertGt(livePrice, pricedPrice);
+
+        (,,, uint256 tokensToBurn,) = exitQueue.requestInfo(batchId, user2);
+        controller.processRequest(batchId, user2);
+
+        assertEq(
+            bondingCurve.claimableBalances(user2),
+            Math.convertAssets(tokensToBurn, livePrice),
+            "request must be paid at the price live in the paying transaction"
+        );
+        uint256 priceAfter = bondingCurve.eveBasePriceInETH();
+        assertGe(priceAfter, livePrice, "settlement must not lower the price for remaining holders");
+        assertApproxEqRel(priceAfter, livePrice, 1e12, "settlement must only add rounding dust");
+    }
+
+    function test_G1_ProcessRequestsBatchSettlesAllAtOnePrice() public {
+        vm.prank(user1);
+        bondingCurve.enter{value: BOOTSTRAP_ETH_DEPOSIT}(BOOTSTRAP_MIN_TOKENS);
+        vm.roll(block.number + 1);
+        vm.prank(user2);
+        bondingCurve.enter{value: ENTER_ETH_DEPOSIT}(ENTER_MIN_TOKENS);
+        vm.roll(block.number + 1);
+
+        // Queue two exits (user1 and user2) in the same batch.
+        uint256 batchId;
+        address[2] memory users = [user1, user2];
+        for (uint256 i; i < users.length; ++i) {
+            vm.startPrank(users[i]);
+            eve.approve(address(bondingCurve), type(uint256).max);
+            batchId = bondingCurve.exit(EXIT_SMALL_ETH, eve.balanceOf(users[i]), 0);
+            vm.stopPrank();
+        }
+        controller.priceBatch();
+        uint256 livePrice = bondingCurve.eveBasePriceInETH();
+
+        controller.processRequests(batchId);
+
+        for (uint256 i; i < users.length; ++i) {
+            (bool processed, bool closedDueToSlippage,, uint256 tokensToBurn,) =
+                exitQueue.requestInfo(batchId, users[i]);
+            assertTrue(processed);
+            assertFalse(closedDueToSlippage);
+            assertEq(bondingCurve.claimableBalances(users[i]), Math.convertAssets(tokensToBurn, livePrice));
+        }
+        assertGe(bondingCurve.eveBasePriceInETH(), livePrice);
     }
 
     // ============ Helper Functions ============

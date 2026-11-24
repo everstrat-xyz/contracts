@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.13;
+pragma solidity ^0.8.24;
 
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 import {UUPSUpgradeable} from "@openzeppelin-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -13,6 +13,7 @@ import {Math} from "../libraries/Math.sol";
 import {ExitQueueLimits} from "../libraries/ExitQueueLimits.sol";
 
 import {IExitQueue} from "../interfaces/IExitQueue.sol";
+import {IAMM} from "../interfaces/IAMM.sol";
 
 contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClientUpgradeable, PausableUpgradeable {
     using EnumerableSet for EnumerableSet.AddressSet;
@@ -30,6 +31,14 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
      * @inheritdoc IExitQueue
      */
     uint256 public constant MAX_LIVE_PRICED_BATCHES = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
+
+    /**
+     * @dev Seed for the transient-storage slot that pins a batch's settlement price for the
+     *      rest of the transaction once {pullRequest} has read it (audit G1). Slot for batch
+     *      `id` is `keccak256(abi.encode(id, _SETTLEMENT_PRICE_TSLOT_SEED))`. Transient storage
+     *      only: no persistent slot is used, so the storage layout is unchanged.
+     */
+    bytes32 private constant _SETTLEMENT_PRICE_TSLOT_SEED = keccak256("everstrat.exitqueue.settlementPrice");
 
     // ============ State Variables ============
 
@@ -84,7 +93,7 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
      * @return string The version of the exit queue
      */
     function version() public pure returns (string memory) {
-        return "1.0.0";
+        return "1.1.0";
     }
 
     // ============ View Functions ============
@@ -104,23 +113,21 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
         )
     {
         RedemptionRequestBatch storage batch = _redemptionRequestBatches[_batchId];
-        return (batch.canBeProcessed, batch.finalEvePrice, batch.totalTokensToBurn, batch.createdAt, batch.pricedAt);
+        // Audit G1: an in-window priced batch settles at the live base price, not at the price
+        // recorded by {priceBatch}. Unpriced and lapsed batches return the stored value and
+        // never touch NAV.
+        uint256 price = _isInWindow(batch) ? _settlementPrice(_batchId) : batch.finalEvePrice;
+        return (batch.canBeProcessed, price, batch.totalTokensToBurn, batch.createdAt, batch.pricedAt);
     }
 
     /**
      * @inheritdoc IExitQueue
      */
-    function liveRedemptionOffsets() public view returns (uint256 liabilityETH, uint256 escrowedSupply) {
-        uint256 lo_ = liveScanFromBatchId;
-        uint256 current_ = currentBatchId;
-        for (uint256 id = lo_; id < current_; ++id) {
-            RedemptionRequestBatch storage batch = _redemptionRequestBatches[id];
-            uint128 tokens = batch.totalTokensToBurn;
-            if (tokens == 0) continue;
-            if (block.timestamp - batch.pricedAt > MAX_BATCH_PROCESSING_TIME) continue;
-            escrowedSupply += tokens;
-            liabilityETH += uint256(tokens).convertAssets(batch.finalEvePrice);
-        }
+    function liveRedemptionOffsets() public pure returns (uint256 liabilityETH, uint256 escrowedSupply) {
+        // Audit G1: queued EVE stays ordinary equity until it is paid, so there is no
+        // fixed-price carve-out of NAV or supply, and nothing to re-add when a batch lapses.
+        // Kept (always zero) so AMM and StrategyManager pricing need no change.
+        return (0, 0);
     }
 
     /**
@@ -269,7 +276,9 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
             revert ExitQueueRequestNotInBatch();
         }
 
-        if (batch.finalEvePrice.isRelativelyLessThan(request.evePriceAtRequestTime, request.priceTolerance)) {
+        // Audit G1: judge slippage against the price the request is actually settled at.
+        uint256 settlementPrice = _pinSettlementPrice(_batchId);
+        if (settlementPrice.isRelativelyLessThan(request.evePriceAtRequestTime, request.priceTolerance)) {
             // If slippage is too high, the request must be closed.
             request.closedDueToSlippage = true;
         }
@@ -307,6 +316,54 @@ contract ExitQueue is IExitQueue, Initializable, UUPSUpgradeable, RegistryClient
     }
 
     // ============ Internal Functions ============
+
+    /**
+     * @notice Whether `_batch` is priced and still inside `MAX_BATCH_PROCESSING_TIME`
+     */
+    function _isInWindow(RedemptionRequestBatch storage _batch) internal view returns (bool) {
+        return _batch.canBeProcessed && block.timestamp - _batch.pricedAt <= MAX_BATCH_PROCESSING_TIME;
+    }
+
+    /**
+     * @notice Settlement price of an in-window batch: the price pinned earlier in this
+     * transaction by {pullRequest}, otherwise the live AMM base price.
+     * @dev The pin keeps Controller, AMM and this contract on one price per transaction.
+     *      Without it, `AMM.processRedemption` re-reads {batchInfo} after burning the EVE but
+     *      before locking the ETH (live price momentarily too high), and later requests in a
+     *      `processRequests` loop would see the price nudged up by payout rounding dust. Either
+     *      way the AMM would want more ETH than the Controller sent.
+     */
+    function _settlementPrice(uint256 _batchId) internal view returns (uint256 price_) {
+        price_ = _tloadSettlementPrice(_batchId);
+        if (price_ == 0) price_ = IAMM(Auth.amm(registry())).eveBasePriceInETH();
+    }
+
+    /**
+     * @notice Read the settlement price for `_batchId` and pin it for the rest of the transaction
+     * @dev The first pull of a batch in a transaction reads the same live price the Controller
+     *      just read through {batchInfo}: the only state change in between is the Controller
+     *      sending ETH to the AMM, which leaves NAV unchanged. Settling `t` EVE at that price
+     *      (payout rounded down) leaves the price for remaining holders unchanged or higher by dust.
+     */
+    function _pinSettlementPrice(uint256 _batchId) internal returns (uint256 price_) {
+        price_ = _settlementPrice(_batchId);
+        if (price_ == 0) revert ExitQueueZeroPrice();
+        bytes32 slot = _settlementPriceTSlot(_batchId);
+        assembly ("memory-safe") {
+            tstore(slot, price_)
+        }
+    }
+
+    function _tloadSettlementPrice(uint256 _batchId) internal view returns (uint256 price_) {
+        bytes32 slot = _settlementPriceTSlot(_batchId);
+        assembly ("memory-safe") {
+            price_ := tload(slot)
+        }
+    }
+
+    function _settlementPriceTSlot(uint256 _batchId) internal pure returns (bytes32) {
+        return keccak256(abi.encode(_batchId, _SETTLEMENT_PRICE_TSLOT_SEED));
+    }
 
     /**
      * @notice Advance {liveScanFromBatchId} past priced batches that are empty or past

@@ -63,7 +63,7 @@ and the AMM float is not topped up. The relevant clocks are unforgiving:
 
 | Clock | Value | What runs out |
 |---|---|---|
-| `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | Priced batches go unprocessed; `pullRequest` is forbidden (`ExitQueueBatchExpired`); live NAV drops the liability with no reset tx; users fall back to `AMM.cancelRedemption()` (escape hatch) |
+| `ExitQueue.MAX_BATCH_PROCESSING_TIME` | 3 days | Priced batches go unprocessed; `pullRequest` is forbidden (`ExitQueueBatchExpired`); queued EVE was never carved out of NAV, so the price does not move at lapse (audit G1); users fall back to `AMM.cancelRedemption()` (escape hatch) |
 | Admin timelock delay | 48h minimum | Time to grant `KEEPER_ROLE` to a replacement address *after* the incident starts |
 
 Granting a keeper reactively therefore consumes most of the escape-hatch window
@@ -132,7 +132,7 @@ execute.
 | 7 | Active exploit / unknown anomaly | Anything not matching a known pattern | SECURITY | Full-freeze procedure (§5.4), then staged un-freeze (§5.5) | un-freeze requires 48h per timelock batch |
 | 8 | Keeper stops processing a priced exit batch | Batch `pricedAt` older than 3 days, requests unprocessed; `pullRequest` reverts `ExitQueueBatchExpired`; `liveRedemptionOffsets` no longer deducts that batch | Users (self-service) | `AMM.cancelRedemption(batchId)` — escape hatch returns escrowed EVE (the only remaining path; pull is forbidden) | `ExitQueue.MAX_BATCH_PROCESSING_TIME = 3 days` |
 | 9 | Registry paused | Role grants/revokes and contract registration revert; `StrategyManager.addStrategy()` reverts | ADMIN timelock | `Registry.unpause()` | 48h |
-| 10 | In-window priced liability exceeds NAV | `StrategyManagerQueuedLiabilityExceedsNAV` (and/or `AMMEscrowExceedsSupply`) freeze `enter()`/`exit()`/`eveBasePriceInETH()`/`priceBatch()` | SECURITY, then wait | Pause ExitQueue so no new batches can be priced. Do **not** try to pull expired or underwater claims. Wait out `MAX_BATCH_PROCESSING_TIME` so remaining L lapses in the view; users `cancelRedemption` remaining requests; recap AMM prices. Investigate how L exceeded NAV (NAV bug vs oversize queue) | pause instant; L lapses after 3 days from each batch's `pricedAt` |
+| 10 | ~~In-window priced liability exceeds NAV~~ **Retired by audit G1 (ExitQueue v1.1.0).** | Priced batches are no longer a fixed-price liability: `liveRedemptionOffsets()` is always `(0, 0)` and requests settle at the live price, so a post-pricing NAV drop reprices everyone instead of freezing NAV. `StrategyManagerQueuedLiabilityExceedsNAV` / `AMMEscrowExceedsSupply` remain as unreachable defensive checks | — | If either error is ever observed, treat it as a NAV bug (scenario 1 procedure) | — |
 
 ---
 
@@ -700,15 +700,18 @@ Live share-price accounting (see `ExitQueue.liveRedemptionOffsets()`):
   `StrategyKeeperExecutor.pendingRedemptionNeedsETH` also ignores it, so
   `WithdrawShortfall` cannot be griefed by queue-then-cancel.
 - Once a batch is **priced** (`Controller.priceBatch()` → `BatchPriced`,
-  `pricedAt` set), live NAV deducts `remainingTokens * finalEvePrice` and live
-  supply deducts remaining escrow. Requests **cannot be closed** for 3 days
-  (`ExitQueueRequestCannotBeClosed`). Within that window they must be settled
-  via `pullRequest()`.
+  `pricedAt` set), its membership is fixed and the 3-day window starts. It is
+  **not** carved out of NAV or supply (audit G1): queued EVE stays equity and
+  is paid at the live base price in the paying transaction, so queued users
+  carry NAV risk until payout, bounded by their `priceTolerance`. Requests
+  **cannot be closed** for 3 days (`ExitQueueRequestCannotBeClosed`). Within
+  that window they must be settled via `pullRequest()`.
+- Keeper views (`affordableRequests`, `pendingRedemptionNeedsETH`) and
+  `ExitQueue.batchInfo()` for an in-window priced batch read the live price, so
+  they revert while NAV is frozen (scenarios 1–2). Payout would revert anyway.
 - If **more than 3 days** pass after `pricedAt` without processing:
-  - Liability **lapses in the view** with no reset transaction — enter/exit
-    no longer reserve ETH for that batch.
-  - `pullRequest` is **forbidden** (`ExitQueueBatchExpired`) so a keeper
-    cannot pay a claim live NAV already dropped.
+  - Nothing changes in NAV or price at lapse (there is no liability to drop).
+  - `pullRequest` is **forbidden** (`ExitQueueBatchExpired`).
   - Any user can self-rescue: `AMM.cancelRedemption(batchId)` →
     `ExitQueue.closeRequest()` returns `viaEscapeHatch = true` and the AMM
     transfers the escrowed EVE back. This works **during a full protocol
@@ -717,13 +720,11 @@ Live share-price accounting (see `ExitQueue.liveRedemptionOffsets()`):
   pending, you have a 3-day SLA.** Either finish processing the batch before
   pausing (preferred: `Controller.processRequests(batchId)` needs Controller,
   ExitQueue, and AMM all unpaused), or accept that after 3 days pull is
-  forbidden, L drops out of NAV, and users exit the batch via the escape
-  hatch. Monitor: alert when `block.timestamp - pricedAt > 2 days` on any
+  forbidden and users exit the batch via the escape hatch. Monitor: alert when `block.timestamp - pricedAt > 2 days` on any
   batch with `unprocessedUsersCount(batchId) > 0`.
-- If `totalNAVInETH()` reverts `StrategyManagerQueuedLiabilityExceedsNAV`
-  (or AMM `AMMEscrowExceedsSupply`): pause ExitQueue so no further batches
-  can be priced; wait for remaining in-window batches to lapse; users cancel
-  leftover requests; then recap AMM. See scenario 10.
+- `StrategyManagerQueuedLiabilityExceedsNAV` / `AMMEscrowExceedsSupply` can
+  no longer fire (scenario 10 retired by audit G1); if observed, treat as a
+  NAV bug.
 
 ### 5.4 Full-freeze procedure (SECURITY multisig, single transaction batch if possible)
 
