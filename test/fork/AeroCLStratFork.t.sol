@@ -24,6 +24,10 @@ import {ICLPool} from "../../src/interfaces/integrations/aero/ICLPool.sol";
 import {ICLFactory} from "../../src/interfaces/integrations/aero/ICLFactory.sol";
 import {IDynamicSwapFeeHook} from "../../src/interfaces/integrations/aero/IDynamicSwapFeeHook.sol";
 import {FullMath} from "../../src/libraries/integrations/uniswap/FullMath.sol";
+import {LiquidityAmounts} from "../../src/libraries/integrations/uniswap/LiquidityAmounts.sol";
+import {CLPositionLib} from "../../src/libraries/strategies/CLPositionLib.sol";
+import {CLStratLib} from "../../src/libraries/strategies/CLStratLib.sol";
+import {IOracle} from "../../src/interfaces/IOracle.sol";
 import {TickMath} from "../../src/libraries/integrations/uniswap/TickMath.sol";
 import {TickUtils} from "../../src/libraries/integrations/uniswap/TickUtils.sol";
 
@@ -65,7 +69,7 @@ contract DeployAeroCLStratProbeHarness is DeployAeroCLStrat {
 
     /// @dev The budget constant is `internal`, so expose it for assertions.
     function feeBudgetPips() external pure returns (uint256) {
-        return MAX_QUOTE_DEVIATION_BPS * PIPS_PER_BPS;
+        return FEE_CAP_BUDGET_BPS * PIPS_PER_BPS;
     }
 }
 
@@ -326,7 +330,7 @@ contract AeroCLStratForkTest is Test {
         DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
         _mockPoolFeeCap(harness.feeBudgetPips());
 
-        vm.expectRevert(bytes("Aero pool fee cap does not fit inside MAX_QUOTE_DEVIATION_BPS"));
+        vm.expectRevert(bytes("Aero pool fee cap does not fit inside FEE_CAP_BUDGET_BPS"));
         harness.probeStrict(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
     }
 
@@ -345,7 +349,7 @@ contract AeroCLStratForkTest is Test {
         );
         vm.mockCall(AERO_WETH_USDT_POOL, abi.encodeCall(ICLPool.fee, ()), abi.encode(uint24(harness.feeBudgetPips())));
 
-        vm.expectRevert(bytes("Aero pool fee cap does not fit inside MAX_QUOTE_DEVIATION_BPS"));
+        vm.expectRevert(bytes("Aero pool fee cap does not fit inside FEE_CAP_BUDGET_BPS"));
         harness.probeStrict(AERO_CL_FACTORY, AERO_WETH_USDT_POOL, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
     }
 
@@ -370,7 +374,7 @@ contract AeroCLStratForkTest is Test {
         DeployAeroCLStratProbeHarness harness = new DeployAeroCLStratProbeHarness();
 
         vm.expectRevert(
-            bytes("pool observationCardinality below ceil(interval/MAX_BLOCK_SECONDS); grow and wait for fill")
+            bytes("pool observationCardinality below ceil(interval/MAX_BLOCK_SECONDS) + 1; grow and wait for fill")
         );
         harness.probe(AERO_CL_FACTORY, fresh, TWAP_INTERVAL, SHORT_TWAP_INTERVAL);
     }
@@ -392,7 +396,7 @@ contract AeroCLStratForkTest is Test {
             abi.encodeWithSelector(
                 IUniCLStrat.UniCLStratInsufficientObservationCardinality.selector,
                 FRESH_POOL_CARDINALITY,
-                strategy.MIN_OBSERVATION_CARDINALITY()
+                TWAP_INTERVAL / strategy.MAX_BLOCK_SECONDS() + 1
             )
         );
         new AeroCLStrat(config);
@@ -409,7 +413,7 @@ contract AeroCLStratForkTest is Test {
         assertTrue(strategy.initTicks(), "ticks should be initialised");
         assertEq(strategy.totalDeposited(), DEPOSIT_AMOUNT);
         assertTrue(strategy.isHealthy(), "freshly minted position should be healthy");
-        assertApproxEqRel(strategy.navInETH(), DEPOSIT_AMOUNT, NAV_TOLERANCE, "NAV should track deposited ETH");
+        assertApproxEqRel(_grossNavInETH(), DEPOSIT_AMOUNT, NAV_TOLERANCE, "NAV should track deposited ETH");
     }
 
     function test_Fork_Deposit_RevertsAboveMaxDeposit() public onlyFork {
@@ -458,6 +462,27 @@ contract AeroCLStratForkTest is Test {
         );
     }
 
+    /// @dev The suite otherwise runs at the 200 bps maximum; deployments default to 100 bps
+    ///      (#63 GEN-26). The same partial withdrawal, after a dislocation, at the default.
+    function test_Fork_Withdraw_PartialAtDefaultSlippage() public onlyFork {
+        vm.prank(admin);
+        strategy.setSwapSlippageBps(strategy.DEFAULT_SWAP_SLIPPAGE_BPS());
+        _prepareCalmAlignedPool();
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 navBefore = strategy.navInETH();
+
+        _movePoolTickBy(NOT_CALM_TICK_OFFSET);
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, PARTIAL_WITHDRAW_AMOUNT);
+
+        assertEq(withdrawn, PARTIAL_WITHDRAW_AMOUNT, "partial withdrawal should be exact");
+        assertEq(receiver.balance, PARTIAL_WITHDRAW_AMOUNT, "receiver should get native ETH");
+        assertApproxEqRel(
+            strategy.navInETH(), navBefore - PARTIAL_WITHDRAW_AMOUNT, WITHDRAW_TOLERANCE, "NAV should shrink by payout"
+        );
+    }
+
     function test_Fork_Withdraw_FullRoundTripEmptiesStrategy() public onlyFork {
         _prepareCalmAlignedPool();
         _deposit(DEPOSIT_AMOUNT);
@@ -493,7 +518,7 @@ contract AeroCLStratForkTest is Test {
         assertGt(owedWethAfter, owedWethBefore, "WETH-in leg should accrue WETH fees");
 
         // The strategy's view must equal an independent oracle valuation of the poked fees.
-        uint256 feeBaseETH = _valueInETH(owedWethAfter - owedWethBefore, owedUsdtAfter - owedUsdtBefore);
+        uint256 feeBaseETH = _netValueInETH(owedWethAfter - owedWethBefore, owedUsdtAfter - owedUsdtBefore);
         assertApproxEqRel(
             strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS),
             feeBaseETH * PERFORMANCE_FEE_BPS / BPS,
@@ -553,7 +578,7 @@ contract AeroCLStratForkTest is Test {
         assertApproxEqRel(netWeth * 1e18 / grossWeth, keptShare, UNSTAKED_FEE_RATIO_TOLERANCE, "WETH fees net");
         assertApproxEqRel(
             strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS),
-            _valueInETH(netWeth, netUsdt) * PERFORMANCE_FEE_BPS / BPS,
+            _netValueInETH(netWeth, netUsdt) * PERFORMANCE_FEE_BPS / BPS,
             FEE_VALUATION_TOLERANCE,
             "pending fee should follow tokensOwed net of the unstaked fee"
         );
@@ -648,7 +673,8 @@ contract AeroCLStratForkTest is Test {
     function test_Fork_PauseThenEmergencyExit_SweepsUnwoundPosition() public onlyFork {
         _prepareCalmAlignedPool();
         _deposit(DEPOSIT_AMOUNT);
-        uint256 navBefore = strategy.navInETH();
+        // The sweep hands over USDT itself, so compare against NAV before the exit-cost mark-down.
+        uint256 navBefore = _grossNavInETH();
 
         vm.prank(security);
         strategy.pause();
@@ -756,6 +782,43 @@ contract AeroCLStratForkTest is Test {
     /// @dev Independent valuation: WETH at par, USDT through the Oracle (as the strategy does).
     function _valueInETH(uint256 _weth, uint256 _usdt) internal view returns (uint256) {
         return _weth + oracle.convert(USDT, address(0), _usdt, USDT_DECIMALS, 18);
+    }
+
+    /// @dev {_valueInETH} with the strategy's exit-cost mark-down on the USDT side (audit G2).
+    function _netValueInETH(uint256 _weth, uint256 _usdt) internal view returns (uint256) {
+        uint256 usdtValue = oracle.convert(USDT, address(0), _usdt, USDT_DECIMALS, 18);
+        return _weth + usdtValue - _exitCost(usdtValue);
+    }
+
+    function _exitCost(uint256 _pairedValue) internal view returns (uint256) {
+        return CLStratLib.exitCostInETH(_pairedValue, strategy.exitRouteFeePips(), strategy.swapSlippageBps());
+    }
+
+    /// @dev `navInETH()` with the exit-cost mark-down added back: USDT held idle, in both ranges
+    ///      (read at the oracle price, as NAV does) and owed, valued at the oracle.
+    function _grossNavInETH() internal view returns (uint256) {
+        IUniswapV3Pool pool = IUniswapV3Pool(AERO_WETH_USDT_POOL);
+        uint160 sqrtPriceX96 =
+            CLPositionLib.oracleSqrtPriceX96(IOracle(address(oracle)), WETH, pool.token0(), pool.token1());
+        uint256 usdt = IERC20(USDT).balanceOf(address(strategy));
+        (int24 lower, int24 upper) = strategy.positionMain();
+        usdt += _usdtInRange(pool, lower, upper, sqrtPriceX96);
+        (lower, upper) = strategy.positionAlt();
+        if (lower < upper) usdt += _usdtInRange(pool, lower, upper, sqrtPriceX96);
+        return strategy.navInETH() + _exitCost(oracle.convert(USDT, address(0), usdt, USDT_DECIMALS, 18));
+    }
+
+    function _usdtInRange(IUniswapV3Pool _pool, int24 _lower, int24 _upper, uint160 _sqrtPriceX96)
+        internal
+        view
+        returns (uint256)
+    {
+        (uint128 liquidity,,, uint128 owed0, uint128 owed1) =
+            _pool.positions(keccak256(abi.encodePacked(address(strategy), _lower, _upper)));
+        (uint256 amount0, uint256 amount1) = LiquidityAmounts.getAmountsForLiquidity(
+            _sqrtPriceX96, TickMath.getSqrtRatioAtTick(_lower), TickMath.getSqrtRatioAtTick(_upper), liquidity
+        );
+        return wethIsToken0 ? amount1 + owed1 : amount0 + owed0;
     }
 
     /// @dev Swaps USDT -> WETH and back through the Aero pool, so both tokens accrue LP fees.

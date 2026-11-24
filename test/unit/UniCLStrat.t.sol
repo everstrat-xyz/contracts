@@ -291,7 +291,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertApproxEqAbs(strategy.navInETH(), DEPOSIT_AMOUNT - _exitCost(paired), NAV_TOLERANCE);
     }
 
-    function test_NavInETH_MarksDownThePairedSideInEitherTokenOrder() public {
+    function test_NavInETH_MarksDownThePairedSideInEitherTokenOrder() public view {
         // Unequal WETH and paired amounts: picking the wrong side as "paired" would deduct the
         // exit cost of the WETH amount instead. Called on the library directly so both pool
         // orderings are covered with one mock pool.

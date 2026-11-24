@@ -147,12 +147,7 @@ contract DeployAeroCLStrat is Script {
         _requirePairedTokenPriced(registry, pool, weth);
 
         return IUniCLStrat.DeploymentConfig({
-            addresses: IUniCLStrat.AddressConfig({
-                registry: registry,
-                weth: weth,
-                pool: pool,
-                factory: factory
-            }),
+            addresses: IUniCLStrat.AddressConfig({registry: registry, weth: weth, pool: pool, factory: factory}),
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: vm.envAddress("SWAP_ADAPTER_ADDRESS"),
                 wethToPairedTokenPath: vm.envBytes("WETH_TO_PAIRED_TOKEN_PATH"),
@@ -244,11 +239,13 @@ contract DeployAeroCLStrat is Script {
         console.log("Aero pool WETH balance (wei):", poolWeth);
         console.log("MAX_TOTAL_NAV (wei):", maxTotalNAV);
 
-        // Divide rather than multiply MAX_TOTAL_NAV, so a huge value cannot overflow the check.
-        if (maxTotalNAV <= poolWeth / BASIS_POINTS * MAX_NAV_POOL_WETH_SHARE_BPS) return false;
+        // A MAX_TOTAL_NAV too large to scale is above any pool share; checked first so the
+        // exact comparison below cannot overflow.
+        bool tooLargeToScale = maxTotalNAV > type(uint256).max / BASIS_POINTS;
+        if (!tooLargeToScale && maxTotalNAV * BASIS_POINTS <= poolWeth * MAX_NAV_POOL_WETH_SHARE_BPS) return false;
 
         console.log("WARNING: MAX_TOTAL_NAV is above 15% of the pool's WETH balance (bps of pool WETH):");
-        console.log(poolWeth < BASIS_POINTS ? type(uint256).max : maxTotalNAV / (poolWeth / BASIS_POINTS));
+        console.log(poolWeth == 0 || tooLargeToScale ? type(uint256).max : (maxTotalNAV * BASIS_POINTS) / poolWeth);
         console.log("Aero pools are thin; start at ~10-20 ETH (docs/STRATEGY_GUARDRAILS.md section 1.1.2).");
         return true;
     }

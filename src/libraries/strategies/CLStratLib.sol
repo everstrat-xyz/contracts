@@ -396,7 +396,8 @@ library CLStratLib {
         uint256 _oracleAmountIn = _calculateOracleAmountIn(_config, _path, _amountOut);
         _enforceOracleBounds(_quotedAmountIn, _oracleAmountIn);
 
-        uint256 _maxAmountIn = (_quotedAmountIn * (BASIS_POINTS + _config.slippageBps) + BASIS_POINTS - 1) / BASIS_POINTS + 1;
+        uint256 _maxAmountIn =
+            (_quotedAmountIn * (BASIS_POINTS + _config.slippageBps) + BASIS_POINTS - 1) / BASIS_POINTS + 1;
 
         (address _inToken,) = _converter.routeTokens(_config.adapter, _path);
         uint256 _inBalance = IERC20Metadata(_inToken).balanceOf(address(this));
