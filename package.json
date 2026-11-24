@@ -1,7 +1,8 @@
 {
-  "name": "guide-dao-smart-contracts",
+  "name": "everstrat-contracts",
   "version": "1.0.0",
-  "description": "Smart contracts for Guide DAO",
+  "description": "Everstrat smart contracts",
+  "license": "MIT",
   "private": true,
   "scripts": {
     "lint": "solhint 'src/**/*.sol' 'test/**/*.sol'",

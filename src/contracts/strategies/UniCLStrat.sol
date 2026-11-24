@@ -9,6 +9,8 @@ import {CLPoolLib} from "../../libraries/strategies/CLPoolLib.sol";
  * @title UniCLStrat
  * @notice Native-ETH concentrated-liquidity strategy for Uniswap pools.
  * @dev Uses the shared CLStrat implementation with the UniswapV3 pool ABI and factory lookup.
+ *      Version 3.0.0 is the re-implementation on {CLStrat}: storage layout, linked libraries and
+ *      the `setRouteConfig` / `RouteConfigUpdated` ABI (exit route fee) differ from 2.0.0.
  *      Direct pool positions earn swap fees; no NFT or gauge staking.
  */
 contract UniCLStrat is CLStrat {
@@ -19,6 +21,6 @@ contract UniCLStrat is CLStrat {
     }
 
     function version() external pure returns (string memory) {
-        return "2.0.0";
+        return "3.0.0";
     }
 }

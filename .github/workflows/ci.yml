@@ -53,3 +53,43 @@ jobs:
       - name: Run Solhint
         run: npm run lint
         id: solhint
+
+  fork:
+    # Mainnet fork suites (#63 GEN-10). Without the MAINNET_RPC_URL secret (forks, or before the
+    # secret is added) the job passes with a notice; with it, a skipped fork suite fails the job.
+    name: Mainnet fork tests
+    runs-on: ubuntu-latest
+    env:
+      MAINNET_RPC_URL: ${{ secrets.MAINNET_RPC_URL }}
+      # Pinned so results are reproducible; bump deliberately. Aero (Ethereum) launched 2026-10-22.
+      MAINNET_FORK_BLOCK: ${{ vars.MAINNET_FORK_BLOCK || '26485461' }}
+    steps:
+      - name: Check for RPC secret
+        id: rpc
+        run: |
+          if [ -z "$MAINNET_RPC_URL" ]; then
+            echo "::notice::MAINNET_RPC_URL secret not set; skipping fork tests"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.rpc.outputs.available == 'true'
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        if: steps.rpc.outputs.available == 'true'
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.0.0
+
+      - name: Run fork tests
+        if: steps.rpc.outputs.available == 'true'
+        run: |
+          forge test --match-path 'test/fork/*' -vvv | tee fork.log
+          if grep -q 'skipped' fork.log && ! grep -q ', 0 skipped' fork.log; then
+            echo "::error::fork tests were skipped although MAINNET_RPC_URL is set"
+            exit 1
+          fi

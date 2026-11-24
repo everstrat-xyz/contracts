@@ -6,9 +6,8 @@ pragma solidity ^0.8.30;
  * @title ICLFactory
  * @notice Minimal interface for the Aero (Slipstream) `CLFactory`.
  * @dev Our own declarations of the deployed ABI (see {ICLPool}). Unlike Uniswap V3, pools are
- *      keyed by tick spacing, not fee. The factory also exposes a `uint24` `getPool` overload
- *      that is likewise keyed by tick spacing — passing a fee to it returns `address(0)` — so
- *      only the `int24` overload is declared here.
+ *      keyed by tick spacing, not fee: only the `int24` tick-spacing `getPool` is declared and
+ *      used here, never a fee-keyed lookup.
  */
 interface ICLFactory {
     function getPool(address _tokenA, address _tokenB, int24 _tickSpacing) external view returns (address pool);
