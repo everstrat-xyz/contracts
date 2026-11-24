@@ -84,9 +84,11 @@ library Auth {
     /// @notice Emergency response across the protocol. Held directly by the security multisig
     ///         (no timelock) because these actions must be available the instant a threat is
     ///         detected. Beyond pausing, it can trigger the emergency capital-recovery paths:
-    ///           - pause() on AMM, Controller, ExitQueue, StrategyManager, UniCLStrat, Registry
+    ///           - pause() on AMM, Controller, ExitQueue, StrategyManager, Converter, Registry and
+    ///             every CLStrat-derived strategy (UniCLStrat, AeroCLStrat)
     ///           - Controller.emergencyExitToAMM() (sweep idle Controller ETH back to the AMM)
-    ///           - UniCLStrat.emergencyExit() (unwind a paused strategy back to StrategyManager)
+    ///           - emergencyExit() on a paused CLStrat-derived strategy (UniCLStrat, AeroCLStrat:
+    ///             sweep its holdings back to StrategyManager)
     ///         It can never unpause, configure, or upgrade: unpause stays with ADMIN_ROLE so a
     ///         compromised security multisig cannot re-open the protocol.
     bytes32 internal constant SECURITY_ROLE = keccak256("SECURITY_ROLE");

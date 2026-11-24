@@ -29,6 +29,8 @@ UniCLStrat::constructor(DeploymentConfig _params)
 │   └── It should revert with UniCLStratInsufficientObservationCardinality
 ├── Given maxSwapSlippageBps exceeds MAX_SLIPPAGE_BPS
 │   └── It should revert with UniCLStratInvalidConfig
+├── Given the exit route fee plus maximum slippage is at least 100%
+│   └── It should revert with UniCLStratInvalidConfig
 └── Given valid parameters
     ├── It should chain RegistryClient(_params.addresses.registry) in the constructor modifier list
     ├── It should store registry reference via RegistryClient (immutable after deploy)
@@ -63,9 +65,20 @@ UniCLStrat::navInETH()
 ├── Given the strategy has WETH balance
 │   └── It should include WETH one-to-one
 ├── Given the strategy has paired token balance
-│   └── It should convert paired token value through the oracle
+│   ├── It should convert paired token value through the oracle
+│   ├── It should mark the paired value down by the configured exit route fee plus swapSlippageBps, rounded up
+│   └── It should mark down the paired side whichever of token0/token1 is WETH
 ├── Given the strategy has active pool positions
-│   └── It should include liquidity and tokens owed from the pool
+│   ├── It should include liquidity and tokens owed from the pool
+│   ├── It should read position amounts at the oracle-implied price, not the pool TWAP
+│   ├── It should mark down only the paired share of the positions
+│   └── It should count an alt record on the main key only once
+├── Given the pool TWAP drifts from the oracle or observe reverts
+│   └── It should not change
+├── Given a pool mint is half paid
+│   └── It should revert with UniCLStratMintInProgress
+├── Given swapSlippageBps changes
+│   └── It should move the mark-down by the change times the paired value
 └── Given the strategy has no balances or positions
     └── It should return zero
 
@@ -98,6 +111,12 @@ UniCLStrat::isHealthy()
 │   └── It should return false
 ├── Given current tick deviates from center by more than rebalanceTickThreshold
 │   └── It should return false
+├── Given the Converter is paused
+│   └── It should return true
+├── Given idle WETH / paired inventory exceeds 1% of the position value and 0.01 WETH
+│   └── It should return false
+├── Given idle inventory is below 0.01 WETH
+│   └── It should return true
 └── Given current tick is calm and within threshold
     └── It should return true
 
@@ -111,6 +130,8 @@ UniCLStrat::deposit()
 ├── Given msg.value equals remaining headroom to maxTotalNAV
 │   └── It should accept the deposit (msg.value already counted in navInETH)
 ├── Given pool is not calm
+│   └── It should revert with UniCLStratNotCalm
+├── Given spot is more than two tick spacings from the short TWAP (inside maxTickDeviation)
 │   └── It should revert with UniCLStratNotCalm
 ├── Given spot tick diverges from long TWAP within maxTickDeviation
 │   └── It should size mint liquidity at spot and complete deposit
@@ -165,7 +186,11 @@ UniCLStrat::withdraw(address _receiver, uint256 _amount)
     ├── It should poke then accrue pending LP fees into the performance-fee base before remove/collect
     ├── It should remove and collect existing liquidity
     ├── When the amount padded by swapSlippageBps covers the whole NAV
-    │   └── It should fully unwind without probing the paired -> WETH route
+    │   ├── It should fully unwind without probing the paired -> WETH route
+    │   ├── It should swap the leftover paired token to WETH and pay out all WETH (may exceed the amount)
+    │   ├── It should leave at most the removeStrategy NAV residue behind
+    │   └── When the drain quote fails, falls outside the oracle band, or the drain swap reverts
+    │       └── It should skip the drain swap and pay out the WETH on hand
     ├── When the amount padded by swapSlippageBps falls short of the whole NAV
     │   └── It should probe the route cost before sizing a partial burn
     ├── It should convert inventory to WETH only up to the remainder not covered by idle native ETH
@@ -176,6 +201,13 @@ UniCLStrat::withdraw(address _receiver, uint256 _amount)
     ├── It should rebalance remaining inventory only if pool is calm
     ├── It should re-add liquidity only if pool is calm
     ├── It should still complete the unwind and payout when the pool is not calm (re-add skipped)
+    ├── When idle native ETH is most of the request
+    │   └── It should judge near-full on the remainder against NAV without idle ETH (no forced full unwind)
+    ├── When the re-add's alt candidate equals the main range
+    │   └── It should leave the leftover idle instead of placing alt on the main key
+    ├── When the paired -> WETH swap reverts (quote fails, outside the oracle band, or swap failure)
+    │   ├── It should emit WethConversionSkipped and keep the paired token in NAV
+    │   └── It should pay out the ETH/WETH already held (partial withdrawal) instead of reverting
     ├── It should emit FundsWithdrawn
     └── It should return the ETH amount actually sent to the receiver
 
@@ -188,6 +220,10 @@ UniCLStrat::rebalance()
 │   └── It should revert with StrategyIsHealthy
 ├── Given spot tick diverges from long TWAP within maxTickDeviation
 │   └── It should size mint liquidity at spot and complete rebalance
+├── Given the main range is well placed and only idle inventory makes it unhealthy
+│   └── It should redeploy the idle inventory without re-centering or swapping
+├── Given the re-centered main range lands on a stale alt key
+│   └── It should not count it twice (a full unwind clears the alt record)
 └── Given caller is the registered StrategyManager and strategy is unhealthy but calm
     ├── It should poke then accrue pending LP fees before remove/collect
     ├── It should remove and collect existing liquidity
@@ -224,10 +260,19 @@ UniCLStrat::pause()
 │   ├── It should still revoke the WETH Converter allowance
 │   ├── It should leave the paired token's Converter allowance unchanged
 │   └── It should emit ConverterAllowanceRevocationSkipped for the paired token
+├── Given the Registry was rewired to another Converter since the allowances were granted
+│   ├── It should revoke the allowances from the Converter that received them
+│   └── It should grant the current Converter on unpause()
 ├── Given WETH rejects zero approval
 │   └── It should revert
 └── Given the pause-time liquidity unwind was skipped and the pool has recovered
     └── It should remove and collect the remaining pool liquidity on unpause() followed by pause()
+
+UniCLStrat::selfConvertToWeth(uint256 _amountOut)
+├── Given caller is not the strategy itself
+│   └── It should revert with UniCLStratCallerNotSelf
+└── Given caller is the strategy (withdraw's try/catch)
+    └── It should buy exactly _amountOut WETH via the oracle-bounded exact-output swap
 
 UniCLStrat::selfRemoveLiquidityAndCollect()
 ├── Given caller is not the strategy itself
@@ -323,7 +368,9 @@ UniCLStrat::setTwapInterval(uint32 _newTwapInterval)
 │   └── It should revert with UniCLStratInvalidConfig
 ├── Given pool.observe cannot serve the new interval
 │   └── It should revert with UniCLStratPoolTWAPNotAvailable (storage unchanged)
-├── Given in-use observationCardinality is below ceil(newInterval / MAX_BLOCK_SECONDS)
+├── Given new interval is not above shortTwapInterval
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given in-use observationCardinality is below ceil(newInterval / MAX_BLOCK_SECONDS) + 1
 │   └── It should revert with UniCLStratInsufficientObservationCardinality (storage unchanged)
 └── Given caller has ADMIN_ROLE and the pool can serve the interval
     └── It should update twapInterval and emit TwapIntervalUpdated
@@ -335,10 +382,20 @@ UniCLStrat::setShortTwapInterval(uint32 _newShortTwapInterval)
 │   └── It should revert with UniCLStratInvalidConfig
 ├── Given new interval is above MAX_TWAP_INTERVAL
 │   └── It should revert with UniCLStratInvalidConfig
+├── Given new interval is not below twapInterval
+│   └── It should revert with UniCLStratInvalidConfig
 ├── Given pool.observe cannot serve the new interval
 │   └── It should revert with UniCLStratPoolTWAPNotAvailable (storage unchanged)
 └── Given caller has ADMIN_ROLE and the pool can serve the interval
     └── It should update shortTwapInterval and emit ShortTwapIntervalUpdated
+
+UniCLStrat::range and calm-band setters
+├── Given positionWidth below 2 or positionWidth * tickSpacing above MAX_TICK / 2
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given rebalanceTickThreshold below tickSpacing - 1 or at least positionWidth * tickSpacing
+│   └── It should revert with UniCLStratInvalidConfig
+└── Given maxTickDeviation above MAX_TICK
+    └── It should revert with UniCLStratInvalidConfig
 
 UniCLStrat::uniswapV3MintCallback(uint256 _amount0, uint256 _amount1, bytes _data)
 ├── Given caller is not the pool
@@ -371,7 +428,9 @@ UniCLStrat::fuzz invariants
 ├── Given a bounded valid deposit amount
 │   ├── It should track totalDeposited exactly
 │   └── It should keep NAV approximately equal to deposited value
+├── Given bounded WETH, paired balances and swapSlippageBps
+│   └── It should never mark NAV above the gross oracle value
 └── Given bounded valid deposit and withdrawal amounts
-    ├── It should transfer requested ETH to receiver
+    ├── It should transfer requested ETH to receiver (at least it, for a near-full request)
     ├── It should track totalWithdrawn exactly
     └── It should reduce NAV by the withdrawn amount

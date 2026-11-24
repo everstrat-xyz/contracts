@@ -102,11 +102,12 @@ contract TimelockGovernanceTest is ProtocolTestBase {
                 routes: IUniCLStrat.RouteConfig({
                     swapAdapter: address(swapAdapter),
                     wethToPairedTokenPath: abi.encodePacked(address(weth), uint24(3000), address(pairedToken)),
-                    pairedTokenToWethPath: abi.encodePacked(address(pairedToken), uint24(3000), address(weth))
+                    pairedTokenToWethPath: abi.encodePacked(address(pairedToken), uint24(3000), address(weth)),
+                    exitRouteFeePips: 3000
                 }),
                 strategy: IUniCLStrat.StrategyConfig({
                     positionWidth: 2,
-                    rebalanceTickThreshold: 30,
+                    rebalanceTickThreshold: 59,
                     maxTickDeviation: 10,
                     twapInterval: 1800,
                     shortTwapInterval: 60,

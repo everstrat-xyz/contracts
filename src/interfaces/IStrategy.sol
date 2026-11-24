@@ -126,9 +126,11 @@ interface IStrategy {
      *      a guaranteed revert, swallowed on the batch path as `StrategyRebalanceFailed`.
      *
      *      Because `true` is the safe default, implementations MUST also return 0 from
-     *      `maxDeposit()` in every such state: deposit gating relies on the pair
-     *      (`isHealthy() && maxDeposit() > 0`), and `isHealthy()` alone no longer excludes
-     *      a paused or otherwise non-depositable strategy.
+     *      `maxDeposit()` in every such state except the uninitialised one: deposit gating
+     *      relies on the pair (`isHealthy() && maxDeposit() > 0`), and `isHealthy()` alone no
+     *      longer excludes a paused or otherwise non-depositable strategy. A strategy whose
+     *      position is not yet established reports healthy and still accepts the bootstrap
+     *      deposit that establishes it.
      * @return bool False when `rebalance()` is needed and actionable, true otherwise
      */
     function isHealthy() external view returns (bool);

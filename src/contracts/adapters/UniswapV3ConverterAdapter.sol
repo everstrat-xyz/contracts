@@ -1,4 +1,7 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
+// _quoteAtTick adapts Uniswap V3 Periphery's OracleLibrary.getQuoteAtTick to accept uint256 amounts.
+// This repository first recorded the adaptation on 2026-08-04.
+// https://github.com/Uniswap/v3-periphery/blob/main/contracts/libraries/OracleLibrary.sol#L44-L63
 pragma solidity ^0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -299,7 +302,6 @@ contract UniswapV3ConverterAdapter is IUniswapV3ConverterAdapter {
 
     /**
      * @notice Converts `_baseAmount` of `_baseToken` into `_quoteToken` terms at a given tick
-     * @dev Port of Uniswap's OracleLibrary.getQuoteAtTick generalised to uint256 amounts.
      */
     function _quoteAtTick(int24 _tick, uint256 _baseAmount, address _baseToken, address _quoteToken)
         internal

@@ -91,7 +91,7 @@ contract UniCLStratBootstrapParamsTest is Test {
         if (!vm.envExists("MAINNET_RPC_URL")) return;
 
         string memory rpcUrl = vm.envString("MAINNET_RPC_URL");
-        uint256 forkBlock = vm.envUint("MAINNET_FORK_BLOCK");
+        uint256 forkBlock = vm.envOr("MAINNET_FORK_BLOCK", uint256(0));
         if (forkBlock == 0) {
             vm.createSelectFork(rpcUrl);
         } else {
@@ -162,7 +162,8 @@ contract UniCLStratBootstrapParamsTest is Test {
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(adapter),
                 wethToPairedTokenPath: abi.encodePacked(WETH, ROUTE_FEE, _paired),
-                pairedTokenToWethPath: abi.encodePacked(_paired, ROUTE_FEE, WETH)
+                pairedTokenToWethPath: abi.encodePacked(_paired, ROUTE_FEE, WETH),
+                exitRouteFeePips: ROUTE_FEE
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: _positionWidth,

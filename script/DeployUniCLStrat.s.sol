@@ -15,7 +15,7 @@ import {Auth} from "../src/libraries/Auth.sol";
  *
  * @dev IMPORTANT DEPLOYMENT ORDER:
  *
- *      The UniCLStrat constructor calls `_validateRouteConfig()`, which reads the
+ *      The UniCLStrat constructor calls `_validateRouteConfig`, which reads the
  *      Registry to resolve the Converter address (`_registry.converter()`) and then
  *      calls `converter.validateRoute(...)` and `converter.routeTokens(...)`.
  *      This means the following prerequisites MUST be met BEFORE deploying UniCLStrat:
@@ -52,6 +52,8 @@ import {Auth} from "../src/libraries/Auth.sol";
  *           so a quiet cardinality-1 pool cannot mark at a spot-extrapolated TWAP.
  *           Grow the ring via `increaseObservationCardinalityNext` and wait for fill
  *           *before* this script if either probe would fail.
+ *           Set `EXIT_ROUTE_FEE_PIPS` to the estimated fee of the paired-token to WETH
+ *           route in parts per million (500 for a 0.05% fee).
  *        C. Schedule `StrategyManager.addStrategy(strategy, depositWeight, withdrawalWeight)`.
  *
  *      See `docs/STRATEGY_GUARDRAILS.md`. Do not use the deployer's temporary bootstrap
@@ -128,7 +130,8 @@ contract DeployUniCLStrat is Script {
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: vm.envAddress("SWAP_ADAPTER_ADDRESS"),
                 wethToPairedTokenPath: vm.envBytes("WETH_TO_PAIRED_TOKEN_PATH"),
-                pairedTokenToWethPath: vm.envBytes("PAIRED_TOKEN_TO_WETH_PATH")
+                pairedTokenToWethPath: vm.envBytes("PAIRED_TOKEN_TO_WETH_PATH"),
+                exitRouteFeePips: vm.envUint("EXIT_ROUTE_FEE_PIPS")
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: int24(vm.envInt("POSITION_WIDTH")),
@@ -158,18 +161,18 @@ contract DeployUniCLStrat is Script {
         }
     }
 
-    /// @dev In-use `observationCardinality` (not Next) must cover ceil(interval / 12s),
-    ///      floored at MIN_OBSERVATION_CARDINALITY — otherwise a quiet ring can still
+    /// @dev In-use `observationCardinality` (not Next) must cover ceil(interval / 12s) + 1
+    ///      (the bracketing observation), floored at MIN_OBSERVATION_CARDINALITY — otherwise a quiet ring can still
     ///      serve observe() by extrapolating a spot-like TWAP.
     function _requirePoolObservationCardinality(address pool, uint32 interval) internal view {
         (,,, uint16 cardinality,,,) = IUniswapV3Pool(pool).slot0();
-        uint256 required = (uint256(interval) + MAX_BLOCK_SECONDS - 1) / MAX_BLOCK_SECONDS;
+        uint256 required = (uint256(interval) + MAX_BLOCK_SECONDS - 1) / MAX_BLOCK_SECONDS + 1;
         if (required < MIN_OBSERVATION_CARDINALITY) required = MIN_OBSERVATION_CARDINALITY;
         // Fail closed: truncating to uint16 would accept a window no V3 ring can cover.
         require(required <= type(uint16).max, "TWAP window exceeds uint16 observation ring");
         require(
             cardinality >= uint16(required),
-            "pool observationCardinality below ceil(interval/MAX_BLOCK_SECONDS); grow and wait for fill"
+            "pool observationCardinality below ceil(interval/MAX_BLOCK_SECONDS) + 1; grow and wait for fill"
         );
     }
 }

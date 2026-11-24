@@ -622,9 +622,9 @@ Strategy contracts implementing this interface are registered with StrategyManag
 ## Source layout conventions
 
 - **`src/libraries/`** — shared by core protocol contracts (AMM, Controller, StrategyManager, Oracle, Registry).
-- **`src/libraries/strategies/<name>/`** — libraries used by a single strategy implementation only. UniCL math lives under `uni-cl-strategy/` (adapted from Uniswap V3 Core/Periphery).
+- **`src/libraries/strategies/`** — shared concentrated-liquidity logic: `CLRangeLib` (range management), `CLPositionLib` (direct-pool positions and LP fees), `CLPoolLib` (venue ABIs), and `CLStratLib` (swaps and inventory math). V3 math lives under `src/libraries/integrations/uniswap/`.
 - **`src/interfaces/integrations/`** — minimal ABIs for external protocols strategies call (not part of the core interface surface).
-- **`src/contracts/strategies/`** — static strategy contracts; each strategy may import from its matching `libraries/strategies/…` folder.
+- **`src/contracts/strategies/`** — static strategy contracts. `UniCLStrat` and `AeroCLStrat` inherit the shared `CLStrat` implementation; each constructor fixes its venue and each contract exposes its own metadata.
 
 ## Project Structure
 
@@ -882,7 +882,7 @@ Deploys Registry, EVE, ExitQueue, Controller, Oracle, StrategyManager, Converter
 8. Optional UniCL path (same after `DeployAll`):
    - `DeployUniswapV3ConverterAdapter.s.sol` — adapter bytecode only (needs Oracle; no ADMIN); export `SWAP_ADAPTER_ADDRESS`
    - Admin timelock: `Converter.setAllowedAdapter`, paired-token `Oracle.updateUsdFeedInfo`, optional `addSupportedERC20(pairedToken)`
-   - `DeployUniCLStrat.s.sol` — strategy bytecode only (constructor requires the adapter already allowed); does **not** call `addStrategy`
+   - `DeployUniCLStrat.s.sol` deploys the strategy once the adapter is allowed. Set `EXIT_ROUTE_FEE_PIPS` to the estimated paired-token to WETH route fee in parts per million (500 for 0.05%).
    - Admin timelock: `StrategyManager.addStrategy` — see `DeployUniCLStrat` NatSpec / `docs/STRATEGY_GUARDRAILS.md`; pool selection and launch parameters are documented in [`docs/UNICL_STRATEGY_SETUP.md`](docs/UNICL_STRATEGY_SETUP.md)
 
 ```bash
