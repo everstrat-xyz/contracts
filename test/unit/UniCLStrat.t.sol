@@ -2612,7 +2612,8 @@ contract UniCLStratTest is UniCLStratTestBase {
     }
 
     /// @dev CLS-08: idle inventory (here a WETH donation) marks the strategy unhealthy while
-    ///      calm, and rebalance redeploys it without re-centering a well-placed main range.
+    ///      calm, and rebalance redeploys it without re-centering a well-placed main range and
+    ///      without a swap (a dislocated route must not make every keeper rebalance revert).
     function test_Rebalance_RedeploysIdleInventoryWithoutRecentering() public {
         _deposit(DEPOSIT_AMOUNT);
         IUniCLStrat.Position memory mainBefore = _mainPosition();
@@ -2620,13 +2621,17 @@ contract UniCLStratTest is UniCLStratTestBase {
         weth.mint(address(strategy), IDLE_WETH_DONATION);
         assertFalse(strategy.isHealthy());
 
+        vm.expectCall(address(converter), abi.encodeWithSelector(IConverter.executeSwapExactAmountIn.selector), 0);
         vm.prank(strategyManager);
         strategy.rebalance();
 
         IUniCLStrat.Position memory mainAfter = _mainPosition();
         assertEq(mainAfter.tickLower, mainBefore.tickLower);
         assertEq(mainAfter.tickUpper, mainBefore.tickUpper);
-        assertGt(_positionLiquidity(mainAfter), liquidityBefore);
+        assertEq(_positionLiquidity(mainAfter), liquidityBefore);
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        assertGt(_positionLiquidity(IUniCLStrat.Position(altLower, altUpper)), 0);
+        assertLe(weth.balanceOf(address(strategy)), NAV_TOLERANCE);
         assertTrue(strategy.isHealthy());
     }
 

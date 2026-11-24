@@ -101,15 +101,19 @@ library CLRangeLib {
 
     /**
      * @notice Rebalance entry: re-centers (full unwind and redeploy) when the main range needs it,
-     *         otherwise only redeploys idle inventory with the ratio swap.
+     *         otherwise only redeploys idle inventory, without an inventory swap.
      * @dev A withdrawal that ran while the pool was not calm leaves its leftovers idle (#63 CLS-08);
-     *      this redeploys them without unwinding positions that are still well placed.
+     *      this redeploys them without unwinding positions that are still well placed. Like the
+     *      withdraw re-add, it does not swap: the main range takes what fits at spot and the
+     *      single-sided alt range parks the rest. Idle inventory typically follows a dislocated
+     *      market, when the swap route may be untradable, and a swap revert here would make every
+     *      keeper rebalance fail while `isHealthy()` keeps asking for one.
      */
     function rebalance(RangeContext memory _ctx, CLPositionLib.RangeState storage _state) public {
         if (_mainNeedsRecenter(_ctx.pool, _state, _ctx.rebalanceTickThreshold, _ctx.venue)) {
             recenter(_ctx, _state);
         } else {
-            deployInventory(_ctx, _state, true);
+            deployInventory(_ctx, _state, false);
         }
     }
 

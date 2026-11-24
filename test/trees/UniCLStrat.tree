@@ -221,7 +221,7 @@ UniCLStrat::rebalance()
 ├── Given spot tick diverges from long TWAP within maxTickDeviation
 │   └── It should size mint liquidity at spot and complete rebalance
 ├── Given the main range is well placed and only idle inventory makes it unhealthy
-│   └── It should redeploy the idle inventory without re-centering
+│   └── It should redeploy the idle inventory without re-centering or swapping
 ├── Given the re-centered main range lands on a stale alt key
 │   └── It should not count it twice (a full unwind clears the alt record)
 └── Given caller is the registered StrategyManager and strategy is unhealthy but calm
