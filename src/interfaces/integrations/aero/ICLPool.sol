@@ -27,6 +27,9 @@ interface ICLPool {
 
     function token0() external view returns (address);
     function token1() external view returns (address);
+
+    /// @notice In-range liquidity (logged by the deploy script as a pool-depth signal).
+    function liquidity() external view returns (uint128);
     function tickSpacing() external view returns (int24);
 
     /// @notice Current swap fee in pips (1e-6). Dynamic when a swap-fee hook is attached.

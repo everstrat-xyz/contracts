@@ -93,6 +93,10 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     ///      skipped: the residual is parked in the alt position instead, which is cheaper
     ///      than paying swap gas + fees for a negligible ratio correction.
     uint256 public constant MIN_INVENTORY_SWAP_BPS = CLRangeLib.MIN_INVENTORY_SWAP_BPS;
+    /// @dev Calm also requires spot within this many tick spacings of the short TWAP (#63 CLS-02).
+    ///      A same-block push cannot move the short TWAP, so a mint cannot be sandwiched by more than
+    ///      this band, independent of the wider `maxTickDeviation` drift band.
+    int56 public constant MAX_SPOT_SHORT_TWAP_SPACINGS = 2;
 
     // ============ Immutable State ============
 
@@ -143,6 +147,10 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     /// @notice Slippage tolerance for inventory-balancing swaps (in basis points, 1-200)
     uint256 public swapSlippageBps;
 
+    /// @dev Converter that holds this strategy's token allowances. Pause revokes from it, not from
+    ///      whatever the Registry points at by then (#63 CLS-06).
+    address private _allowanceConverter;
+
     // ============ Constructor ============
     constructor(DeploymentConfig memory _params, CLPoolLib.Venue _poolVenue)
         RegistryClient(_params.addresses.registry)
@@ -170,6 +178,7 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         // A mint callback is trusted only after proving the pool belongs to the configured factory.
         CLPoolLib.requireProvenance(pool, factory, _token0Address, _token1Address, _poolVenue);
         tickSpacing = pool.tickSpacing();
+        _validateRange(_params.strategy.positionWidth, _params.strategy.rebalanceTickThreshold);
         positionWidth = _params.strategy.positionWidth;
         rebalanceTickThreshold = _params.strategy.rebalanceTickThreshold;
         maxTickDeviation = _params.strategy.maxTickDeviation;
@@ -222,10 +231,18 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         return _range.initTicks;
     }
 
+    /// @notice Pool venue this strategy was deployed for (0 = Uniswap V3, 1 = Slipstream).
+    function venue() external view returns (CLPoolLib.Venue) {
+        return _venue;
+    }
+
     // ============ Strategy Views ============
     /// @dev Net of the estimated cost of converting the paired-token inventory back to WETH
     ///      (`exitRouteFeePips` plus `swapSlippageBps`); see {CLStratLib-adjustedPairValueInETH}.
+    ///      Positions are read at the Chainlink-implied price (see {CLPositionLib-inventoryValueInETH}).
+    ///      Reverts while a pool mint is half paid, when the minted liquidity is not yet funded.
     function navInETH() public view returns (uint256) {
+        if (_range.minting) revert UniCLStratMintInProgress();
         return address(this).balance
             + CLPositionLib.inventoryValueInETH(
                 pool,
@@ -234,7 +251,6 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
                 address(weth),
                 address(token0),
                 address(token1),
-                _twapSqrtPrice(),
                 exitRouteFeePips,
                 swapSlippageBps
             );
@@ -272,7 +288,11 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     function isHealthy() public view returns (bool) {
         if (paused()) return true;
         if (!_isCalm()) return true;
-        return !CLRangeLib.mainNeedsRecenter(pool, _range, rebalanceTickThreshold, _venue);
+        // A paused Converter makes every rebalance swap revert: not actionable (#63 CLS-10).
+        if (IConverter(_registry.converter()).paused()) return true;
+        if (CLRangeLib.mainNeedsRecenter(pool, _range, rebalanceTickThreshold, _venue)) return false;
+        // Idle inventory left by a non-calm withdrawal is redeployed by `rebalance` (#63 CLS-08).
+        return !CLRangeLib.idleNeedsDeploy(_rangeContext(), _range);
     }
 
     // ============ Strategy Actions ============
@@ -320,7 +340,10 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         if (_idle == 0) return 0;
         if (!_isCalm()) revert UniCLStratNotCalm();
 
-        uint256 _capacity = _maxDeposit();
+        // Investing is NAV-neutral: the idle ETH is already in NAV, so headroom is measured
+        // against NAV without it (#63 CLS-05).
+        uint256 _investedNAV = navInETH() - _idle;
+        uint256 _capacity = maxTotalNAV > _investedNAV ? maxTotalNAV - _investedNAV : 0;
         invested = _idle < _capacity ? _idle : _capacity;
         if (invested == 0) return 0;
 
@@ -392,7 +415,9 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
 
             // Near-full requests use a full unwind when idle WETH falls short. The
             // route-cost probe sizes partial burns; any swap still quotes its actual size.
-            bool _nearFullWithdrawal = _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
+            // Compared without the idle ETH, which is paid out as is (#63 CLS-14).
+            bool _nearFullWithdrawal =
+                _remainder * (BASIS_POINTS + swapSlippageBps) >= (_navBeforeWithdrawal - _idleETH) * BASIS_POINTS;
             CLRangeLib.RangeContext memory _ctx = _rangeContext();
             CLRangeLib.sourceWeth(_ctx, _range, _remainder, _nearFullWithdrawal);
 
@@ -427,7 +452,7 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         if (!_isCalm()) revert UniCLStratNotCalm();
         if (isHealthy()) revert StrategyIsHealthy();
 
-        CLRangeLib.recenter(_rangeContext(), _range);
+        CLRangeLib.rebalance(_rangeContext(), _range);
 
         emit Rebalanced();
     }
@@ -548,7 +573,7 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         return super.paused();
     }
 
-    function unpause() external onlyAuthRole(Auth.ADMIN_ROLE) {
+    function unpause() external onlyAuthRole(Auth.ADMIN_ROLE) nonReentrant {
         _unpauseStrategy();
     }
 
@@ -614,25 +639,26 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     // ============ Private Configuration Helpers ============
 
     function _setPositionWidth(int24 _newPositionWidth) private {
-        _validatePositiveInt24(_newPositionWidth);
+        _validateRange(_newPositionWidth, rebalanceTickThreshold);
         emit PositionWidthUpdated(positionWidth, _newPositionWidth);
         positionWidth = _newPositionWidth;
     }
 
     function _setRebalanceTickThreshold(int24 _newRebalanceTickThreshold) private {
-        _validatePositiveInt24(_newRebalanceTickThreshold);
+        _validateRange(positionWidth, _newRebalanceTickThreshold);
         emit RebalanceTickThresholdUpdated(rebalanceTickThreshold, _newRebalanceTickThreshold);
         rebalanceTickThreshold = _newRebalanceTickThreshold;
     }
 
     function _setMaxTickDeviation(int56 _newMaxTickDeviation) private {
-        if (_newMaxTickDeviation <= 0) revert UniCLStratInvalidConfig();
+        _validateMaxTickDeviation(_newMaxTickDeviation);
         emit MaxTickDeviationUpdated(maxTickDeviation, _newMaxTickDeviation);
         maxTickDeviation = _newMaxTickDeviation;
     }
 
     function _setTwapInterval(uint32 _newTwapInterval) private {
         _validateTwapInterval(_newTwapInterval, MIN_TWAP_INTERVAL);
+        if (_newTwapInterval <= shortTwapInterval) revert UniCLStratInvalidConfig();
         _requireTwapOracle(_newTwapInterval);
         emit TwapIntervalUpdated(twapInterval, _newTwapInterval);
         twapInterval = _newTwapInterval;
@@ -640,6 +666,7 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
 
     function _setShortTwapInterval(uint32 _newShortTwapInterval) private {
         _validateTwapInterval(_newShortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+        if (_newShortTwapInterval >= twapInterval) revert UniCLStratInvalidConfig();
         _requireTwapOracle(_newShortTwapInterval);
         emit ShortTwapIntervalUpdated(shortTwapInterval, _newShortTwapInterval);
         shortTwapInterval = _newShortTwapInterval;
@@ -694,8 +721,7 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
             emit LiquidityUnwindSkipped();
         }
 
-        address _converter = address(_registry.converter());
-        IERC20Metadata(address(weth)).forceApprove(_converter, 0);
+        IERC20Metadata(address(weth)).forceApprove(_allowanceConverter, 0);
         _tryRevokePairedTokenConverterAllowance();
     }
 
@@ -719,7 +745,7 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
      */
     function selfRevokePairedTokenConverterAllowance() external {
         if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
-        pairedToken.forceApprove(address(_registry.converter()), 0);
+        pairedToken.forceApprove(_allowanceConverter, 0);
     }
 
     /**
@@ -763,7 +789,8 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     }
 
     /**
-     * @notice True when spot tick and short TWAP both sit within ±`maxTickDeviation` of the long TWAP.
+     * @notice True when spot tick and short TWAP both sit within ±`maxTickDeviation` of the long TWAP
+     *         and spot is within {MAX_SPOT_SHORT_TWAP_SPACINGS} tick spacings of the short TWAP.
      * @dev Gates minting paths (`deposit`, `investIdleETH`, `rebalance`, and the
      *      re-add branch of `withdraw`). Does NOT gate `withdraw`'s burn / convert
      *      / payout — `pool.mint` has no price bound of its own, so this check is
@@ -786,21 +813,15 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         if (int56(_tick) < _minCalmTick || int56(_tick) > _maxCalmTick) return false;
         if (_shortTwapTick < _minCalmTick || _shortTwapTick > _maxCalmTick) return false;
 
-        return true;
+        // Mint guard (#63 CLS-02): a same-block push leaves the short TWAP in place, so this
+        // bounds how far a sandwich can move the price a mint is sized at.
+        int56 _spotGap = int56(_tick) - _shortTwapTick;
+        if (_spotGap < 0) _spotGap = -_spotGap;
+        return _spotGap <= MAX_SPOT_SHORT_TWAP_SPACINGS * tickSpacing;
     }
 
     function _currentTick() internal view returns (int24) {
         return CLPoolLib.currentTick(pool, _venue);
-    }
-
-    function _twapSqrtPrice() internal view returns (uint160) {
-        return TickMath.getSqrtRatioAtTick(int24(_twap()));
-    }
-
-    function _twap() internal view returns (int56 _twapTick) {
-        (bool _twapAvailable, int56 _observedTwapTick) = _observeTwap(twapInterval);
-        if (!_twapAvailable) revert UniCLStratPoolTWAPNotAvailable();
-        return _observedTwapTick;
     }
 
     /// @dev Both venues use the same TWAP availability and in-use cardinality gate.
@@ -872,9 +893,13 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         });
     }
 
+    /// @dev Records the Converter granted the allowances so pause revokes from that one, even if
+    ///      the Registry has been rewired since (#63 CLS-06).
     function _giveConverterAllowances() internal {
-        token0.forceApprove(address(_registry.converter()), type(uint256).max);
-        token1.forceApprove(address(_registry.converter()), type(uint256).max);
+        address _converter = address(_registry.converter());
+        token0.forceApprove(_converter, type(uint256).max);
+        token1.forceApprove(_converter, type(uint256).max);
+        _allowanceConverter = _converter;
         // Note: In a WETH/pairedToken pool, token0 or token1 IS WETH,
         // so the above two approvals cover both pool tokens. No separate
         // WETH approval is needed.
@@ -898,11 +923,10 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
             revert UniCLStratZeroAddress();
         }
 
-        _validatePositiveInt24(_params.strategy.positionWidth);
-        _validatePositiveInt24(_params.strategy.rebalanceTickThreshold);
-        if (_params.strategy.maxTickDeviation <= 0) revert UniCLStratInvalidConfig();
+        _validateMaxTickDeviation(_params.strategy.maxTickDeviation);
         _validateTwapInterval(_params.strategy.twapInterval, MIN_TWAP_INTERVAL);
         _validateTwapInterval(_params.strategy.shortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+        if (_params.strategy.shortTwapInterval >= _params.strategy.twapInterval) revert UniCLStratInvalidConfig();
         _validateExitRouteFee(_params.routes.exitRouteFeePips);
     }
 
@@ -917,7 +941,23 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         if (_interval < _min || _interval > MAX_TWAP_INTERVAL) revert UniCLStratInvalidConfig();
     }
 
-    function _validatePositiveInt24(int24 _value) internal pure {
-        if (_value <= 0) revert UniCLStratInvalidConfig();
+    /**
+     * @dev Range parameters (#63 CLS-03, CLS-07, CLS-15):
+     *      - `positionWidth >= 2`, so the single-sided alt range is never empty;
+     *      - `positionWidth * tickSpacing <= MAX_TICK / 2`, so range ticks cannot overflow int24;
+     *      - `tickSpacing - 1 <= rebalanceTickThreshold < positionWidth * tickSpacing`: a re-center
+     *        puts spot up to `tickSpacing - 1` ticks from the new center, so a smaller threshold
+     *        would re-center onto the same ticks forever; at or above the half-width only an
+     *        out-of-range spot would ever trigger.
+     */
+    function _validateRange(int24 _width, int24 _threshold) internal view {
+        int256 _halfWidth = int256(_width) * tickSpacing;
+        if (_width < 2 || _halfWidth > TickMath.MAX_TICK / 2) revert UniCLStratInvalidConfig();
+        if (_threshold < tickSpacing - 1 || _threshold >= _halfWidth) revert UniCLStratInvalidConfig();
+    }
+
+    /// @dev Positive and at most `MAX_TICK`, which also keeps the calm-band arithmetic in int56 (#63 CLS-04).
+    function _validateMaxTickDeviation(int56 _deviation) internal pure {
+        if (_deviation <= 0 || _deviation > TickMath.MAX_TICK) revert UniCLStratInvalidConfig();
     }
 }

@@ -76,6 +76,8 @@ interface IUniCLStrat is IStrategy {
     error UniCLStratCallerNotPool();
     error UniCLStratCallerNotSelf();
     error UniCLStratInvalidMintCallback();
+    /// @notice NAV views revert while a pool mint is half paid (between `mint` and its callback)
+    error UniCLStratMintInProgress();
     error UniCLStratNotCalm();
     error UniCLStratInsufficientWETH();
     /// @notice Alt ticks cannot be reassigned while the current alt position still holds liquidity or owed tokens

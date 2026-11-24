@@ -107,7 +107,7 @@ contract TimelockGovernanceTest is ProtocolTestBase {
                 }),
                 strategy: IUniCLStrat.StrategyConfig({
                     positionWidth: 2,
-                    rebalanceTickThreshold: 30,
+                    rebalanceTickThreshold: 59,
                     maxTickDeviation: 10,
                     twapInterval: 1800,
                     shortTwapInterval: 60,

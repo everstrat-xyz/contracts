@@ -49,7 +49,11 @@ library CLPoolLib {
         (, _tick,) = slot0(_pool, _venue);
     }
 
-    /// @notice Requires both a usable TWAP window and enough in-use observations to cover it.
+    /**
+     * @notice Requires both a usable TWAP window and enough in-use observations to cover it.
+     * @dev `observe` interpolates between the observations that bracket the window start, so
+     *      covering `ceil(interval / blockSeconds)` blocks needs one slot more (#63 CPO-01).
+     */
     function requireTwapOracle(
         IUniswapV3Pool _pool,
         Venue _venue,
@@ -60,7 +64,7 @@ library CLPoolLib {
         (bool _available,) = TickUtils.tryMeanTick(_pool, _interval);
         if (!_available) revert IUniCLStrat.UniCLStratPoolTWAPNotAvailable();
 
-        uint256 _required = (uint256(_interval) + _maxBlockSeconds - 1) / _maxBlockSeconds;
+        uint256 _required = (uint256(_interval) + _maxBlockSeconds - 1) / _maxBlockSeconds + 1;
         if (_required < _minCardinality) _required = _minCardinality;
         if (_required > type(uint16).max) revert IUniCLStrat.UniCLStratInvalidConfig();
 

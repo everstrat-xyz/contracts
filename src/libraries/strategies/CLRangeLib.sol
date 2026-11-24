@@ -6,6 +6,8 @@ pragma solidity ^0.8.30;
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
+import {FixedPoint96} from "../integrations/uniswap/FixedPoint96.sol";
+import {FullMath} from "../integrations/uniswap/FullMath.sol";
 import {TickMath} from "../integrations/uniswap/TickMath.sol";
 import {TickUtils} from "../integrations/uniswap/TickUtils.sol";
 
@@ -37,6 +39,12 @@ library CLRangeLib {
     /// @dev Inventory swaps (and alt leftovers) smaller than this share (bps) of the deployed value
     ///      are skipped: parking the residual is cheaper than a negligible ratio correction.
     uint256 internal constant MIN_INVENTORY_SWAP_BPS = 10;
+    /// @dev Idle WETH / paired inventory above this share (bps) of the deployed value marks the
+    ///      strategy unhealthy while calm, so the keeper's rebalance redeploys it (#63 CLS-08).
+    uint256 internal constant IDLE_REDEPLOY_BPS = 100;
+    /// @dev ...and is also worth at least this much WETH at spot: below it a rebalance costs more gas
+    ///      than redeploying earns, and rounding dust it cannot place must not keep the keeper looping.
+    uint256 internal constant IDLE_REDEPLOY_MIN_WETH = 0.01 ether;
     uint256 internal constant BASIS_POINTS = 10_000;
 
     /**
@@ -94,6 +102,41 @@ library CLRangeLib {
         CLPositionLib.removeAllLiquidity(_ctx.pool, _state);
         _setMainTicks(_ctx, _state);
         deployInventory(_ctx, _state, true);
+    }
+
+    /**
+     * @notice Rebalance entry: re-centers (full unwind and redeploy) when the main range needs it,
+     *         otherwise only redeploys idle inventory with the ratio swap.
+     * @dev A withdrawal that ran while the pool was not calm leaves its leftovers idle (#63 CLS-08);
+     *      this redeploys them without unwinding positions that are still well placed.
+     */
+    function rebalance(RangeContext memory _ctx, CLPositionLib.RangeState storage _state) public {
+        if (_mainNeedsRecenter(_ctx.pool, _state, _ctx.rebalanceTickThreshold, _ctx.venue)) {
+            recenter(_ctx, _state);
+        } else {
+            deployInventory(_ctx, _state, true);
+        }
+    }
+
+    /**
+     * @notice True when idle WETH / paired inventory exceeds {IDLE_REDEPLOY_BPS} of the value held
+     *         in the positions (both in token1 units at spot) and {IDLE_REDEPLOY_MIN_WETH} in WETH
+     *         terms. False before the main range is placed.
+     */
+    function idleNeedsDeploy(RangeContext memory _ctx, CLPositionLib.RangeState storage _state)
+        public
+        view
+        returns (bool)
+    {
+        if (!_state.initTicks) return false;
+        uint160 _sqrtPriceX96 = CLPoolLib.sqrtPrice(_ctx.pool, _ctx.venue);
+        uint256 _idle = _idleValueInToken1(_ctx, _sqrtPriceX96);
+        uint256 _idleWeth = _ctx.token1 == _ctx.swap.weth
+            ? _idle
+            : FullMath.mulDiv(FullMath.mulDiv(_idle, FixedPoint96.Q96, _sqrtPriceX96), FixedPoint96.Q96, _sqrtPriceX96);
+        if (_idleWeth < IDLE_REDEPLOY_MIN_WETH) return false;
+        uint256 _deployed = CLPositionLib.positionsValueInToken1(_ctx.pool, _state, _sqrtPriceX96);
+        return _idle * BASIS_POINTS > (_idle + _deployed) * IDLE_REDEPLOY_BPS;
     }
 
     /// @notice True when the main range has been placed and spot has left it or drifted past
@@ -213,10 +256,11 @@ library CLRangeLib {
             if (!_hasLeftover) return;
         }
 
-        CLPositionLib.placeAlt(
-            _ctx.pool, _state, _tick, _leftoverIsToken1, _ctx.tickSpacing, _ctx.positionWidth * _ctx.tickSpacing
-        );
-        _mint(_ctx, _state, _state.alt);
+        if (
+            CLPositionLib.placeAlt(
+                _ctx.pool, _state, _tick, _leftoverIsToken1, _ctx.tickSpacing, _ctx.positionWidth * _ctx.tickSpacing
+            )
+        ) _mint(_ctx, _state, _state.alt);
     }
 
     /// @dev Only called when the main position is empty (first placement or after a full unwind).

@@ -17,6 +17,7 @@ import {UniCLStratTestBase} from "../helpers/UniCLStratTestBase.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPriceFeed} from "../mocks/MockPriceFeed.sol";
 import {MockConverterAdapter} from "../mocks/MockConverterAdapter.sol";
+import {MockConverter} from "../mocks/MockConverter.sol";
 import {MockUniCLPool} from "../mocks/UniCLStratMocks.sol";
 import {LiquidityAmounts} from "../../src/libraries/integrations/uniswap/LiquidityAmounts.sol";
 import {TickMath} from "../../src/libraries/integrations/uniswap/TickMath.sol";
@@ -205,18 +206,17 @@ contract UniCLStratTest is UniCLStratTestBase {
         _newStrategy(_defaultConfig());
     }
 
-    function test_Constructor_RevertsWhenPoolCannotServeShortTwapInterval() public {
-        // Long window still fits; short is raised above the mock's lookback cap.
-        pool.setMaxObserveSecondsAgo(TWAP_INTERVAL);
+    function test_Constructor_RevertsWhenShortTwapIntervalNotBelowLong() public {
         IUniCLStrat.DeploymentConfig memory config = _defaultConfig();
-        config.strategy.shortTwapInterval = TWAP_INTERVAL + 1;
+        config.strategy.shortTwapInterval = TWAP_INTERVAL;
 
-        vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
         _newStrategy(config);
     }
 
     function test_Constructor_RevertsWhenObservationCardinalityBelowMinimum() public {
-        uint16 required = strategy.MIN_OBSERVATION_CARDINALITY();
+        // ceil(1800 / 12) = 150 blocks needs 151 slots: one more for the bracketing observation.
+        uint16 required = strategy.MIN_OBSERVATION_CARDINALITY() + 1;
         pool.setObservationCardinality(required - 1);
 
         vm.expectRevert(
@@ -510,10 +510,12 @@ contract UniCLStratTest is UniCLStratTestBase {
     }
 
     function test_InvestIdleETH_CapsAtMaxDeposit() public {
-        // Idle ETH already counts in NAV, so the remaining capacity is maxTotalNAV - idle.
-        // When idle exceeds that capacity, only the capacity is deployed; the rest stays native.
-        uint256 idle = 60 ether;
-        uint256 expectedInvested = MAX_TOTAL_NAV - idle; // 40 ether
+        // Investing is NAV-neutral, so headroom is maxTotalNAV minus the NAV already invested.
+        // When idle exceeds that headroom, only the headroom is deployed; the rest stays native.
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 investedNAV = strategy.navInETH();
+        uint256 idle = 95 ether;
+        uint256 expectedInvested = MAX_TOTAL_NAV - investedNAV;
         _donate(idle);
 
         vm.expectEmit(false, false, false, true, address(strategy));
@@ -524,7 +526,7 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(invested, expectedInvested);
         // Idle ETH beyond the cap remains as native ETH (still counted in NAV).
         assertEq(address(strategy).balance, idle - expectedInvested);
-        assertApproxEqAbs(_grossNavInETH(), idle, NAV_TOLERANCE);
+        assertApproxEqAbs(_grossNavInETH(), DEPOSIT_AMOUNT + idle, NAV_TOLERANCE);
     }
 
     function test_InvestIdleETH_RevertsWhenPoolIsNotCalm() public {
@@ -1306,18 +1308,30 @@ contract UniCLStratTest is UniCLStratTestBase {
     }
 
     function test_SetShortTwapInterval_RevertsWhenPoolCannotServeNewWindow() public {
-        pool.setMaxObserveSecondsAgo(TWAP_INTERVAL);
+        pool.setMaxObserveSecondsAgo(UPDATED_SHORT_TWAP_INTERVAL - 1);
 
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
-        strategy.setShortTwapInterval(TWAP_INTERVAL + 1);
+        strategy.setShortTwapInterval(UPDATED_SHORT_TWAP_INTERVAL);
 
+        assertEq(strategy.shortTwapInterval(), SHORT_TWAP_INTERVAL);
+    }
+
+    function test_SetTwapIntervals_RevertWhenShortNotBelowLong() public {
+        vm.startPrank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setShortTwapInterval(TWAP_INTERVAL);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setTwapInterval(SHORT_TWAP_INTERVAL);
+        vm.stopPrank();
+
+        assertEq(strategy.twapInterval(), TWAP_INTERVAL);
         assertEq(strategy.shortTwapInterval(), SHORT_TWAP_INTERVAL);
     }
 
     function test_SetTwapInterval_RevertsWhenObservationCardinalityInsufficient() public {
         uint32 blockSeconds = strategy.MAX_BLOCK_SECONDS();
-        uint16 required = uint16((uint256(UPDATED_TWAP_INTERVAL) + blockSeconds - 1) / blockSeconds);
+        uint16 required = uint16((uint256(UPDATED_TWAP_INTERVAL) + blockSeconds - 1) / blockSeconds + 1);
         pool.setObservationCardinality(required - 1);
 
         vm.prank(admin);
@@ -2489,6 +2503,197 @@ contract UniCLStratTest is UniCLStratTestBase {
         vm.prank(strategyManager);
         strategy.sync();
         assertEq(strategy.pendingPerformanceFeeInETH(PERFORMANCE_FEE_BPS), 2 * expectedFee);
+    }
+
+    // ============ Issue #63 review fixes ============
+
+    /// @dev Spot offset from the main floor whose bucket (`floor -/+ 3 * spacing`) makes a
+    ///      `2w + 1`-wide alt span a `w`-wide main exactly.
+    int24 internal constant ALIAS_BUCKET_TICK = 3 * TICK_SPACING + 7;
+    int24 internal constant ALIAS_WIDE_POSITION_WIDTH = 2 * POSITION_WIDTH + 1;
+    int56 internal constant WIDE_MAX_TICK_DEVIATION = 300;
+    uint256 internal constant IDLE_WETH_DONATION = 1 ether;
+    uint256 internal constant IDLE_HEAVY_DONATION = 9 ether;
+    uint256 internal constant SMALL_POSITION_DEPOSIT = 1 ether;
+    uint256 internal constant IDLE_HEAVY_REQUEST = 9.95 ether;
+
+    /// @dev CLS-01: composition is read at the oracle price, so a TWAP that lags the oracle can
+    ///      no longer lift NAV above the true position value.
+    function test_NavInETH_IgnoresTwapDriftFromOracle() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 navBefore = strategy.navInETH();
+
+        // Oracle unchanged (1:1, tick 0); the pool and its TWAP sit near the range edge.
+        pool.setCurrentTick(2 * TICK_SPACING - 1);
+
+        assertEq(strategy.navInETH(), navBefore);
+    }
+
+    /// @dev CLS-02: spot must sit within two tick spacings of the short TWAP, independent of the
+    ///      wider `maxTickDeviation` band.
+    function test_Deposit_RevertsWhenSpotLeavesShortTwapBand() public {
+        vm.prank(admin);
+        strategy.setMaxTickDeviation(WIDE_MAX_TICK_DEVIATION);
+        int24 band = int24(strategy.MAX_SPOT_SHORT_TWAP_SPACINGS()) * TICK_SPACING;
+
+        pool.setCurrentTickWithoutTwap(band + 1);
+        assertEq(strategy.maxDeposit(), 0);
+        vm.deal(strategyManager, DEPOSIT_AMOUNT);
+        vm.prank(strategyManager);
+        vm.expectRevert(IUniCLStrat.UniCLStratNotCalm.selector);
+        strategy.deposit{value: DEPOSIT_AMOUNT}();
+
+        pool.setCurrentTickWithoutTwap(band);
+        _deposit(DEPOSIT_AMOUNT);
+        assertTrue(strategy.initTicks());
+    }
+
+    /// @dev CPL-01: after `w -> 2w + 1`, a withdraw re-add whose alt candidate equals the main key
+    ///      leaves the leftover idle instead of aliasing main (NAV would double). Spot sits below
+    ///      the range, so the burns return WETH (token0) and the token0 alt above the bucket
+    ///      `floor - 3 * spacing` spans exactly the main range.
+    function test_Withdraw_ReAddNeverPlacesAltOnMainKey() public {
+        _deposit(DEPOSIT_AMOUNT);
+        vm.prank(admin);
+        strategy.setPositionWidth(ALIAS_WIDE_POSITION_WIDTH);
+        pool.setCurrentTick(-3 * TICK_SPACING + 7);
+        uint256 grossBefore = _grossNavInETH();
+
+        vm.prank(strategyManager);
+        uint256 withdrawn = strategy.withdraw(receiver, WITHDRAW_AMOUNT);
+
+        (int24 mainLower, int24 mainUpper) = strategy.positionMain();
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        assertFalse(altLower == mainLower && altUpper == mainUpper, "alt aliases main");
+        // Within the conversion cost; an aliased key would count the main position twice.
+        assertApproxEqRel(_grossNavInETH(), grossBefore - withdrawn, 1e16);
+    }
+
+    /// @dev CPL-02: a full unwind clears the alt record, so a later main range on the stale alt
+    ///      key (after `2w + 1 -> w`) is not counted twice and the rebalance does not revert.
+    function test_Rebalance_DoesNotLandMainOnStaleAltKey() public {
+        vm.prank(admin);
+        strategy.setPositionWidth(ALIAS_WIDE_POSITION_WIDTH);
+        pool.setCurrentTick(ALIAS_BUCKET_TICK);
+        converter.setQuoteMultiplierBps(ROUTE_QUOTE_COST_MULTIPLIER_BPS);
+        _deposit(DEPOSIT_AMOUNT);
+        (int24 altLower, int24 altUpper) = strategy.positionAlt();
+        // A `2w + 1`-wide alt next to spot spans exactly a `w`-wide main around its own center.
+        int24 altCenter = (altLower + altUpper) / 2;
+        assertEq(altUpper - altLower, 2 * POSITION_WIDTH * TICK_SPACING);
+
+        vm.prank(admin);
+        strategy.setPositionWidth(POSITION_WIDTH);
+        pool.setCurrentTick(altCenter + 7);
+        uint256 grossBefore = _grossNavInETH();
+
+        vm.prank(strategyManager);
+        strategy.rebalance();
+
+        (int24 mainLower, int24 mainUpper) = strategy.positionMain();
+        assertEq(mainLower, altLower);
+        assertEq(mainUpper, altUpper);
+        (altLower, altUpper) = strategy.positionAlt();
+        assertFalse(altLower == mainLower && altUpper == mainUpper, "alt aliases main");
+        // Within the rebalance's swap cost; an aliased key would double it.
+        assertApproxEqRel(_grossNavInETH(), grossBefore, 1e16);
+    }
+
+    /// @dev CLS-08: idle inventory (here a WETH donation) marks the strategy unhealthy while
+    ///      calm, and rebalance redeploys it without re-centering a well-placed main range.
+    function test_Rebalance_RedeploysIdleInventoryWithoutRecentering() public {
+        _deposit(DEPOSIT_AMOUNT);
+        IUniCLStrat.Position memory mainBefore = _mainPosition();
+        uint128 liquidityBefore = _positionLiquidity(mainBefore);
+        weth.mint(address(strategy), IDLE_WETH_DONATION);
+        assertFalse(strategy.isHealthy());
+
+        vm.prank(strategyManager);
+        strategy.rebalance();
+
+        IUniCLStrat.Position memory mainAfter = _mainPosition();
+        assertEq(mainAfter.tickLower, mainBefore.tickLower);
+        assertEq(mainAfter.tickUpper, mainBefore.tickUpper);
+        assertGt(_positionLiquidity(mainAfter), liquidityBefore);
+        assertTrue(strategy.isHealthy());
+    }
+
+    /// @dev CLS-08: dust that a rebalance could not place must not keep the keeper looping.
+    function test_IsHealthy_IgnoresIdleDustBelowFloor() public {
+        _deposit(DEPOSIT_AMOUNT);
+        weth.mint(address(strategy), 0.001 ether);
+
+        assertTrue(strategy.isHealthy());
+    }
+
+    /// @dev CLS-10: a paused Converter makes the rebalance swap revert, so it is not actionable.
+    function test_IsHealthy_ReturnsTrueWhileConverterPaused() public {
+        _deposit(DEPOSIT_AMOUNT);
+        pool.setCurrentTick(UNHEALTHY_TICK);
+        assertFalse(strategy.isHealthy());
+
+        converter.pause();
+
+        assertTrue(strategy.isHealthy());
+    }
+
+    /// @dev CLS-14: idle ETH is paid out as is, so it does not make a request "near-full" and
+    ///      force a full unwind of the positions.
+    function test_Withdraw_IdleEthDoesNotForceFullUnwind() public {
+        _deposit(SMALL_POSITION_DEPOSIT);
+        _donate(IDLE_HEAVY_DONATION);
+        IUniCLStrat.Position memory mainPosition = _mainPosition();
+
+        vm.prank(strategyManager);
+        strategy.withdraw(receiver, IDLE_HEAVY_REQUEST);
+
+        assertEq(receiver.balance, IDLE_HEAVY_REQUEST);
+        assertGt(_positionLiquidity(mainPosition), 0);
+    }
+
+    /// @dev CLS-06: pause revokes from the Converter that was granted the allowances, even after
+    ///      the Registry has been rewired to another Converter.
+    function test_Pause_RevokesAllowancesFromGrantedConverterAfterRewire() public {
+        MockConverter newConverter = new MockConverter(weth, pairedToken, strategyManager);
+        vm.prank(admin);
+        registry.registerContract(Auth.CONVERTER, address(newConverter));
+
+        vm.prank(admin);
+        strategy.pause();
+
+        assertEq(weth.allowance(address(strategy), address(converter)), 0);
+        assertEq(pairedToken.allowance(address(strategy), address(converter)), 0);
+
+        vm.prank(admin);
+        strategy.unpause();
+
+        assertEq(weth.allowance(address(strategy), address(newConverter)), type(uint256).max);
+        assertEq(pairedToken.allowance(address(strategy), address(newConverter)), type(uint256).max);
+    }
+
+    /// @dev CLS-03, CLS-07, CLS-15: range parameters that would loop, empty the alt range or
+    ///      overflow the tick math are rejected.
+    function test_SetRangeParameters_RejectInvalidValues() public {
+        vm.startPrank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setPositionWidth(1);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setPositionWidth(int24(TickMath.MAX_TICK / 2 / TICK_SPACING + 1));
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setRebalanceTickThreshold(TICK_SPACING - 2);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setRebalanceTickThreshold(POSITION_WIDTH * TICK_SPACING);
+        vm.stopPrank();
+
+        assertEq(strategy.positionWidth(), POSITION_WIDTH);
+        assertEq(strategy.rebalanceTickThreshold(), REBALANCE_TICK_THRESHOLD);
+    }
+
+    /// @dev CLS-04: the calm band cannot be widened past the tick range.
+    function test_SetMaxTickDeviation_RejectsAboveMaxTick() public {
+        vm.prank(admin);
+        vm.expectRevert(IUniCLStrat.UniCLStratInvalidConfig.selector);
+        strategy.setMaxTickDeviation(int56(TickMath.MAX_TICK) + 1);
     }
 
     // ============ Venue hooks (overridden by AeroCLStratParityTest) ============

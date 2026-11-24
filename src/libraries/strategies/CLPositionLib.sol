@@ -5,6 +5,7 @@ pragma solidity ^0.8.30;
 // solhint-disable compiler-version, gas-strict-inequalities
 
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {FullMath} from "../integrations/uniswap/FullMath.sol";
 import {LiquidityAmounts} from "../integrations/uniswap/LiquidityAmounts.sol";
@@ -39,6 +40,10 @@ import {CLStratLib} from "./CLStratLib.sol";
  *      position API, LP-fee accounting and valuation here.
  */
 library CLPositionLib {
+    /// @dev `TickMath.getSqrtRatioAtTick(MIN_TICK)` and `(MAX_TICK)`: bounds for an oracle-implied price.
+    uint160 internal constant MIN_SQRT_RATIO = 4_295_128_739;
+    uint160 internal constant MAX_SQRT_RATIO = 1_461_446_703_485_210_103_287_273_052_203_988_822_378_723_970_342;
+
     /**
      * @notice Strategy-local LP-fee counters and aggregate owed-token snapshot.
      * @dev earned*: lifetime fees advanced by settle/remove/emergency accrue, never by sync.
@@ -119,16 +124,22 @@ library CLPositionLib {
     }
 
     /**
-     * @notice Removes all liquidity from both positions and collects everything owed.
+     * @notice Removes all liquidity from both positions, collects everything owed and clears the
+     *         alt record.
      * @dev Poke before accruing so fee growth since the last update is folded into owed. Accrue
      *      before collect so the delta is locked into `earned*` before owed is zeroed. Accruing after
      *      a full burn would also pick up withdrawn principal briefly sitting in owed.
+     *      The alt record is reset to (0, 0) because the position is empty here by construction:
+     *      a stale record could otherwise share a key with a later main range (#63 CPL-02), and
+     *      both NAV and fee accounting would count that key twice. The main record stays so the
+     *      next placement can re-center from it.
      */
     function removeAllLiquidity(IUniswapV3Pool _pool, RangeState storage _state) public {
         _pokePositions(_pool, _state);
         _accrueLpFees(_pool, _state);
         _removePosition(_pool, _state.main);
-        _removePosition(_pool, _state.alt);
+        if (!_altIsMain(_state)) _removePosition(_pool, _state.alt);
+        delete _state.alt;
         _state.lpFees.snapshot0 = 0;
         _state.lpFees.snapshot1 = 0;
     }
@@ -137,7 +148,7 @@ library CLPositionLib {
     function removeAltLiquidity(IUniswapV3Pool _pool, RangeState storage _state) public {
         _pokePositions(_pool, _state);
         _accrueLpFees(_pool, _state);
-        _removePosition(_pool, _state.alt);
+        if (!_altIsMain(_state)) _removePosition(_pool, _state.alt);
         _refreshSnapshot(_pool, _state);
     }
 
@@ -162,8 +173,9 @@ library CLPositionLib {
         _pokePositions(_pool, _state);
         _accrueLpFees(_pool, _state);
 
-        uint256 _remaining =
-            _burnForValue(_pool, _state.alt, _oracle, _weth, _token0, _token1, _value, _twapSqrtPriceX96);
+        uint256 _remaining = _altIsMain(_state)
+            ? _value
+            : _burnForValue(_pool, _state.alt, _oracle, _weth, _token0, _token1, _value, _twapSqrtPriceX96);
         if (_remaining > 0) {
             _burnForValue(_pool, _state.main, _oracle, _weth, _token0, _token1, _remaining, _twapSqrtPriceX96);
         }
@@ -190,7 +202,7 @@ library CLPositionLib {
         returns (bool _occupied, bool _holdsOnlyLeftover)
     {
         IUniCLStrat.Position memory _alt = _state.alt;
-        if (!_isValid(_alt)) return (false, false);
+        if (!_isValid(_alt) || _altIsMain(_state)) return (false, false);
         _occupied = _liquidityOf(_pool, _alt) > 0;
         _holdsOnlyLeftover = _leftoverIsToken1 ? _tick >= _alt.tickUpper : _tick < _alt.tickLower;
     }
@@ -200,7 +212,11 @@ library CLPositionLib {
      *         above it for a token0 leftover.
      * @dev Reverts `UniCLStratPositionNotEmpty` if the current alt still holds liquidity or owed
      *      tokens — NAV and fee accounting only read the current position, so reassigning a
-     *      non-empty one would orphan its value.
+     *      non-empty one would orphan its value. When the candidate ticks equal the main range
+     *      (after a width change of `w -> 2w + 1`, #63 CPL-01), the alt record is cleared and
+     *      nothing is placed: the leftover stays idle, still counted in NAV, instead of sharing
+     *      the main key and being counted twice.
+     * @return _placed True when the alt record now holds the new ticks
      */
     function placeAlt(
         IUniswapV3Pool _pool,
@@ -209,19 +225,24 @@ library CLPositionLib {
         bool _leftoverIsToken1,
         int24 _tickSpacing,
         int24 _width
-    ) public {
+    ) public returns (bool _placed) {
         IUniCLStrat.Position memory _alt = _state.alt;
-        if (_isValid(_alt)) {
+        if (_isValid(_alt) && !_altIsMain(_state)) {
             (uint128 _liquidity, uint128 _owed0, uint128 _owed1) = _read(_pool, _alt);
             if (_liquidity > 0 || _owed0 > 0 || _owed1 > 0) revert IUniCLStrat.UniCLStratPositionNotEmpty();
         }
 
         int24 _tickFloor = TickUtils.floor(_tick, _tickSpacing);
-        if (_leftoverIsToken1) {
-            (_state.alt.tickLower, _state.alt.tickUpper) = (_tickFloor - _width, _tickFloor - _tickSpacing);
-        } else {
-            (_state.alt.tickLower, _state.alt.tickUpper) = (_tickFloor + _tickSpacing, _tickFloor + _width);
+        (int24 _lower, int24 _upper) = _leftoverIsToken1
+            ? (_tickFloor - _width, _tickFloor - _tickSpacing)
+            : (_tickFloor + _tickSpacing, _tickFloor + _width);
+
+        if (_lower == _state.main.tickLower && _upper == _state.main.tickUpper) {
+            delete _state.alt;
+            return false;
         }
+        (_state.alt.tickLower, _state.alt.tickUpper) = (_lower, _upper);
+        return true;
     }
 
     // ============ LP-Fee Accounting ============
@@ -277,10 +298,16 @@ library CLPositionLib {
 
     /**
      * @notice ETH value of the strategy's idle token0/token1 balances plus both positions
-     *         (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens), net of the estimated
+     *         (liquidity marked at the oracle-implied price, plus owed tokens), net of the estimated
      *         cost of converting the paired-token side back to WETH.
      * @dev Excludes native ETH (added by the caller). Priced via Oracle cross-rates; the exit-cost
      *      deduction (audit G2) is documented on {CLStratLib-adjustedPairValueInETH}.
+     *
+     *      Composition and valuation use one price (#63 CLS-01). A position's value is concave in
+     *      price, so amounts read at one price and valued at another sit on the tangent and can
+     *      only overstate. Reading the amounts at the Chainlink-implied price gives the position's
+     *      true value at that price. A burn at any pool price returns a bag worth at least that much
+     *      at the oracle price, so a manipulated burn still cannot profit against this mark.
      * @param _exitRouteFeePips Estimated paired-token to WETH route fee in parts per million
      * @param _slippageBps The strategy's swap slippage tolerance (bps)
      */
@@ -291,12 +318,13 @@ library CLPositionLib {
         address _weth,
         address _token0,
         address _token1,
-        uint160 _twapSqrtPriceX96,
         uint256 _exitRouteFeePips,
         uint256 _slippageBps
     ) public view returns (uint256) {
-        (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _state.main, _twapSqrtPriceX96);
-        (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _state.alt, _twapSqrtPriceX96);
+        uint160 _sqrtPriceX96 = oracleSqrtPriceX96(_oracle, _weth, _token0, _token1);
+        (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _state.main, _sqrtPriceX96);
+        (uint256 _alt0, uint256 _alt1) =
+            _altIsMain(_state) ? (0, 0) : _positionAmounts(_pool, _state.alt, _sqrtPriceX96);
         return CLStratLib.adjustedPairValueInETH(
             _oracle,
             _weth,
@@ -307,6 +335,46 @@ library CLPositionLib {
             _exitRouteFeePips,
             _slippageBps
         );
+    }
+
+    /**
+     * @notice Pool-convention sqrt price (`sqrt(token1 / token0)` in raw units, Q64.96) implied by
+     *         the protocol Oracle, clamped to the tick range.
+     * @dev Quotes one whole token0 in token1 through `IOracle.convert` (ETH is `address(0)` there)
+     *      and takes the square root of the Q128 price, so precision holds for any decimals pair.
+     */
+    function oracleSqrtPriceX96(IOracle _oracle, address _weth, address _token0, address _token1)
+        public
+        view
+        returns (uint160)
+    {
+        uint8 _decimals0 = IERC20Metadata(_token0).decimals();
+        uint256 _unit0 = 10 ** _decimals0;
+        uint256 _quote1 = _token0 == _weth
+            ? _oracle.convert(address(0), _token1, _unit0, 18, IERC20Metadata(_token1).decimals())
+            : _oracle.convert(_token0, address(0), _unit0, _decimals0, 18);
+        uint256 _sqrtPriceX96 = Math.sqrt(FullMath.mulDiv(_quote1, 1 << 128, _unit0)) << 32;
+        if (_sqrtPriceX96 < MIN_SQRT_RATIO) return MIN_SQRT_RATIO;
+        if (_sqrtPriceX96 >= MAX_SQRT_RATIO) return MAX_SQRT_RATIO - 1;
+        return uint160(_sqrtPriceX96);
+    }
+
+    /**
+     * @notice Value of both positions in token1 units at `_sqrtPriceX96` (liquidity plus owed).
+     * @dev Used to judge whether idle inventory is large enough to redeploy (#63 CLS-08).
+     */
+    function positionsValueInToken1(IUniswapV3Pool _pool, RangeState storage _state, uint160 _sqrtPriceX96)
+        public
+        view
+        returns (uint256)
+    {
+        (uint256 _amount0, uint256 _amount1) = _positionAmounts(_pool, _state.main, _sqrtPriceX96);
+        if (!_altIsMain(_state)) {
+            (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _state.alt, _sqrtPriceX96);
+            _amount0 += _alt0;
+            _amount1 += _alt1;
+        }
+        return CLStratLib.token0InToken1(_amount0, _sqrtPriceX96) + _amount1;
     }
 
     // ============ Private: Accounting ============
@@ -335,6 +403,7 @@ library CLPositionLib {
         returns (uint256 _amount0, uint256 _amount1)
     {
         (, uint128 _main0, uint128 _main1) = _read(_pool, _state.main);
+        if (_altIsMain(_state)) return (_main0, _main1);
         (, uint128 _alt0, uint128 _alt1) = _read(_pool, _state.alt);
         return (uint256(_main0) + uint256(_alt0), uint256(_main1) + uint256(_alt1));
     }
@@ -348,6 +417,7 @@ library CLPositionLib {
     {
         (bool _mainOk, uint128 _main0, uint128 _main1) = _tryRead(_pool, _state.main);
         if (!_mainOk) return (false, 0, 0);
+        if (_altIsMain(_state)) return (true, _main0, _main1);
         (bool _altOk, uint128 _alt0, uint128 _alt1) = _tryRead(_pool, _state.alt);
         if (!_altOk) return (false, 0, 0);
         return (true, uint256(_main0) + uint256(_alt0), uint256(_main1) + uint256(_alt1));
@@ -357,7 +427,7 @@ library CLPositionLib {
 
     function _pokePositions(IUniswapV3Pool _pool, RangeState storage _state) private {
         _pokePosition(_pool, _state.main);
-        _pokePosition(_pool, _state.alt);
+        if (!_altIsMain(_state)) _pokePosition(_pool, _state.alt);
     }
 
     function _pokePosition(IUniswapV3Pool _pool, IUniCLStrat.Position memory _position) private {
@@ -432,6 +502,12 @@ library CLPositionLib {
         (_liquidity,,) = _read(_pool, _position);
     }
 
+    /// @dev Defence in depth for #63 CPL-01/CPL-02: an alt record on the main key is never counted
+    ///      a second time by valuation, fee accounting, pokes or removal.
+    function _altIsMain(RangeState storage _state) private view returns (bool) {
+        return _state.alt.tickLower == _state.main.tickLower && _state.alt.tickUpper == _state.main.tickUpper;
+    }
+
     function _isValid(IUniCLStrat.Position memory _position) private pure returns (bool) {
         return _position.tickLower < _position.tickUpper && _position.tickLower >= TickMath.MIN_TICK
             && _position.tickUpper <= TickMath.MAX_TICK;
@@ -469,13 +545,8 @@ library CLPositionLib {
         uint128 _liquidity
     ) private {
         _state.minting = true;
-        try _pool.mint(address(this), _position.tickLower, _position.tickUpper, _liquidity, "") {
-            _state.minting = false;
-        } catch (bytes memory _reason) {
-            assembly {
-                revert(add(_reason, 32), mload(_reason))
-            }
-        }
+        _pool.mint(address(this), _position.tickLower, _position.tickUpper, _liquidity, "");
+        _state.minting = false;
     }
 
     /// @dev `_liquidity == 0` is a poke: accrued fees move into owed without removing liquidity.
@@ -483,8 +554,21 @@ library CLPositionLib {
         _pool.burn(_position.tickLower, _position.tickUpper, _liquidity);
     }
 
+    /**
+     * @dev Collects both legs; if that reverts (a paired token that pauses or blacklists the
+     *      strategy fails its own transfer and would take the WETH leg with it, #63 CPL-03),
+     *      collects each leg separately and leaves a failing leg owed. Owed tokens stay in NAV
+     *      and are collected by a later call once the token transfers again. Parameterless
+     *      catches: no returndata is copied from the pool.
+     */
     function _collect(IUniswapV3Pool _pool, IUniCLStrat.Position memory _position) private {
-        _pool.collect(address(this), _position.tickLower, _position.tickUpper, type(uint128).max, type(uint128).max);
+        int24 _lower = _position.tickLower;
+        int24 _upper = _position.tickUpper;
+        try _pool.collect(address(this), _lower, _upper, type(uint128).max, type(uint128).max) {}
+        catch {
+            try _pool.collect(address(this), _lower, _upper, type(uint128).max, 0) {} catch {}
+            try _pool.collect(address(this), _lower, _upper, 0, type(uint128).max) {} catch {}
+        }
     }
 
     function _key(IUniCLStrat.Position memory _position) private view returns (bytes32) {

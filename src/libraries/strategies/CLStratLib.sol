@@ -4,6 +4,7 @@
 pragma solidity ^0.8.30;
 // solhint-disable compiler-version, gas-strict-inequalities
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -44,7 +45,7 @@ library CLStratLib {
     uint256 internal constant FEE_DENOMINATOR = 1_000_000;
     uint256 internal constant SWAP_DEADLINE_OFFSET = 15 minutes;
     /// @dev Maximum deviation between an adapter quote and the Chainlink-implied amount; see
-    ///      `UniCLStrat.MAX_QUOTE_DEVIATION_BPS` for the fee-tier interaction.
+    ///      `CLStrat.MAX_QUOTE_DEVIATION_BPS` for the fee-tier interaction.
     uint256 internal constant MAX_QUOTE_DEVIATION_BPS = 200;
 
     // ============ Inventory Math ============
@@ -255,7 +256,9 @@ library CLStratLib {
      *      impact and route-vs-oracle drift; rounded up, and 0 when the route beats the oracle.
      *      Never reverts on a bad route: `_tradable` is false when the quote fails or falls outside
      *      the {MAX_QUOTE_DEVIATION_BPS} band, i.e. exactly when {swapExactIn} / {swapExactOut}
-     *      would refuse the trade.
+     *      would refuse the trade. A dust amount whose oracle value rounds to zero reads as
+     *      tradable at zero cost (#63 CSL-03): it must not force a full unwind, and the swap
+     *      itself still refuses it.
      */
     function routeCostBps(SwapConfig memory _config, bytes memory _path, uint256 _amount, bool _exactOut)
         public
@@ -280,7 +283,7 @@ library CLStratLib {
             }
             _oracle = _calculateOracleAmountOut(_config, _path, _amount);
         }
-        if (_oracle == 0) return (false, 0);
+        if (_oracle == 0) return (true, 0);
 
         _tradable = _withinOracleBounds(_quoted, _oracle);
         uint256 _loss =
@@ -317,10 +320,9 @@ library CLStratLib {
     /**
      * @notice Computes the fair expected swap output using the protocol oracle (Chainlink)
      *         as an independent price source, decoupled from any DEX pool state.
-     * @dev Decodes the output token from the DEX route path and derives the oracle-based
-     *      expected amount via the protocol's ETH/USD and token/USD price feeds.
-     *      The path encoding is adapter-specific; this function extracts the last 20 bytes
-     *      which, for Uniswap V3 packed encoding, is always the final output token.
+     * @dev Decodes the output token from the route through the Converter's adapter-agnostic
+     *      `routeTokens` and derives the oracle-based expected amount via the protocol's
+     *      ETH/USD and token/USD price feeds.
      * @param _config Swap routing snapshot (Converter, Oracle, adapter, tokens, slippage)
      * @param _path Adapter-specific route bytes
      * @param _amountIn The input amount for the swap
@@ -364,8 +366,10 @@ library CLStratLib {
      *      strategy's balance of the input token, the exact output is unaffordable.
      *      Instead of reverting, the function falls back to a best-effort exact-input
      *      swap of the whole input-token balance — the same "cap the input at the
-     *      available balance" pattern used by `UniCLStrat._swapWethToPairedToken` and
-     *      `UniCLStrat._swapPairedTokenToWeth`.
+     *      available balance" pattern the range library's inventory swaps use.
+     *
+     *      The input cap rounds up and carries one extra unit, so a dust exact-out whose
+     *      slippage padding floors to zero still has headroom (#63 CSL-04).
      *
      * @param _path Adapter-specific route bytes (forward encoding, same as exact-input)
      * @param _amountOut The exact output amount desired
@@ -392,7 +396,7 @@ library CLStratLib {
         uint256 _oracleAmountIn = _calculateOracleAmountIn(_config, _path, _amountOut);
         _enforceOracleBounds(_quotedAmountIn, _oracleAmountIn);
 
-        uint256 _maxAmountIn = _quotedAmountIn * (BASIS_POINTS + _config.slippageBps) / BASIS_POINTS;
+        uint256 _maxAmountIn = (_quotedAmountIn * (BASIS_POINTS + _config.slippageBps) + BASIS_POINTS - 1) / BASIS_POINTS + 1;
 
         (address _inToken,) = _converter.routeTokens(_config.adapter, _path);
         uint256 _inBalance = IERC20Metadata(_inToken).balanceOf(address(this));
@@ -517,17 +521,25 @@ library CLStratLib {
     /**
      * @notice Best-effort transfer of the caller's (`address(this)`) whole `_token` balance to `_to`.
      * @dev Returns false instead of reverting when `balanceOf` reverts or the transfer fails, so a
-     *      paused / blacklisted token cannot roll back the caller's ETH sweep. Parameterless catch
-     *      (returndata-bomb safe); {SafeERC20-trySafeTransfer} rather than try/catch on `transfer`,
-     *      since empty returndata from USDT-style tokens cannot be decoded as `bool` and would
-     *      revert outside catch scope. A zero balance is a successful no-op.
+     *      paused / blacklisted token cannot roll back the caller's ETH sweep. The balance is read
+     *      with a low-level `staticcall` and a returndata length check, so a short or malformed
+     *      return also yields false instead of reverting in the decoder (#63 CSL-05); only the
+     *      first word is copied, so the read is returndata-bomb safe. {SafeERC20-trySafeTransfer}
+     *      rather than try/catch on `transfer`, since empty returndata from USDT-style tokens
+     *      cannot be decoded as `bool`. A zero balance is a successful no-op.
      */
     function trySweepToken(address _token, address _to) public returns (bool) {
-        try IERC20Metadata(_token).balanceOf(address(this)) returns (uint256 _balance) {
-            return _balance == 0 || IERC20Metadata(_token).trySafeTransfer(_to, _balance);
-        } catch {
-            return false;
+        bytes memory _call = abi.encodeCall(IERC20.balanceOf, (address(this)));
+        bool _ok;
+        uint256 _size;
+        uint256 _balance;
+        assembly ("memory-safe") {
+            _ok := staticcall(gas(), _token, add(_call, 0x20), mload(_call), 0, 0x20)
+            _size := returndatasize()
+            _balance := mload(0)
         }
+        if (!_ok || _size < 0x20) return false;
+        return _balance == 0 || IERC20Metadata(_token).trySafeTransfer(_to, _balance);
     }
 
     // ============ Valuation ============

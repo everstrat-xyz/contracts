@@ -132,7 +132,8 @@ contract AeroCLStratTest is UniCLStratTestBase {
 
     /// @dev Proves the 6-field decode reads the in-use cardinality field.
     function test_Constructor_RevertsWhenObservationCardinalityBelowMinimum() public {
-        uint16 required = aeroStrategy.MIN_OBSERVATION_CARDINALITY();
+        // ceil(1800 / 12) = 150 blocks needs 151 slots: one more for the bracketing observation.
+        uint16 required = aeroStrategy.MIN_OBSERVATION_CARDINALITY() + 1;
         aeroPool.setObservationCardinality(required - 1);
 
         vm.expectRevert(
@@ -144,7 +145,7 @@ contract AeroCLStratTest is UniCLStratTestBase {
     }
 
     function test_Constructor_SucceedsAtMinimumObservationCardinality() public {
-        aeroPool.setObservationCardinality(aeroStrategy.MIN_OBSERVATION_CARDINALITY());
+        aeroPool.setObservationCardinality(aeroStrategy.MIN_OBSERVATION_CARDINALITY() + 1);
 
         AeroCLStrat deployed = new AeroCLStrat(_aeroConfig());
 
@@ -163,7 +164,7 @@ contract AeroCLStratTest is UniCLStratTestBase {
 
     function test_SetTwapInterval_RevertsWhenCardinalityCannotCoverWindow() public {
         aeroPool.setObservationCardinality(CARDINALITY_BELOW_UPDATED_WINDOW);
-        uint16 required = uint16(UPDATED_TWAP_INTERVAL / aeroStrategy.MAX_BLOCK_SECONDS());
+        uint16 required = uint16(UPDATED_TWAP_INTERVAL / aeroStrategy.MAX_BLOCK_SECONDS() + 1);
 
         vm.prank(admin);
         vm.expectRevert(
@@ -185,11 +186,11 @@ contract AeroCLStratTest is UniCLStratTestBase {
 
     function test_SetShortTwapInterval_RevertsWhenPoolCannotServeWindow() public {
         aeroPool.setObservationCardinality(type(uint16).max);
-        aeroPool.setMaxObserveSecondsAgo(TWAP_INTERVAL);
+        aeroPool.setMaxObserveSecondsAgo(SHORT_TWAP_INTERVAL);
 
         vm.prank(admin);
         vm.expectRevert(IUniCLStrat.UniCLStratPoolTWAPNotAvailable.selector);
-        aeroStrategy.setShortTwapInterval(TWAP_INTERVAL + 1);
+        aeroStrategy.setShortTwapInterval(SHORT_TWAP_INTERVAL + 1);
     }
 
     // ============ TWAP / cardinality gate parity with UniCLStrat ============

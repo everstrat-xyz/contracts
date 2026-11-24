@@ -161,18 +161,18 @@ contract DeployUniCLStrat is Script {
         }
     }
 
-    /// @dev In-use `observationCardinality` (not Next) must cover ceil(interval / 12s),
-    ///      floored at MIN_OBSERVATION_CARDINALITY — otherwise a quiet ring can still
+    /// @dev In-use `observationCardinality` (not Next) must cover ceil(interval / 12s) + 1
+    ///      (the bracketing observation), floored at MIN_OBSERVATION_CARDINALITY — otherwise a quiet ring can still
     ///      serve observe() by extrapolating a spot-like TWAP.
     function _requirePoolObservationCardinality(address pool, uint32 interval) internal view {
         (,,, uint16 cardinality,,,) = IUniswapV3Pool(pool).slot0();
-        uint256 required = (uint256(interval) + MAX_BLOCK_SECONDS - 1) / MAX_BLOCK_SECONDS;
+        uint256 required = (uint256(interval) + MAX_BLOCK_SECONDS - 1) / MAX_BLOCK_SECONDS + 1;
         if (required < MIN_OBSERVATION_CARDINALITY) required = MIN_OBSERVATION_CARDINALITY;
         // Fail closed: truncating to uint16 would accept a window no V3 ring can cover.
         require(required <= type(uint16).max, "TWAP window exceeds uint16 observation ring");
         require(
             cardinality >= uint16(required),
-            "pool observationCardinality below ceil(interval/MAX_BLOCK_SECONDS); grow and wait for fill"
+            "pool observationCardinality below ceil(interval/MAX_BLOCK_SECONDS) + 1; grow and wait for fill"
         );
     }
 }

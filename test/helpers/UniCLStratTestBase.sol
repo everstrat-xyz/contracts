@@ -39,7 +39,7 @@ contract UniCLStratTestBase is ProtocolTestBase {
     int24 public constant TICK_SPACING = 60;
     int24 public constant INITIAL_TICK = 0;
     int24 public constant POSITION_WIDTH = 2;
-    int24 public constant REBALANCE_TICK_THRESHOLD = 30;
+    int24 public constant REBALANCE_TICK_THRESHOLD = 59; // tickSpacing - 1: the smallest threshold that cannot loop
     int24 public constant UNHEALTHY_TICK = 60;
     int24 public constant NOT_CALM_TICK = 180;
     int56 public constant MAX_TICK_DEVIATION = 10;
@@ -149,8 +149,9 @@ contract UniCLStratTestBase is ProtocolTestBase {
         (position.tickLower, position.tickUpper) = strategy.positionMain();
     }
 
-    /// @dev Paired-token inventory the strategy holds: idle balance plus both positions marked at
-    ///      the TWAP tick plus owed. Mock oracle prices are 1:1, so this is also its ETH value.
+    /// @dev Paired-token inventory the strategy holds: idle balance plus both positions read at the
+    ///      oracle price (as `navInETH` does) plus owed. Mock oracle prices are 1:1 (tick 0), so this
+    ///      is also its ETH value.
     function _pairedInventory() internal view returns (uint256 amount) {
         amount = pairedToken.balanceOf(address(strategy));
         (int24 lower, int24 upper) = strategy.positionMain();
@@ -164,7 +165,7 @@ contract UniCLStratTestBase is ProtocolTestBase {
         (uint128 liquidity, uint128 owed0, uint128 owed1,,) =
             pool.positionStates(keccak256(abi.encodePacked(address(strategy), _lower, _upper)));
         (uint256 amount0, uint256 amount1) = LiquidityAmounts.getAmountsForLiquidity(
-            TickMath.getSqrtRatioAtTick(pool.twapTick()),
+            TickMath.getSqrtRatioAtTick(0),
             TickMath.getSqrtRatioAtTick(_lower),
             TickMath.getSqrtRatioAtTick(_upper),
             liquidity
