@@ -14,6 +14,7 @@ import {QueueKeeperExecutor} from "../../src/contracts/automation/QueueKeeperExe
 import {StrategyKeeperExecutor} from "../../src/contracts/automation/StrategyKeeperExecutor.sol";
 
 import {Auth} from "../../src/libraries/Auth.sol";
+import {Math} from "../../src/libraries/Math.sol";
 import {IKeeperExecutorBase} from "../../src/interfaces/automation/IKeeperExecutorBase.sol";
 import {IStrategyKeeperExecutor} from "../../src/interfaces/automation/IStrategyKeeperExecutor.sol";
 import {IRegistryClient} from "interfaces/IRegistryClient.sol";
@@ -27,6 +28,8 @@ import {ProtocolTestBase} from "../helpers/ProtocolTestBase.sol";
  * @notice Unit tests for the strategy keeper executor (on-chain checker + perform).
  */
 contract StrategyKeeperExecutorTest is ProtocolTestBase {
+    using Math for uint256;
+
     uint256 public constant ETH_PRICE = 4000e8;
     uint256 public constant STALENESS_INTERVAL = 3600;
     uint256 public constant BOOTSTRAP_DEPOSIT = 10 ether;
@@ -42,6 +45,12 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
     uint256 public constant MANY_EXIT_USERS = 60;
     uint256 public constant SMALL_EXIT_ETH = 0.01 ether;
     uint256 public constant PROCESSED_PREFIX = 20;
+
+    // PR #64 review: a large exit that will close on slippage must not be costed
+    uint256 public constant GRIEFER_EXIT_ETH = 4 ether;
+    uint256 public constant ZERO_PRICE_TOLERANCE = 0;
+    uint256 public constant NAV_DROP_BPS = 100; // 1%: closes a 0-tolerance request, not a 10% one
+    uint256 public constant BPS = 10_000;
 
     uint8 public constant DEPOSIT_WEIGHT = 100;
     uint8 public constant WITHDRAWAL_WEIGHT = 100;
@@ -158,6 +167,22 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
             token.transfer(exiter, share);
             batchId = _queueExit(exiter, SMALL_EXIT_ETH);
         }
+    }
+
+    /// @dev Gives `_exiter` half of `user`'s EVE and queues an exit with zero price tolerance.
+    function _queueTightToleranceExit(address _exiter, uint256 _requestedETH) internal {
+        uint256 share = token.balanceOf(user) / 2;
+        vm.prank(user);
+        token.transfer(_exiter, share);
+        vm.startPrank(_exiter);
+        token.approve(address(amm), type(uint256).max);
+        amm.exit(_requestedETH, token.balanceOf(_exiter), ZERO_PRICE_TOLERANCE);
+        vm.stopPrank();
+    }
+
+    /// @dev Drops strategy NAV by `NAV_DROP_BPS` so the batch prices below the request-time price.
+    function _dropStrategyNav() internal {
+        strategy.setNavInETH(DEPOSIT_TO_STRATEGY * (BPS - NAV_DROP_BPS) / BPS);
     }
 
     /// @dev `priceBatch` is Controller/KEEPER-gated; the strategy executor already holds the role.
@@ -623,6 +648,45 @@ contract StrategyKeeperExecutorTest is ProtocolTestBase {
         assertApproxEqAbs(needsBefore - needsAfter, PROCESSED_PREFIX * SMALL_EXIT_ETH, MANY_EXIT_USERS);
         (uint256 liabilityETH,) = exitQueue.liveRedemptionOffsets();
         assertEq(needsAfter, liabilityETH);
+    }
+
+    /// @dev PR #64 review: an exiter with a tight tolerance whose request will close on slippage
+    ///      is never paid, so it must not be costed — otherwise it pulls LP that sits idle.
+    function test_PendingRedemptionNeedsETH_SkipsSlippageClosingRequests() public {
+        _deployCapitalToStrategy();
+        address griefer = makeAddr("griefer");
+        _queueTightToleranceExit(griefer, GRIEFER_EXIT_ETH);
+        uint256 batchId = _queueExit(user, EXIT_ETH);
+        _dropStrategyNav();
+        _priceQueuedBatch();
+
+        (, uint256 finalEvePrice,,,) = exitQueue.batchInfo(batchId);
+        (,,, uint256 userTokens,) = exitQueue.requestInfo(batchId, user);
+        assertEq(executor.pendingRedemptionNeedsETH(), userTokens.convertAssets(finalEvePrice));
+        (uint256 liabilityETH,) = exitQueue.liveRedemptionOffsets();
+        assertLt(executor.pendingRedemptionNeedsETH(), liabilityETH);
+
+        // Pull only what the paying request needs; that is enough to process the whole batch,
+        // because the skipped request does close on slippage (EVE back, no ETH paid).
+        _perform(IStrategyKeeperExecutor.StrategyAction.WithdrawShortfall);
+        uint256 grieferEthBefore = griefer.balance;
+        controller.processRequests(batchId, 0, exitQueue.unprocessedUsersCount(batchId));
+        assertEq(griefer.balance, grieferEthBefore);
+        assertGt(token.balanceOf(griefer), 0);
+    }
+
+    /// @dev Past `MAX_USERS_COST_SCAN` requests are costed from the batch total without a
+    ///      slippage check, so a closing request there is counted: the estimate errs high.
+    function test_PendingRedemptionNeedsETH_CountsSlippageCloserPastScanCap() public {
+        _deployCapitalToStrategy();
+        uint256 batchId = _queueManySmallExits(executor.MAX_USERS_COST_SCAN());
+        _queueTightToleranceExit(makeAddr("griefer"), SMALL_EXIT_ETH);
+        _dropStrategyNav();
+        _priceQueuedBatch();
+        assertEq(exitQueue.unprocessedUsersCount(batchId), executor.MAX_USERS_COST_SCAN() + 1);
+
+        (uint256 liabilityETH,) = exitQueue.liveRedemptionOffsets();
+        assertEq(executor.pendingRedemptionNeedsETH(), liabilityETH);
     }
 
     /// @dev The strategy executor reads the cursor from the registered queue executor — the

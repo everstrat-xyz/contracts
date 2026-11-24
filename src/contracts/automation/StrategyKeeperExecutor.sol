@@ -53,6 +53,9 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
     ///      desync the keeper. A DoS bound, not cadence — `minBatchAge` vs
     ///      `MAX_BATCH_PROCESSING_TIME` implies ~3 overlapping batches.
     uint256 public constant MAX_BATCH_SCAN = ExitQueueLimits.MAX_LIVE_PRICED_BATCHES;
+    /// @dev Gas bound on the per-user slippage scan in `_batchSettlementCost`. Users past it are
+    ///      still costed (from the batch total), just not checked for a slippage close.
+    uint256 public constant MAX_USERS_COST_SCAN = 50;
 
     uint256 private constant _DEFAULT_MIN_DEPOSIT_ETH = 0.1 ether;
     uint256 private constant _DEFAULT_MIN_WITHDRAW_ETH = 0.01 ether;
@@ -334,17 +337,34 @@ contract StrategyKeeperExecutor is IStrategyKeeperExecutor, KeeperExecutorBase {
         }
     }
 
-    /// @dev Costs the whole remaining batch: `totalTokensToBurn` already nets out every
-    ///      processed / closed request, so no per-user scan is needed and no request is missed
-    ///      however many users the batch holds (audit G5). Same figure `liveRedemptionOffsets`
-    ///      deducts from NAV. Requests that will close on slippage are still counted, so the
-    ///      estimate errs high (their tokens are returned, never paid out) — never short.
+    /// @dev Costs the whole remaining batch from `totalTokensToBurn`, which already nets out every
+    ///      processed / closed request, so no request is missed however many users the batch
+    ///      holds (audit G5). Requests among the first `MAX_USERS_COST_SCAN` users that will
+    ///      close on slippage are subtracted: they are never paid, and counting them would let an
+    ///      exiter with a tight tolerance pull LP that then sits idle on the Controller. Users
+    ///      past the scan are counted in full, so the estimate can only err high, never short.
     function _batchSettlementCost(IExitQueue _queue, uint256 _batchId) internal view returns (uint256) {
         (bool canBeProcessed, uint256 finalEvePrice, uint256 totalTokensToBurn,, uint256 pricedAt) =
             _queue.batchInfo(_batchId);
         if (!canBeProcessed) return 0;
         if (pricedAt > 0 && block.timestamp > pricedAt + _queue.MAX_BATCH_PROCESSING_TIME()) return 0;
 
-        return totalTokensToBurn.convertAssets(finalEvePrice);
+        uint256 count = _queue.unprocessedUsersCount(_batchId);
+        if (count == 0) return 0;
+
+        address[] memory users =
+            _queue.unprocessedUsers(_batchId, 0, count > MAX_USERS_COST_SCAN ? MAX_USERS_COST_SCAN : count);
+
+        uint256 closingTokens;
+        for (uint256 i = 0; i < users.length; i++) {
+            (,, uint256 evePriceAtRequestTime, uint256 tokensToBurn, uint256 priceTolerance) =
+                _queue.requestInfo(_batchId, users[i]);
+
+            if (finalEvePrice.isRelativelyLessThan(evePriceAtRequestTime, priceTolerance)) {
+                closingTokens += tokensToBurn;
+            }
+        }
+
+        return (totalTokensToBurn - closingTokens).convertAssets(finalEvePrice);
     }
 }
