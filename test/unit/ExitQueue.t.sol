@@ -1164,8 +1164,8 @@ contract ExitQueueTest is ProtocolTestBase {
         exitQueue.pushRequest(user2, EVE_PRICE_1, TOKENS_TO_BURN_1, PRICE_TOLERANCE_1_PCT);
         _priceBatch(EVE_PRICE_1);
 
-        // Forge clears transient storage between top-level test calls, so both pulls must run
-        // inside one call: put a probe with the same storage layout at the AMM address.
+        // Both pulls run inside one call through a probe with the same storage layout at the AMM
+        // address, so the pin is exercised within a single transaction on every forge version.
         vm.etch(amm, address(new PinProbeAMM()).code);
         (uint256 priceAfterFirstPull, bool secondClosedDueToSlippage) =
             PinProbeAMM(payable(amm)).pullTwiceMovingPrice(exitQueue, batchId, user1, user2, EVE_PRICE_3);
@@ -1174,10 +1174,9 @@ contract ExitQueueTest is ProtocolTestBase {
         // the ETH) must not change what this batch settles at.
         assertEq(priceAfterFirstPull, EVE_PRICE_1, "settlement price must be pinned for the transaction");
         assertFalse(secondClosedDueToSlippage, "second pull must use the pinned price");
-
-        // A new transaction reads the live price again.
-        (, uint256 price,,,) = exitQueue.batchInfo(batchId);
-        assertEq(price, EVE_PRICE_3);
+        // The pin ends with the transaction (transient storage). Whether forge clears it between
+        // a test's top-level calls depends on the forge version (1.0.0 does not), so the live read
+        // in a later transaction is covered by test_BatchInfo_InWindow_ReturnsLivePrice instead.
     }
 
     function test_LiveRedemptionOffsets_PullReducesOffsets() public {
