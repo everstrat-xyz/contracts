@@ -77,5 +77,6 @@ interface IStrategyKeeperExecutor is IKeeperExecutorBase {
 
     /// @notice Gas-bounded scan of priced batches. Aliased from `ExitQueueLimits.MAX_LIVE_PRICED_BATCHES`.
     function MAX_BATCH_SCAN() external pure returns (uint256);
+    /// @notice Gas bound on the per-user slippage-close scan of each priced batch.
     function MAX_USERS_COST_SCAN() external pure returns (uint256);
 }
