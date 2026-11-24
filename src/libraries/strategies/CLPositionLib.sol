@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Solidity compiles GPL-licensed Uniswap V3 math into this library's bytecode.
+// Distribution of the combined build is subject to GPL-2.0-or-later.
 pragma solidity ^0.8.30;
 // solhint-disable compiler-version, gas-strict-inequalities
 
@@ -275,8 +277,12 @@ library CLPositionLib {
 
     /**
      * @notice ETH value of the strategy's idle token0/token1 balances plus both positions
-     *         (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens).
-     * @dev Excludes native ETH (added by the caller). Priced via Oracle cross-rates.
+     *         (liquidity marked at `_twapSqrtPriceX96`, plus owed tokens), net of the estimated
+     *         cost of converting the paired-token side back to WETH.
+     * @dev Excludes native ETH (added by the caller). Priced via Oracle cross-rates; the exit-cost
+     *      deduction (audit G2) is documented on {CLStratLib-adjustedPairValueInETH}.
+     * @param _exitRouteFeePips Estimated paired-token to WETH route fee in parts per million
+     * @param _slippageBps The strategy's swap slippage tolerance (bps)
      */
     function inventoryValueInETH(
         IUniswapV3Pool _pool,
@@ -285,17 +291,21 @@ library CLPositionLib {
         address _weth,
         address _token0,
         address _token1,
-        uint160 _twapSqrtPriceX96
+        uint160 _twapSqrtPriceX96,
+        uint256 _exitRouteFeePips,
+        uint256 _slippageBps
     ) public view returns (uint256) {
         (uint256 _main0, uint256 _main1) = _positionAmounts(_pool, _state.main, _twapSqrtPriceX96);
         (uint256 _alt0, uint256 _alt1) = _positionAmounts(_pool, _state.alt, _twapSqrtPriceX96);
-        return CLStratLib.pairValueInETH(
+        return CLStratLib.adjustedPairValueInETH(
             _oracle,
             _weth,
             _token0,
             _token1,
             IERC20Metadata(_token0).balanceOf(address(this)) + _main0 + _alt0,
-            IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1
+            IERC20Metadata(_token1).balanceOf(address(this)) + _main1 + _alt1,
+            _exitRouteFeePips,
+            _slippageBps
         );
     }
 

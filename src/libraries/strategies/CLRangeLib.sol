@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Solidity compiles GPL-licensed Uniswap V3 math into this library's bytecode.
+// Distribution of the combined build is subject to GPL-2.0-or-later.
 pragma solidity ^0.8.30;
 // solhint-disable compiler-version, gas-strict-inequalities
 
@@ -115,7 +117,10 @@ library CLRangeLib {
      *        by main, sized at TWAP marks and padded by slippage + the route's measured cost. Falls
      *        back to a full unwind if still short.
      *      - Route untradable (quote fails or outside the oracle band): full unwind first.
-     *      - `_fullUnwind` (near-full withdrawal): full unwind first, without probing the route.
+     *      - `_fullUnwind` (near-full withdrawal): full unwind first. If WETH is still short after
+     *        the burn, the exact-output swap quotes that shortfall.
+     *      Each conversion is best effort ({CLStratLib-tryTopUpWeth}): a reverting swap leaves the
+     *      paired token in place and the caller pays out the WETH on hand (audit G7).
      */
     function sourceWeth(
         RangeContext memory _ctx,
@@ -136,10 +141,9 @@ library CLRangeLib {
             if (_tradable) {
                 uint256 _needed = _shortfall * (BASIS_POINTS + _ctx.swap.slippageBps + _costBps) / BASIS_POINTS;
                 address _paired = _ctx.swap.pairedToken;
-                uint256 _pairedBalance = IERC20Metadata(_paired).balanceOf(address(this));
-                uint256 _idlePairedValue = _paired == _ctx.token0
-                    ? _pairValueInETH(_ctx, _pairedBalance, 0)
-                    : _pairValueInETH(_ctx, 0, _pairedBalance);
+                uint256 _idlePairedValue = CLStratLib.pairedValueInETH(
+                    _ctx.swap.oracle, _paired, IERC20Metadata(_paired).balanceOf(address(this))
+                );
                 if (_needed > _idlePairedValue) {
                     CLPositionLib.decreaseLiquidityForValue(
                         _ctx.pool,
@@ -159,7 +163,7 @@ library CLRangeLib {
         // fallback when the partial path still leaves WETH short and liquidity remains.
         for (uint256 _pass; _pass < 2; ++_pass) {
             if (_fullUnwind) CLPositionLib.removeAllLiquidity(_ctx.pool, _state);
-            _convertToWeth(_ctx, _wethTarget);
+            CLStratLib.tryTopUpWeth(_weth, _wethTarget);
             if (
                 IERC20Metadata(_weth).balanceOf(address(this)) >= _wethTarget
                     || !CLPositionLib.hasLiquidity(_ctx.pool, _state)
@@ -284,22 +288,7 @@ library CLRangeLib {
         CLStratLib.swapExactIn(_ctx.swap, _path, _amountIn > _balance ? _balance : _amountIn);
     }
 
-    /// @dev Exact-output top-up to `_targetWethAmount` (balance-cap fallback in {CLStratLib-swapExactOut}).
-    function _convertToWeth(RangeContext memory _ctx, uint256 _targetWethAmount) private {
-        uint256 _wethBalance = IERC20Metadata(_ctx.swap.weth).balanceOf(address(this));
-        if (_wethBalance >= _targetWethAmount) return;
-        CLStratLib.swapExactOut(_ctx.swap, _ctx.pairedTokenToWethPath, _targetWethAmount - _wethBalance);
-    }
-
     // ============ Private: Valuation ============
-
-    function _pairValueInETH(RangeContext memory _ctx, uint256 _amount0, uint256 _amount1)
-        private
-        view
-        returns (uint256)
-    {
-        return CLStratLib.pairValueInETH(_ctx.swap.oracle, _ctx.swap.weth, _ctx.token0, _ctx.token1, _amount0, _amount1);
-    }
 
     /// @dev Long-TWAP sqrt price; reverts `UniCLStratPoolTWAPNotAvailable` (fail-closed).
     function _twapSqrtPrice(RangeContext memory _ctx) private view returns (uint160) {

@@ -51,7 +51,8 @@ import {Auth} from "../src/libraries/Auth.sol";
  *
  *      Env: PRIVATE_KEY, REGISTRY_ADDRESS, WETH_ADDRESS, POOL_ADDRESS (Aero CL pool),
  *      AERO_CL_FACTORY, SWAP_ADAPTER_ADDRESS, WETH_TO_PAIRED_TOKEN_PATH, PAIRED_TOKEN_TO_WETH_PATH,
- *      POSITION_WIDTH, REBALANCE_TICK_THRESHOLD, MAX_TICK_DEVIATION, TWAP_INTERVAL,
+ *      EXIT_ROUTE_FEE_PIPS (estimated paired-token to WETH route fee in parts per million, 500 for a
+ *      0.05% fee; marks the paired-token share of NAV down by the expected exit cost), POSITION_WIDTH, REBALANCE_TICK_THRESHOLD, MAX_TICK_DEVIATION, TWAP_INTERVAL,
  *      SHORT_TWAP_INTERVAL, MAX_TOTAL_NAV.
  */
 contract DeployAeroCLStrat is Script {
@@ -137,7 +138,8 @@ contract DeployAeroCLStrat is Script {
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: vm.envAddress("SWAP_ADAPTER_ADDRESS"),
                 wethToPairedTokenPath: vm.envBytes("WETH_TO_PAIRED_TOKEN_PATH"),
-                pairedTokenToWethPath: vm.envBytes("PAIRED_TOKEN_TO_WETH_PATH")
+                pairedTokenToWethPath: vm.envBytes("PAIRED_TOKEN_TO_WETH_PATH"),
+                exitRouteFeePips: vm.envUint("EXIT_ROUTE_FEE_PIPS")
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: int24(vm.envInt("POSITION_WIDTH")),

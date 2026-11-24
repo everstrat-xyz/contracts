@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+// Solidity compiles GPL-licensed Uniswap V3 math into this contract's bytecode.
+// Distribution of the combined build is subject to GPL-2.0-or-later.
 // solhint-disable compiler-version, import-path-check, use-natspec, ordering
 // solhint-disable gas-strict-inequalities, max-states-count
 // solhint-disable immutable-vars-naming, gas-indexed-events, gas-increment-by-one
@@ -135,6 +137,9 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     /// @notice Adapter-specific route bytes for pairedToken -> WETH swaps
     bytes public pairedTokenToWethPath;
 
+    /// @notice Estimated paired-token to WETH route fee in parts per million.
+    uint256 public exitRouteFeePips;
+
     /// @notice Slippage tolerance for inventory-balancing swaps (in basis points, 1-200)
     uint256 public swapSlippageBps;
 
@@ -175,11 +180,13 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         // a dense average rather than a cardinality-1 spot extrapolation.
         _requireTwapOracle(twapInterval);
         _requireTwapOracle(shortTwapInterval);
+        _validateRouteConfig(
+            _params.routes.swapAdapter, _params.routes.wethToPairedTokenPath, _params.routes.pairedTokenToWethPath
+        );
         swapAdapter = _params.routes.swapAdapter;
         wethToPairedTokenPath = _params.routes.wethToPairedTokenPath;
         pairedTokenToWethPath = _params.routes.pairedTokenToWethPath;
-
-        _validateRouteConfig();
+        exitRouteFeePips = _params.routes.exitRouteFeePips;
 
         swapSlippageBps = DEFAULT_SWAP_SLIPPAGE_BPS;
         _genesisTimestamp = block.timestamp;
@@ -216,10 +223,20 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     }
 
     // ============ Strategy Views ============
+    /// @dev Net of the estimated cost of converting the paired-token inventory back to WETH
+    ///      (`exitRouteFeePips` plus `swapSlippageBps`); see {CLStratLib-adjustedPairValueInETH}.
     function navInETH() public view returns (uint256) {
         return address(this).balance
             + CLPositionLib.inventoryValueInETH(
-                pool, _range, IOracle(_registry.oracle()), address(weth), address(token0), address(token1), _twapSqrtPrice()
+                pool,
+                _range,
+                IOracle(_registry.oracle()),
+                address(weth),
+                address(token0),
+                address(token1),
+                _twapSqrtPrice(),
+                exitRouteFeePips,
+                swapSlippageBps
             );
     }
 
@@ -336,8 +353,16 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
      *        TWAP/oracle (a skewed burn does not crystallize IL into NAV), the conversion swap
      *        is independently bounded, and a calm revert would stall exit liquidity when
      *        redemptions spike. See `docs/STRATEGY_GUARDRAILS.md` §1.1.1.
+     *      The paired -> WETH swap is best effort: if it reverts (quote fails, outside the
+     *      oracle band, or the swap itself fails) the paired token stays in the strategy, still
+     *      in NAV, {WethConversionSkipped} is emitted and the payout is whatever ETH/WETH is
+     *      already held — a partial withdrawal instead of a blocked one (audit G7).
      *      In both paths the receiver gets a single native ETH transfer and the return value
-     *      is the ETH actually delivered.
+     *      is the ETH actually delivered. A near-full request triggers a drain: after sourcing
+     *      WETH for the request, the strategy tries to swap leftover paired token to WETH and
+     *      pays out all WETH on hand. The payout can exceed `_amount` by the unspent part of
+     *      the NAV exit-cost mark-down plus the difference between NAV and the request. The
+     *      drain is best effort, so a failed swap leaves the payout available.
      */
     function withdraw(address _receiver, uint256 _amount)
         external
@@ -365,14 +390,20 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
             // from WETH via liquidity removal and paired-token conversion.
             uint256 _remainder = _amount - _idleETH;
 
-            // Padded by slippage, a (near-)full request would burn every position on the
-            // partial path anyway: unwind outright and skip the route-cost probe.
+            // Near-full requests use a full unwind when idle WETH falls short. The
+            // route-cost probe sizes partial burns; any swap still quotes its actual size.
             bool _nearFullWithdrawal = _amount * (BASIS_POINTS + swapSlippageBps) >= _navBeforeWithdrawal * BASIS_POINTS;
             CLRangeLib.RangeContext memory _ctx = _rangeContext();
             CLRangeLib.sourceWeth(_ctx, _range, _remainder, _nearFullWithdrawal);
 
+            // NAV is net of the estimated exit cost, so a near-full request that converts for
+            // less than the estimate would strand the difference (and leave more than the
+            // removal residue behind). Drain it: best-effort convert the leftover paired token
+            // and pay out all WETH.
+            if (_nearFullWithdrawal) CLStratLib.drainPairedToWeth();
+
             uint256 _wethBalance = weth.balanceOf(address(this));
-            uint256 _wethToUnwrap = _wethBalance < _remainder ? _wethBalance : _remainder;
+            uint256 _wethToUnwrap = _nearFullWithdrawal || _wethBalance < _remainder ? _wethBalance : _remainder;
             _withdrawn = _idleETH + _wethToUnwrap;
             if (_withdrawn == 0) revert UniCLStratInsufficientWETH();
 
@@ -419,7 +450,8 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
      * @dev Over already-materialized `tokensOwed` plus stored counters (via the live
      *      `tokensOwed - snapshot` delta in `CLPositionLib.unchargedLpFeeAmounts`). Unpoked fee growth is
      *      invisible until `sync()` or a remove/collect poke. Accrue is not required for the
-     *      view — only for durable counter updates on settle/remove.
+     *      view — only for durable counter updates on settle/remove. Paired-token fees carry
+     *      the same estimated exit-cost deduction as NAV.
      */
     function pendingPerformanceFeeInETH(uint256 _performanceFeeBps) external view returns (uint256 feeETH) {
         if (_performanceFeeBps == 0 || paused()) return 0;
@@ -443,9 +475,7 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         if (_performanceFeeBps == 0 || paused()) return 0;
 
         (uint256 _uncharged0, uint256 _uncharged1) = CLPositionLib.accrueLpFees(pool, _range);
-        if (_uncharged0 == 0 && _uncharged1 == 0) return 0;
-
-        uint256 _feeBaseETH = _pairValueInETH(_uncharged0, _uncharged1);
+        uint256 _feeBaseETH = _lpFeeBaseInETH(_uncharged0, _uncharged1);
         feeETH = _feeBaseETH * _performanceFeeBps / BASIS_POINTS;
         // Dust base: floor-division to zero must not write off the uncharged amounts.
         if (feeETH == 0) return 0;
@@ -481,16 +511,29 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         _setMaxTotalNAV(_newMaxTotalNAV);
     }
 
+    /// @dev Updating the exit route fee estimate re-marks NAV and pending LP performance fees.
     function setRouteConfig(
         address _swapAdapter,
         bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
+        bytes calldata _pairedTokenToWethPath,
+        uint256 _exitRouteFeePips
     ) external onlyAuthRole(Auth.ADMIN_ROLE) {
-        _setRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
+        _validateExitRouteFee(_exitRouteFeePips);
+        _validateRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
+
+        swapAdapter = _swapAdapter;
+        wethToPairedTokenPath = _wethToPairedTokenPath;
+        pairedTokenToWethPath = _pairedTokenToWethPath;
+        exitRouteFeePips = _exitRouteFeePips;
+
+        emit RouteConfigUpdated(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath, _exitRouteFeePips);
     }
 
     /**
      * @notice Sets the slippage tolerance for inventory-balancing swaps
+     * @dev Also moves `navInETH()`: the paired-token inventory is marked down by this tolerance
+     *      plus the exit route fee estimate. A change re-marks NAV, the EVE price, and the pending
+     *      performance fee in the block it executes. See `docs/FREEZE_RUNBOOK.md` for scheduling.
      * @param _newSwapSlippageBps Slippage in basis points (must not exceed MAX_SWAP_SLIPPAGE_BPS)
      */
     function setSwapSlippageBps(uint256 _newSwapSlippageBps) external onlyAuthRole(Auth.ADMIN_ROLE) {
@@ -607,28 +650,6 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         maxTotalNAV = _newMaxTotalNAV;
     }
 
-    function _setRouteConfig(
-        address _swapAdapter,
-        bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
-    ) private {
-        // Validate against the new values before writing storage, so no partial state
-        // mutation occurs even transiently. The storage-based _validateRouteConfig()
-        // is used by the constructor where the values are already written.
-        _validateRouteConfig(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
-
-        swapAdapter = _swapAdapter;
-        wethToPairedTokenPath = _wethToPairedTokenPath;
-        pairedTokenToWethPath = _pairedTokenToWethPath;
-
-        emit RouteConfigUpdated(_swapAdapter, _wethToPairedTokenPath, _pairedTokenToWethPath);
-    }
-
-    /// @dev Validates route config from constructor-initialised storage (values already written)
-    function _validateRouteConfig() private view {
-        _validateRouteConfig(swapAdapter, wethToPairedTokenPath, pairedTokenToWethPath);
-    }
-
     /// @dev Validates route config from explicit parameters (check before write)
     function _validateRouteConfig(
         address _swapAdapter,
@@ -699,6 +720,30 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
     function selfRevokePairedTokenConverterAllowance() external {
         if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
         pairedToken.forceApprove(address(_registry.converter()), 0);
+    }
+
+    /**
+     * @notice Self-call hook that buys `_amountOut` WETH or drains the paired balance when `_amountOut` is zero.
+     * @dev Callable only by the strategy itself. Exists so `withdraw` can attempt the
+     *      paired -> WETH swap inside a try/catch — an untradable route must not block a
+     *      partial payout (audit G7). Oracle-bounded exact-output swap with
+     *      balance-cap fallback for a positive output amount. The drain uses an exact-input
+     *      swap and requires a positive oracle value and an in-band quote.
+     */
+    function selfConvertToWeth(uint256 _amountOut) external {
+        if (msg.sender != address(this)) revert UniCLStratCallerNotSelf();
+        CLStratLib.SwapConfig memory _config = _swapConfig();
+        bytes memory _path = pairedTokenToWethPath;
+
+        if (_amountOut != 0) {
+            CLStratLib.swapExactOut(_config, _path, _amountOut);
+            return;
+        }
+
+        uint256 _balance = pairedToken.balanceOf(address(this));
+        if (_balance == 0) return;
+        (bool _tradable,) = CLStratLib.routeCostBps(_config, _path, _balance, false);
+        if (_tradable) CLStratLib.swapExactIn(_config, _path, _balance);
     }
 
     function _unpauseStrategy() private {
@@ -799,7 +844,21 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
 
     function _unchargedLpFeesInETH() internal view returns (uint256) {
         (uint256 _uncharged0, uint256 _uncharged1) = CLPositionLib.unchargedLpFeeAmounts(pool, _range);
-        return _pairValueInETH(_uncharged0, _uncharged1);
+        return _lpFeeBaseInETH(_uncharged0, _uncharged1);
+    }
+
+    function _lpFeeBaseInETH(uint256 _amount0, uint256 _amount1) internal view returns (uint256) {
+        if (_amount0 == 0 && _amount1 == 0) return 0;
+        return CLStratLib.adjustedPairValueInETH(
+            IOracle(_registry.oracle()),
+            address(weth),
+            address(token0),
+            address(token1),
+            _amount0,
+            _amount1,
+            exitRouteFeePips,
+            swapSlippageBps
+        );
     }
 
     function _swapConfig() internal view returns (CLStratLib.SwapConfig memory) {
@@ -811,12 +870,6 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
             pairedToken: address(pairedToken),
             slippageBps: swapSlippageBps
         });
-    }
-
-    function _pairValueInETH(uint256 _amount0, uint256 _amount1) internal view returns (uint256) {
-        return CLStratLib.pairValueInETH(
-            IOracle(_registry.oracle()), address(weth), address(token0), address(token1), _amount0, _amount1
-        );
     }
 
     function _giveConverterAllowances() internal {
@@ -850,6 +903,14 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
         if (_params.strategy.maxTickDeviation <= 0) revert UniCLStratInvalidConfig();
         _validateTwapInterval(_params.strategy.twapInterval, MIN_TWAP_INTERVAL);
         _validateTwapInterval(_params.strategy.shortTwapInterval, MIN_SHORT_TWAP_INTERVAL);
+        _validateExitRouteFee(_params.routes.exitRouteFeePips);
+    }
+
+    function _validateExitRouteFee(uint256 _exitRouteFeePips) private pure {
+        uint256 _maxSlippagePips = MAX_SWAP_SLIPPAGE_BPS * (CLStratLib.FEE_DENOMINATOR / BASIS_POINTS);
+        if (_exitRouteFeePips >= CLStratLib.FEE_DENOMINATOR - _maxSlippagePips) {
+            revert UniCLStratInvalidConfig();
+        }
     }
 
     function _validateTwapInterval(uint32 _interval, uint32 _min) internal pure {

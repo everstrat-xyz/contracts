@@ -253,7 +253,8 @@ contract AeroCLStratForkTest is Test {
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(adapter),
                 wethToPairedTokenPath: wethToUsdtPath,
-                pairedTokenToWethPath: usdtToWethPath
+                pairedTokenToWethPath: usdtToWethPath,
+                exitRouteFeePips: ROUTE_POOL_FEE
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: POSITION_WIDTH,

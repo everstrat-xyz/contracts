@@ -162,7 +162,8 @@ contract UniCLStratBootstrapParamsTest is Test {
             routes: IUniCLStrat.RouteConfig({
                 swapAdapter: address(adapter),
                 wethToPairedTokenPath: abi.encodePacked(WETH, ROUTE_FEE, _paired),
-                pairedTokenToWethPath: abi.encodePacked(_paired, ROUTE_FEE, WETH)
+                pairedTokenToWethPath: abi.encodePacked(_paired, ROUTE_FEE, WETH),
+                exitRouteFeePips: ROUTE_FEE
             }),
             strategy: IUniCLStrat.StrategyConfig({
                 positionWidth: _positionWidth,

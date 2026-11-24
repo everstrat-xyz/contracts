@@ -28,6 +28,8 @@ interface IUniCLStrat is IStrategy {
         address swapAdapter;
         bytes wethToPairedTokenPath;
         bytes pairedTokenToWethPath;
+        /// @dev Estimated fee for paired-token to WETH conversion, in parts per million.
+        uint256 exitRouteFeePips;
     }
 
     struct StrategyConfig {
@@ -53,7 +55,9 @@ interface IUniCLStrat is IStrategy {
     event TwapIntervalUpdated(uint32 oldInterval, uint32 newInterval);
     event ShortTwapIntervalUpdated(uint32 oldInterval, uint32 newInterval);
     event MaxTotalNAVUpdated(uint256 oldMaxTotalNAV, uint256 newMaxTotalNAV);
-    event RouteConfigUpdated(address indexed swapAdapter, bytes wethToPairedTokenPath, bytes pairedTokenToWethPath);
+    event RouteConfigUpdated(
+        address indexed swapAdapter, bytes wethToPairedTokenPath, bytes pairedTokenToWethPath, uint256 exitRouteFeePips
+    );
     event SwapSlippageUpdated(uint256 indexed oldSlippage, uint256 newSlippage);
     /// @notice Emitted when the best-effort pool unwind on pause reverted and was skipped
     event LiquidityUnwindSkipped();
@@ -61,6 +65,8 @@ interface IUniCLStrat is IStrategy {
     event ConverterAllowanceRevocationSkipped(address indexed token);
     /// @notice Emitted when paired-token recovery on `emergencyExit` was skipped (`balanceOf` or transfer failed)
     event PairedTokenTransferSkipped();
+    /// @notice Emitted when a paired -> WETH conversion on `withdraw` reverts and the strategy pays from WETH on hand.
+    event WethConversionSkipped();
 
     // ============ Errors ============
 
@@ -99,7 +105,8 @@ interface IUniCLStrat is IStrategy {
     function setRouteConfig(
         address _swapAdapter,
         bytes calldata _wethToPairedTokenPath,
-        bytes calldata _pairedTokenToWethPath
+        bytes calldata _pairedTokenToWethPath,
+        uint256 _exitRouteFeePips
     ) external;
 
     function swapSlippageBps() external view returns (uint256);
@@ -109,4 +116,11 @@ interface IUniCLStrat is IStrategy {
     function pause() external;
 
     function unpause() external;
+
+    /**
+     * @notice Buys `_amountOut` WETH with the paired token, or drains the paired balance when `_amountOut` is zero.
+     * @dev Reverts `UniCLStratCallerNotSelf` for any caller but the strategy. Exists so the
+     *      withdraw path can run the swap inside a try/catch (audit G7).
+     */
+    function selfConvertToWeth(uint256 _amountOut) external;
 }
