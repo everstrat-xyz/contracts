@@ -2529,6 +2529,18 @@ contract UniCLStratTest is UniCLStratTestBase {
         assertEq(strategy.navInETH(), navBefore);
     }
 
+    /// @dev CLS-01 follow-on: NAV no longer reads the pool TWAP, so a pool whose observation ring
+    ///      fails does not freeze NAV; only the calm gate (mints) degrades.
+    function test_NavInETH_DoesNotNeedPoolTwap() public {
+        _deposit(DEPOSIT_AMOUNT);
+        uint256 navBefore = strategy.navInETH();
+
+        pool.setObserveShouldRevert(true);
+
+        assertEq(strategy.navInETH(), navBefore);
+        assertEq(strategy.maxDeposit(), 0);
+    }
+
     /// @dev CLS-02: spot must sit within two tick spacings of the short TWAP, independent of the
     ///      wider `maxTickDeviation` band.
     function test_Deposit_RevertsWhenSpotLeavesShortTwapBand() public {

@@ -156,8 +156,8 @@ library CLPositionLib {
      * @notice Burns (and collects) roughly `_value` ETH worth of pool inventory: alt first (it is
      *         out of range and earns nothing), then main.
      * @dev Pokes and accrues LP fees first, and re-bases the fee snapshot on the remaining owed
-     *      after, since a burn credits principal to owed. Positions are valued at
-     *      `_twapSqrtPriceX96` (including owed tokens) and priced via the Oracle. Each burn rounds up
+     *      after, since a burn credits principal to owed. Positions are valued at `_sqrtPriceX96`
+     *      (the oracle-implied price NAV reads them at, including owed tokens) via the Oracle. Each burn rounds up
      *      and is capped at the whole position; everything owed is collected.
      */
     function decreaseLiquidityForValue(
@@ -168,16 +168,16 @@ library CLPositionLib {
         address _token0,
         address _token1,
         uint256 _value,
-        uint160 _twapSqrtPriceX96
+        uint160 _sqrtPriceX96
     ) public {
         _pokePositions(_pool, _state);
         _accrueLpFees(_pool, _state);
 
         uint256 _remaining = _altIsMain(_state)
             ? _value
-            : _burnForValue(_pool, _state.alt, _oracle, _weth, _token0, _token1, _value, _twapSqrtPriceX96);
+            : _burnForValue(_pool, _state.alt, _oracle, _weth, _token0, _token1, _value, _sqrtPriceX96);
         if (_remaining > 0) {
-            _burnForValue(_pool, _state.main, _oracle, _weth, _token0, _token1, _remaining, _twapSqrtPriceX96);
+            _burnForValue(_pool, _state.main, _oracle, _weth, _token0, _token1, _remaining, _sqrtPriceX96);
         }
 
         _refreshSnapshot(_pool, _state);
@@ -450,14 +450,14 @@ library CLPositionLib {
         address _token0,
         address _token1,
         uint256 _value,
-        uint160 _twapSqrtPriceX96
+        uint160 _sqrtPriceX96
     ) private returns (uint256 _remaining) {
         if (!_isValid(_position)) return _value;
 
         uint128 _liquidity = _liquidityOf(_pool, _position);
         if (_liquidity == 0) return _value;
 
-        (uint256 _amount0, uint256 _amount1) = _positionAmounts(_pool, _position, _twapSqrtPriceX96);
+        (uint256 _amount0, uint256 _amount1) = _positionAmounts(_pool, _position, _sqrtPriceX96);
         uint256 _positionValue = CLStratLib.pairValueInETH(_oracle, _weth, _token0, _token1, _amount0, _amount1);
 
         uint128 _burnLiquidity = _liquidity;

@@ -854,7 +854,6 @@ abstract contract CLStrat is IUniCLStrat, RegistryClient, Pausable, ReentrancyGu
             tickSpacing: tickSpacing,
             positionWidth: positionWidth,
             rebalanceTickThreshold: rebalanceTickThreshold,
-            twapInterval: twapInterval,
             swap: _swapConfig(),
             wethToPairedTokenPath: wethToPairedTokenPath,
             pairedTokenToWethPath: pairedTokenToWethPath

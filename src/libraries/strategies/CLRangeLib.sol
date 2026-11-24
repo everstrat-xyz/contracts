@@ -8,7 +8,6 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 
 import {FixedPoint96} from "../integrations/uniswap/FixedPoint96.sol";
 import {FullMath} from "../integrations/uniswap/FullMath.sol";
-import {TickMath} from "../integrations/uniswap/TickMath.sol";
 import {TickUtils} from "../integrations/uniswap/TickUtils.sol";
 
 import {IUniCLStrat} from "../../interfaces/strategies/IUniCLStrat.sol";
@@ -47,10 +46,7 @@ library CLRangeLib {
     uint256 internal constant IDLE_REDEPLOY_MIN_WETH = 0.01 ether;
     uint256 internal constant BASIS_POINTS = 10_000;
 
-    /**
-     * @notice Strategy configuration snapshot read from storage/immutables at call time.
-     * @param twapInterval Long TWAP window marking positions in the partial-burn sizing
-     */
+    /// @notice Strategy configuration snapshot read from storage/immutables at call time.
     struct RangeContext {
         IUniswapV3Pool pool;
         CLPoolLib.Venue venue;
@@ -59,7 +55,6 @@ library CLRangeLib {
         int24 tickSpacing;
         int24 positionWidth;
         int24 rebalanceTickThreshold;
-        uint32 twapInterval;
         CLStratLib.SwapConfig swap;
         bytes wethToPairedTokenPath;
         bytes pairedTokenToWethPath;
@@ -157,8 +152,8 @@ library CLRangeLib {
      * @dev The paired -> WETH leg goes through the configured route, which generally does not
      *      trade through this pool, so the decision is driven by that route:
      *      - Route tradable: idle WETH, then idle paired token, then a partial burn of alt followed
-     *        by main, sized at TWAP marks and padded by slippage + the route's measured cost. Falls
-     *        back to a full unwind if still short.
+     *        by main, sized at the oracle-implied price NAV uses and padded by slippage + the
+     *        route's measured cost. Falls back to a full unwind if still short.
      *      - Route untradable (quote fails or outside the oracle band): full unwind first.
      *      - `_fullUnwind` (near-full withdrawal): full unwind first. If WETH is still short after
      *        the burn, the exact-output swap quotes that shortfall.
@@ -196,7 +191,7 @@ library CLRangeLib {
                         _ctx.token0,
                         _ctx.token1,
                         _needed - _idlePairedValue,
-                        _twapSqrtPrice(_ctx)
+                        CLPositionLib.oracleSqrtPriceX96(_ctx.swap.oracle, _weth, _ctx.token0, _ctx.token1)
                     );
                 }
             }
@@ -333,13 +328,6 @@ library CLRangeLib {
     }
 
     // ============ Private: Valuation ============
-
-    /// @dev Long-TWAP sqrt price; reverts `UniCLStratPoolTWAPNotAvailable` (fail-closed).
-    function _twapSqrtPrice(RangeContext memory _ctx) private view returns (uint160) {
-        (bool _ok, int24 _meanTick) = TickUtils.tryMeanTick(_ctx.pool, _ctx.twapInterval);
-        if (!_ok) revert IUniCLStrat.UniCLStratPoolTWAPNotAvailable();
-        return TickMath.getSqrtRatioAtTick(_meanTick);
-    }
 
     function _abs(int24 _value) private pure returns (uint24) {
         return uint24(_value < 0 ? -_value : _value);

@@ -70,7 +70,13 @@ UniCLStrat::navInETH()
 │   └── It should mark down the paired side whichever of token0/token1 is WETH
 ├── Given the strategy has active pool positions
 │   ├── It should include liquidity and tokens owed from the pool
-│   └── It should mark down only the paired share of the positions
+│   ├── It should read position amounts at the oracle-implied price, not the pool TWAP
+│   ├── It should mark down only the paired share of the positions
+│   └── It should count an alt record on the main key only once
+├── Given the pool TWAP drifts from the oracle or observe reverts
+│   └── It should not change
+├── Given a pool mint is half paid
+│   └── It should revert with UniCLStratMintInProgress
 ├── Given swapSlippageBps changes
 │   └── It should move the mark-down by the change times the paired value
 └── Given the strategy has no balances or positions
@@ -105,6 +111,12 @@ UniCLStrat::isHealthy()
 │   └── It should return false
 ├── Given current tick deviates from center by more than rebalanceTickThreshold
 │   └── It should return false
+├── Given the Converter is paused
+│   └── It should return true
+├── Given idle WETH / paired inventory exceeds 1% of the position value and 0.01 WETH
+│   └── It should return false
+├── Given idle inventory is below 0.01 WETH
+│   └── It should return true
 └── Given current tick is calm and within threshold
     └── It should return true
 
@@ -118,6 +130,8 @@ UniCLStrat::deposit()
 ├── Given msg.value equals remaining headroom to maxTotalNAV
 │   └── It should accept the deposit (msg.value already counted in navInETH)
 ├── Given pool is not calm
+│   └── It should revert with UniCLStratNotCalm
+├── Given spot is more than two tick spacings from the short TWAP (inside maxTickDeviation)
 │   └── It should revert with UniCLStratNotCalm
 ├── Given spot tick diverges from long TWAP within maxTickDeviation
 │   └── It should size mint liquidity at spot and complete deposit
@@ -187,6 +201,10 @@ UniCLStrat::withdraw(address _receiver, uint256 _amount)
     ├── It should rebalance remaining inventory only if pool is calm
     ├── It should re-add liquidity only if pool is calm
     ├── It should still complete the unwind and payout when the pool is not calm (re-add skipped)
+    ├── When idle native ETH is most of the request
+    │   └── It should judge near-full on the remainder against NAV without idle ETH (no forced full unwind)
+    ├── When the re-add's alt candidate equals the main range
+    │   └── It should leave the leftover idle instead of placing alt on the main key
     ├── When the paired -> WETH swap reverts (quote fails, outside the oracle band, or swap failure)
     │   ├── It should emit WethConversionSkipped and keep the paired token in NAV
     │   └── It should pay out the ETH/WETH already held (partial withdrawal) instead of reverting
@@ -202,6 +220,10 @@ UniCLStrat::rebalance()
 │   └── It should revert with StrategyIsHealthy
 ├── Given spot tick diverges from long TWAP within maxTickDeviation
 │   └── It should size mint liquidity at spot and complete rebalance
+├── Given the main range is well placed and only idle inventory makes it unhealthy
+│   └── It should redeploy the idle inventory without re-centering
+├── Given the re-centered main range lands on a stale alt key
+│   └── It should not count it twice (a full unwind clears the alt record)
 └── Given caller is the registered StrategyManager and strategy is unhealthy but calm
     ├── It should poke then accrue pending LP fees before remove/collect
     ├── It should remove and collect existing liquidity
@@ -238,6 +260,9 @@ UniCLStrat::pause()
 │   ├── It should still revoke the WETH Converter allowance
 │   ├── It should leave the paired token's Converter allowance unchanged
 │   └── It should emit ConverterAllowanceRevocationSkipped for the paired token
+├── Given the Registry was rewired to another Converter since the allowances were granted
+│   ├── It should revoke the allowances from the Converter that received them
+│   └── It should grant the current Converter on unpause()
 ├── Given WETH rejects zero approval
 │   └── It should revert
 └── Given the pause-time liquidity unwind was skipped and the pool has recovered
@@ -343,7 +368,9 @@ UniCLStrat::setTwapInterval(uint32 _newTwapInterval)
 │   └── It should revert with UniCLStratInvalidConfig
 ├── Given pool.observe cannot serve the new interval
 │   └── It should revert with UniCLStratPoolTWAPNotAvailable (storage unchanged)
-├── Given in-use observationCardinality is below ceil(newInterval / MAX_BLOCK_SECONDS)
+├── Given new interval is not above shortTwapInterval
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given in-use observationCardinality is below ceil(newInterval / MAX_BLOCK_SECONDS) + 1
 │   └── It should revert with UniCLStratInsufficientObservationCardinality (storage unchanged)
 └── Given caller has ADMIN_ROLE and the pool can serve the interval
     └── It should update twapInterval and emit TwapIntervalUpdated
@@ -355,10 +382,20 @@ UniCLStrat::setShortTwapInterval(uint32 _newShortTwapInterval)
 │   └── It should revert with UniCLStratInvalidConfig
 ├── Given new interval is above MAX_TWAP_INTERVAL
 │   └── It should revert with UniCLStratInvalidConfig
+├── Given new interval is not below twapInterval
+│   └── It should revert with UniCLStratInvalidConfig
 ├── Given pool.observe cannot serve the new interval
 │   └── It should revert with UniCLStratPoolTWAPNotAvailable (storage unchanged)
 └── Given caller has ADMIN_ROLE and the pool can serve the interval
     └── It should update shortTwapInterval and emit ShortTwapIntervalUpdated
+
+UniCLStrat::range and calm-band setters
+├── Given positionWidth below 2 or positionWidth * tickSpacing above MAX_TICK / 2
+│   └── It should revert with UniCLStratInvalidConfig
+├── Given rebalanceTickThreshold below tickSpacing - 1 or at least positionWidth * tickSpacing
+│   └── It should revert with UniCLStratInvalidConfig
+└── Given maxTickDeviation above MAX_TICK
+    └── It should revert with UniCLStratInvalidConfig
 
 UniCLStrat::uniswapV3MintCallback(uint256 _amount0, uint256 _amount1, bytes _data)
 ├── Given caller is not the pool
